@@ -1,0 +1,371 @@
+//! Class coefficients and original-item contributions for combat attributes.
+
+use crate::{characters::Character, progress::Progress, starter::Item};
+use reko_assets::{CellValue, Table};
+use std::{collections::HashMap, path::Path};
+
+pub(crate) fn integer(row: &[CellValue], column: usize) -> i32 {
+    match row.get(column) {
+        Some(CellValue::U8(v)) => i32::from(*v),
+        Some(CellValue::I8(v)) => i32::from(*v),
+        Some(CellValue::U16(v)) => i32::from(*v),
+        Some(CellValue::I16(v)) => i32::from(*v),
+        Some(CellValue::U32(v)) => *v as i32,
+        Some(CellValue::I32(v)) => *v,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn master_rogue_attributes_use_original_daggers_and_reference_coefficients() {
+        let game = reko_common::game_dir();
+        let rules = Path::new("../../logs/reference-coefficients.csv");
+        let alternative = Path::new("logs/reference-coefficients.csv");
+        let rules = if rules.exists() { rules } else { alternative };
+        if !game.join("Data/item_org_us.tbl").exists() || !rules.exists() {
+            return;
+        }
+        let catalog = Catalog::load(&game, rules).unwrap();
+        assert!(catalog.equip_slot(160100001, 8));
+        assert!(!catalog.equip_slot(160100001, 6));
+        assert!(catalog.two_handed(160100001));
+        for id in [391010000, 370004000, 379064000, 379060000] {
+            assert!(catalog.item(id).is_some(), "missing test item {id}");
+        }
+        let character = Character {
+            slot: 1,
+            name: "Rogue80".into(),
+            race: 2,
+            class: 108,
+            face: 0,
+            hair: 0,
+            stats: [60, 150, 255, 50, 50],
+        };
+        let mut gear = [Item::default(); 14];
+        gear[6] = Item {
+            id: 110110001,
+            durability: 4000,
+            count: 1,
+        };
+        gear[8] = gear[6];
+        let stats = catalog
+            .calculate(
+                &character,
+                &Progress {
+                    level: 80,
+                    points: [0; 9],
+                },
+                &gear,
+            )
+            .unwrap();
+        assert_eq!(
+            (stats.hp, stats.mp, stats.attack, stats.defence),
+            (2690, 4110, 75, 80)
+        );
+        assert_eq!((stats.weight, stats.max_weight), (40, 7000));
+        gear[6].durability = 0;
+        gear[8].durability = 0;
+        let broken = catalog
+            .calculate(
+                &character,
+                &Progress {
+                    level: 80,
+                    points: [0; 9],
+                },
+                &gear,
+            )
+            .unwrap();
+        assert!(broken.attack < stats.attack);
+        gear[6].durability = 4000;
+        gear[8].durability = 4000;
+        assert_eq!(
+            catalog
+                .calculate(
+                    &character,
+                    &Progress {
+                        level: 80,
+                        points: [0; 9]
+                    },
+                    &gear
+                )
+                .unwrap()
+                .attack,
+            stats.attack
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Stats {
+    pub hp: u16,
+    pub mp: u16,
+    pub attack: u16,
+    pub defence: u16,
+    pub max_weight: u16,
+    pub weight: u16,
+    pub delay_ms: u64,
+    pub range: f32,
+    pub hit_rate: f32,
+    pub evasion: f32,
+    pub weapon_kind: u8,
+    pub resistance: [u16; 6],
+    pub bonus_stats: [u16; 5],
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            hp: 100,
+            mp: 100,
+            attack: 1,
+            defence: 0,
+            max_weight: 1500,
+            weight: 0,
+            delay_ms: 1100,
+            range: 2.0,
+            hit_rate: 1.0,
+            evasion: 1.0,
+            weapon_kind: 0,
+            resistance: [0; 6],
+            bonus_stats: [0; 5],
+        }
+    }
+}
+
+pub(crate) struct Catalog {
+    coefficients: HashMap<u16, [f64; 14]>,
+    items: HashMap<u32, Vec<CellValue>>,
+    extensions: HashMap<u8, HashMap<u32, Vec<CellValue>>>,
+}
+
+impl Catalog {
+    pub fn equip_slot(&self, id: u32, slot: usize) -> bool {
+        let Some((row, Some(_))) = self.item(id) else {
+            return false;
+        };
+        match integer(row, 12) {
+            0 => matches!(slot, 6 | 8),
+            1 | 3 => slot == 6,
+            2 | 4 => slot == 8,
+            5 => slot == 4,
+            6 => slot == 10,
+            7 => slot == 1,
+            8 => slot == 12,
+            9 => slot == 13,
+            10 => matches!(slot, 0 | 2),
+            11 => slot == 3,
+            12 => matches!(slot, 9 | 11),
+            13 => slot == 5,
+            14 => slot == 7,
+            _ => false,
+        }
+    }
+
+    pub fn two_handed(&self, id: u32) -> bool {
+        self.item(id)
+            .is_some_and(|(row, _)| matches!(integer(row, 12), 3 | 4))
+    }
+
+    pub fn equipment_mask(&self, id: u32, slot: usize) -> Option<u16> {
+        if !self.equip_slot(id, slot) {
+            return None;
+        }
+        Some(if self.two_handed(id) {
+            (1 << 6) | (1 << 8)
+        } else {
+            1 << slot
+        })
+    }
+
+    pub fn bag_weight(&self, bag: &[Item]) -> u16 {
+        bag.iter()
+            .filter_map(|item| {
+                self.item(item.id)
+                    .map(|(row, _)| integer(row, 18).max(0) as u32 * u32::from(item.count))
+            })
+            .sum::<u32>()
+            .min(32767) as u16
+    }
+
+    pub fn load(game: &Path, rules: &Path) -> anyhow::Result<Self> {
+        let mut coefficients = HashMap::new();
+        for line in std::fs::read_to_string(rules)?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let cells: Vec<_> = line
+                .trim()
+                .trim_start_matches('\u{feff}')
+                .split(',')
+                .collect();
+            anyhow::ensure!(cells.len() == 15, "invalid coefficient record");
+            let class = cells[0].parse()?;
+            let mut values = [0.0; 14];
+            for (out, input) in values.iter_mut().zip(&cells[1..]) {
+                *out = input.parse()?;
+            }
+            coefficients.insert(class, values);
+        }
+        let table =
+            Table::from_encrypted_bytes(&std::fs::read(game.join("Data/item_org_us.tbl"))?)?;
+        let items = table
+            .rows
+            .into_iter()
+            .map(|row| (integer(&row, 0) as u32, row))
+            .collect::<HashMap<_, _>>();
+        let mut extensions = HashMap::new();
+        for row in items.values() {
+            let group = integer(row, 1) as u8;
+            if extensions.contains_key(&group) {
+                continue;
+            }
+            let file = game.join(format!("Data/Item_Ext_{group}_us.tbl"));
+            if file.exists() {
+                let table = Table::from_encrypted_bytes(&std::fs::read(file)?)?;
+                extensions.insert(
+                    group,
+                    table
+                        .rows
+                        .into_iter()
+                        .map(|row| (integer(&row, 0) as u32, row))
+                        .collect(),
+                );
+            }
+        }
+        Ok(Self {
+            coefficients,
+            items,
+            extensions,
+        })
+    }
+
+    pub(crate) fn item(&self, id: u32) -> Option<(&[CellValue], Option<&[CellValue]>)> {
+        let base = self.items.get(&(id / 1000 * 1000))?;
+        let extension = self
+            .extensions
+            .get(&(integer(base, 1) as u8))
+            .and_then(|table| table.get(&(id % 1000)));
+        Some((base, extension.map(Vec::as_slice)))
+    }
+
+    pub(crate) fn item_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.items.iter().flat_map(|(id, base)| {
+            self.extensions
+                .get(&(integer(base, 1) as u8))
+                .into_iter()
+                .flat_map(move |table| {
+                    table
+                        .keys()
+                        .filter(|ext| **ext < 1000)
+                        .map(move |ext| id + ext)
+                })
+        })
+    }
+
+    pub fn calculate(
+        &self,
+        character: &Character,
+        progress: &Progress,
+        gear: &[Item; 14],
+    ) -> anyhow::Result<Stats> {
+        self.calculate_bonuses(character, progress, gear, [0; 5])
+    }
+
+    pub fn calculate_bonuses(
+        &self,
+        character: &Character,
+        progress: &Progress,
+        gear: &[Item; 14],
+        bonuses: [u16; 5],
+    ) -> anyhow::Result<Stats> {
+        let c = self
+            .coefficients
+            .get(&character.class)
+            .ok_or_else(|| anyhow::anyhow!("missing coefficient class {}", character.class))?;
+        let level = f64::from(progress.level);
+        let [strength, stamina, dexterity, intelligence, _] =
+            std::array::from_fn(|i| f64::from(character.stats[i]) + f64::from(bonuses[i]));
+        let rogue = matches!(character.class % 100, 2 | 7 | 8);
+        let mut damage = 0;
+        let mut kind = 0;
+        let mut armor = 0;
+        let mut weight = 0;
+        let mut delay_ms = 1100;
+        let mut range = 2.0;
+        for (slot, item) in gear.iter().enumerate().filter(|(_, item)| item.id != 0) {
+            let Some((base, extension)) = self.item(item.id) else {
+                anyhow::bail!("unresolved equipped item {}", item.id);
+            };
+            let extra = |column| extension.map_or(0, |row| integer(row, column));
+            weight += integer(base, 18).max(0);
+            let condition = if item.durability == 0 { 2 } else { 1 };
+            armor += (integer(base, 22).max(0) + extra(14).max(0)) / condition;
+            if matches!(slot, 6 | 8) {
+                let attack = (integer(base, 15).max(0) + extra(8).max(0)) / condition;
+                let weapon_kind = integer(base, 10) as u8;
+                let bow = matches!(weapon_kind / 10, 7 | 8 | 10);
+                if slot == 6 || bow {
+                    kind = weapon_kind;
+                    damage = attack;
+                    delay_ms = (integer(base, 16).max(1) as u64) * 10;
+                    range = integer(base, 17).max(10) as f32 / 10.0;
+                } else if weapon_kind / 10 != 6 {
+                    damage += attack / 2;
+                }
+            }
+        }
+        damage = damage.max(3);
+        let coefficient = match kind / 10 {
+            1 => c[0],
+            2 => c[1],
+            3 => c[2],
+            4 | 5 => c[3],
+            6 => c[4],
+            7 | 8 | 10 => c[7],
+            11 => c[6],
+            _ => 0.0,
+        };
+        let ap_stat = if rogue { dexterity } else { strength };
+        let extra_ap = if rogue {
+            3.0
+        } else {
+            3.0 + (strength - 150.0).max(0.0) - if strength == 160.0 { 1.0 } else { 0.0 }
+        };
+        let ap = (0.005 * f64::from(damage) * (ap_stat + 40.0)
+            + coefficient * f64::from(damage) * level * ap_stat)
+            .trunc()
+            + extra_ap;
+        let hp = (c[8] * level * level * stamina
+            + 0.1 * level * stamina
+            + (stamina / 5.0).trunc()
+            + 20.0)
+            .clamp(1.0, 14000.0) as u16;
+        let mp = if c[9] != 0.0 {
+            let intellect = intelligence + 30.0;
+            c[9] * level * level * intellect
+                + 0.2 * level * intellect
+                + (intellect / 5.0).trunc()
+                + 20.0
+        } else {
+            c[10] * level * level * stamina + 0.1 * level * stamina + (stamina / 5.0).trunc()
+        };
+        Ok(Stats {
+            hp,
+            mp: mp.clamp(1.0, 32767.0) as u16,
+            attack: ap.clamp(1.0, 32767.0) as u16,
+            defence: (c[11] * (level + f64::from(armor))).clamp(0.0, 32767.0) as u16,
+            max_weight: ((strength + level) * 50.0).min(32767.0) as u16,
+            weight: weight.min(32767) as u16,
+            delay_ms,
+            range,
+            hit_rate: (1.0 + c[12] * level * dexterity) as f32,
+            evasion: (1.0 + c[13] * level * dexterity) as f32,
+            weapon_kind: kind,
+            resistance: [0; 6],
+            bonus_stats: bonuses,
+        })
+    }
+}

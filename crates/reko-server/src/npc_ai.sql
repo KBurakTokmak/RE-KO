@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS world_monster_ai (
+ prototype INTEGER PRIMARY KEY, act_type INTEGER NOT NULL, damage INTEGER NOT NULL,
+ hit_rate INTEGER NOT NULL, attack_delay INTEGER NOT NULL, walk_speed INTEGER NOT NULL,
+ run_speed INTEGER NOT NULL, attack_range INTEGER NOT NULL, search_range INTEGER NOT NULL,
+ tracing_range INTEGER NOT NULL, bulk INTEGER NOT NULL, direct_attack INTEGER NOT NULL,
+ magic1 INTEGER NOT NULL, magic2 INTEGER NOT NULL, magic3 INTEGER NOT NULL,
+ family INTEGER NOT NULL, stand_ms INTEGER NOT NULL);

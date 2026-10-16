@@ -1,0 +1,23 @@
+[package]
+name = "reko-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "reko"
+path = "src/main.rs"
+
+[[bin]]
+name = "XPatch"
+path = "src/xpatch_stub.rs"
+
+[dependencies]
+reko-common.workspace = true
+reko-assets.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

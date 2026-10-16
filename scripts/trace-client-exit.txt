@@ -1,0 +1,6 @@
+.echo RE-KO client termination trace
+.time
+lm
+bu ntdll!RtlExitUserProcess ".echo EXIT_USER_PROCESS; .time; kb 30; r; dd @esp L30; lm; gc"
+bu KERNELBASE!TerminateProcess ".echo TERMINATE_PROCESS; .time; kb 30; r; dd @esp L30; gc"
+g

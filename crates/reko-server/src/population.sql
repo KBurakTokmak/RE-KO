@@ -1,0 +1,24 @@
+CREATE TABLE IF NOT EXISTS world_town_starts (
+    zone INTEGER PRIMARY KEY, karus_x INTEGER NOT NULL, karus_z INTEGER NOT NULL,
+    elmo_x INTEGER NOT NULL, elmo_z INTEGER NOT NULL,
+    range_x INTEGER NOT NULL, range_z INTEGER NOT NULL, source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS world_spawn_conditions (
+    entity_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL, reason TEXT NOT NULL,
+    dungeon INTEGER NOT NULL, special INTEGER NOT NULL, trap INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS world_spawns (
+    id INTEGER PRIMARY KEY CHECK(id BETWEEN 12000 AND 32767),
+    source TEXT NOT NULL, source_row INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+    monster INTEGER NOT NULL CHECK(monster IN (0,1)), zone INTEGER NOT NULL,
+    prototype INTEGER NOT NULL, appearance INTEGER NOT NULL, name TEXT NOT NULL,
+    kind INTEGER NOT NULL, selling_group INTEGER NOT NULL, nation INTEGER NOT NULL,
+    level INTEGER NOT NULL, size INTEGER NOT NULL, weapon1 INTEGER NOT NULL,
+    weapon2 INTEGER NOT NULL, direction INTEGER NOT NULL,
+    x0 INTEGER NOT NULL, z0 INTEGER NOT NULL, x1 INTEGER NOT NULL, z1 INTEGER NOT NULL,
+    hp INTEGER NOT NULL, armor INTEGER NOT NULL,
+    fire_r INTEGER NOT NULL, cold_r INTEGER NOT NULL, lightning_r INTEGER NOT NULL,
+    magic_r INTEGER NOT NULL, disease_r INTEGER NOT NULL, poison_r INTEGER NOT NULL,
+    respawn_ms INTEGER NOT NULL, regen_type INTEGER NOT NULL, move_type INTEGER NOT NULL,
+    path TEXT NOT NULL, UNIQUE(source,source_row,ordinal)
+);

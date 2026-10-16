@@ -1,0 +1,21 @@
+[package]
+name = "reko-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reko-common.workspace = true
+reko-assets.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+mlua = { version = "0.11", features = ["lua54", "vendored", "error-send"] }
+
+[lints]
+workspace = true

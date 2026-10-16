@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/reko-common",
+    "crates/reko-assets",
+    "crates/reko-server",
+    "crates/reko-serverd",
+    "crates/reko-tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+reko-common = { path = "crates/reko-common" }
+reko-assets = { path = "crates/reko-assets" }
+reko-server = { path = "crates/reko-server" }
+
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+opt-level = 2
