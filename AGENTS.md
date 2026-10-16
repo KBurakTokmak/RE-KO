@@ -24,6 +24,8 @@ bounded coverage and missing systems; a handler's existence is not full fidelity
 - Keep scripts and documentation path-independent. Resolve paths from the
   repository/script location or configuration; do not embed personal drive paths.
 - Preserve required license attribution when incorporating substantial source.
+- Wait for explicit owner confirmation before pushing to GitHub. Open pull
+  requests only when requested; do not infer push approval from implementation work.
 
 ## Implementation
 

@@ -55,6 +55,12 @@ combat from an empty database.
 
 ## Start and stop
 
+Double-click `server_starter.bat` in the repository root to build and start
+the background server and its client-startup watcher. Double-click
+`server_stopper.bat` to stop this checkout's server/watcher and checkpoint
+the save for copying (Python is required for the checkpoint). The scripts
+resolve paths from their own location. They do not manage reference SQL services.
+
 ```powershell
 # Background daemon, capture and client-startup observer
 .\scripts\Start-ServerWatch.ps1

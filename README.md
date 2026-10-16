@@ -56,6 +56,9 @@ With local data prepared, run from the repository root:
 .\scripts\Start-ServerWatch.ps1
 ```
 
+You can also double-click `server_starter.bat`; use `server_stopper.bat` to stop
+the server and its startup watcher.
+
 This starts the server in the background with login on TCP 15100 and game traffic
 on TCP 15001. For an attached terminal session, use `cargo run -p reko-serverd`.
 The daemon stores characters and imported rules in local `reko.db`.
