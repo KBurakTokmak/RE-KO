@@ -27,6 +27,9 @@ names; each empty slot is57bytes. Selection04 success uses zone:u8,
 x/z:u16,y:i16 scaled by0.1 and an environmental byte (0075F270), not weather
 floats. Selection/start names and character ownership are validated.
 
+Password registration/failure and nation-choice semantics are documented in
+[accounts](accounts.md). Credential packets must not enter hex captures.
+
 ## World entry
 
 Native0069BC50 dispatches game opcodes. On matching0D start, send0E full player

@@ -16,6 +16,7 @@ rusqlite.workspace = true
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 mlua = { version = "0.11", features = ["lua54", "vendored", "error-send"] }
+argon2 = { version = "0.5.3", features = ["std"] }
 
 [lints]
 workspace = true

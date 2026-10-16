@@ -216,6 +216,7 @@ mod tests {
         {
             let mut db = lobby.db.lock().unwrap();
             crate::characters::ensure_account(&db, "test").unwrap();
+            crate::characters::set_nation(&db, "test", 1).unwrap();
             assert_eq!(
                 crate::characters::create(&mut db, "test", &character).unwrap(),
                 0

@@ -75,8 +75,8 @@ Stop-Process -Id $serverProcess.Id
 Alternatively, `cargo run -p reko-serverd` runs in the terminal; Ctrl+C stops it.
 Stop the daemon before replacing its Windows executable or importing game data.
 Ports are15100/login and15001/game. The server currently binds all interfaces
-and advertises loopback. Public hosting and authenticated LAN operation are
-not supported; see the authentication backlog.
+and advertises loopback. Public hosting and reliable simultaneous clients behind one IP remain
+unsupported; see [accounts](re/accounts.md).
 
 ## Client and persistence
 

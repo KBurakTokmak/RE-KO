@@ -150,6 +150,7 @@ mod tests {
         crate::characters::initialize(&db).unwrap();
         initialize(&db).unwrap();
         crate::characters::ensure_account(&db, "test").unwrap();
+        crate::characters::set_nation(&db, "test", 1).unwrap();
         let c = Character {
             slot: 0,
             name: "Warrior".into(),

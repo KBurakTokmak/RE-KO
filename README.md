@@ -11,7 +11,8 @@ renderer/client and an in-process game host have not been implemented.
 
 ## What works today
 
-- Local login, nation selection, character creation and persistent characters.
+- First-login password registration, password validation, permanent per-server
+  nation selection, character creation and persistent characters.
 - Movement, sitting, location persistence, Town and zone gates, including
   walkthrough Eslant teleport triggers.
 - Inventory, equipment, buying/selling, repairs, account storage, and normal anvil
@@ -59,9 +60,10 @@ This starts the server in the background with login on TCP 15100 and game traffi
 on TCP 15001. For an attached terminal session, use `cargo run -p reko-serverd`.
 The daemon stores characters and imported rules in local `reko.db`.
 
-**Local testing only:** account passwords are not currently validated, the game
-session uses a temporary login association, and the default listeners bind all
-interfaces. Do not expose this development server to the public internet.
+**Trusted networks only:** passwords are validated, but the legacy game-session
+handoff still uses a temporary IP association and the default listeners bind
+all interfaces. Do not expose this development server to the public internet.
+See [accounts](docs/re/accounts.md) for first-login registration and migration.
 
 ## Repository layout
 

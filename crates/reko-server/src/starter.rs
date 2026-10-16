@@ -237,6 +237,7 @@ mod tests {
         crate::characters::initialize(&db).unwrap();
         initialize(&db).unwrap();
         crate::characters::ensure_account(&db, "admin").unwrap();
+        crate::characters::set_nation(&db, "admin", 1).unwrap();
         for (slot, class, race) in [(0, 102, 2), (1, 104, 2), (2, 103, 3)] {
             let character = crate::characters::Character {
                 slot,

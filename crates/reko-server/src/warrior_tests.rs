@@ -33,6 +33,7 @@ async fn warrior_combat_recovery_buffs_and_shared_admin_authorization() {
     {
         let db = lobby.db.lock().unwrap();
         crate::characters::ensure_account(&db, "testing").unwrap();
+        crate::characters::set_nation(&db, "testing", 1).unwrap();
         db.execute(
             "INSERT INTO lobby_characters VALUES ('testing',0,'WarriorFixture',1,106,0,0,?1)",
             [character.stats.as_slice()],

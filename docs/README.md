@@ -11,6 +11,7 @@ generated exports, account lists and deployment history do not belong here.
 | [Testing](testing.md) | Automated checks and useful in-game regression tests |
 | [Feature backlog](design/1453-feature-backlog.md) | Selectable missing/partial systems with source pointers |
 | [Protocol](re/protocol.md) | Native packet layouts and UI ownership requirements |
+| [Accounts](re/accounts.md) | First-login password registration and permanent server faction |
 | [Tables](re/tbl.md) | TBL cipher and binary layout |
 | [Skills and combat](re/skills-combat.md) | Supported effects, formulas, costs and known gaps |
 | [World and services](re/world-services.md) | Spawns, AI, loot, equipment, merchants and travel |

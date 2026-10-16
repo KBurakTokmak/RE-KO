@@ -302,6 +302,7 @@ mod tests {
         crate::characters::initialize(&db).unwrap();
         initialize(&db).unwrap();
         crate::characters::ensure_account(&db, "leveltest").unwrap();
+        crate::characters::set_nation(&db, "leveltest", 1).unwrap();
         let insert = || {
             db.execute(
                 "INSERT INTO lobby_characters VALUES('leveltest',0,'LevelTest',2,102,0,0,?1)",

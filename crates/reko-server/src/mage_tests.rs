@@ -31,6 +31,7 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
     {
         let db = lobby.db.lock().unwrap();
         crate::characters::ensure_account(&db, "mage").unwrap();
+        crate::characters::set_nation(&db, "mage", 1).unwrap();
         db.execute(
             "INSERT INTO lobby_characters VALUES ('mage',0,'MageTest',3,110,0,0,?1)",
             [character.stats.as_slice()],

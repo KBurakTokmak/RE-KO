@@ -351,6 +351,7 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         crate::characters::initialize(&db).unwrap();
         crate::characters::ensure_account(&db, "admin").unwrap();
+        crate::characters::set_nation(&db, "admin", 1).unwrap();
         let character = crate::characters::Character {
             slot: 0,
             name: "tester".into(),

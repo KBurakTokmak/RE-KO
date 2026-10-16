@@ -11,6 +11,7 @@ use tracing::Instrument;
 
 mod admin;
 mod archery;
+mod auth;
 mod characters;
 mod chat;
 mod combat;
@@ -236,7 +237,7 @@ async fn handle_payload(
     peer: SocketAddr,
     crypt: &mut Option<JvCrypt>,
     payload: &[u8],
-    lobby: &lobby::Lobby,
+    lobby: &Arc<lobby::Lobby>,
 ) {
     if payload.is_empty() {
         return;
@@ -271,20 +272,14 @@ async fn handle_payload(
         }
         // Opcode 0xF3: LS_LOGIN
         0xF3 => {
-            let mut username = String::new();
-            if payload.len() >= 3 {
-                let ulen = u16::from_le_bytes([payload[1], payload[2]]) as usize;
-                if payload.len() >= 3 + ulen + 2 {
-                    username = String::from_utf8_lossy(&payload[3..3 + ulen]).to_string();
-                }
-            }
-            tracing::info!(%peer, username = %username, "handling LS_LOGIN (0xF3) request");
-            if let Err(error) = lobby.record_login(peer.ip(), &username) {
-                tracing::error!(%peer, %error, "failed to associate lobby account");
-            }
-            // Reply: opcode 0xF3, result 1 (success), version 1453 (0x05AD), role 1
-            let response_payload = [0xF3, 0x01, 0xAD, 0x05, 0x01, 0x00];
-            send_response(sock, peer, crypt, &response_payload, "LS_LOGIN (0xF3)").await;
+            let result = auth::login(lobby.clone(), peer.ip(), payload).await;
+            tracing::info!(%peer,result,"login authentication result");
+            let response = if result == 1 {
+                vec![0xF3, 1, 0xAD, 5, 1, 0]
+            } else {
+                vec![0xF3, result]
+            };
+            send_response(sock, peer, crypt, &response, "LS_LOGIN (0xF3)").await;
         }
         // Opcode 0xF4: LS_MGAME_LOGIN
         0xF4 => {
@@ -355,18 +350,16 @@ async fn handle_game_payload(
         }
         // Opcode 0x01: WIZ_LOGIN (Game Server Account Auth)
         0x01 => {
-            tracing::info!(%peer, dump = %format_hex(payload), "handling game server WIZ_LOGIN (0x01)");
-            // KnightOnline1453 (0x006E3AD0 / 0x0075F230):
-            // byte 0: 0x01 opcode
-            // byte 1: 0x01 result code (1 = success, prompts client to send 0x0C WIZ_ALLCHAR_INFO_REQ)
+            tracing::info!(%peer, "handling game server WIZ_LOGIN (0x01)");
+            // Nation zero opens selection; 0xff refuses an unauthenticated handoff.
             if account.is_none() {
                 *account = lobby.claim_login(peer.ip());
             }
             let nation = account
                 .as_deref()
                 .and_then(|account| characters::nation(&lobby.db.lock().unwrap(), account).ok())
-                .unwrap_or(1);
-            tracing::info!(%peer, ?account, nation, "game lobby account association (authentication remains a stub)");
+                .unwrap_or(0xff);
+            tracing::info!(%peer, ?account, nation, "game lobby account association");
             let response = [0x01, nation];
             let packet = frame_packet(&response);
             tracing::info!(%peer, dump = %format_hex(&packet), "sending WIZ_LOGIN (0x01) response");
@@ -418,7 +411,7 @@ async fn handle_game_payload(
         0x05 => {
             let result = if payload.len() == 2 {
                 account.as_deref().map(|account| {
-                    characters::set_nation(&mut lobby.db.lock().unwrap(), account, payload[1])
+                    characters::set_nation(&lobby.db.lock().unwrap(), account, payload[1])
                 })
             } else {
                 None
@@ -1295,12 +1288,15 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                 let data = &buf[..n];
                 idle_reported = false;
                 last_received = tokio::time::Instant::now();
-                tracing::info!(%peer, bytes = n, dump = %format_hex(data), "received game server packet");
+                tracing::info!(%peer, bytes = n, "received game server bytes");
 
                 decoder.push(data);
                 loop {
                     match decoder.next() {
                         Ok(Some(payload)) => {
+                            if payload.first() != Some(&1) {
+                                tracing::info!(%peer,dump=%format_hex(&payload),"received game request");
+                            }
                             packet_count += 1;
                             last_opcode = payload.first().map(|opcode| format!("0x{opcode:02X}"));
                             let span = tracing::info_span!("request", packet = packet_count, opcode = %last_opcode.as_deref().unwrap_or("empty"));
@@ -1450,6 +1446,7 @@ mod tests {
         {
             let mut db = lobby.db.lock().unwrap();
             characters::ensure_account(&db, "recovery").unwrap();
+            characters::set_nation(&db, "recovery", 1).unwrap();
             characters::create(&mut db, "recovery", &character).unwrap();
             let state = skills::State {
                 periodic: std::collections::HashMap::new(),
@@ -1552,6 +1549,7 @@ mod tests {
         lobby
             .record_login("127.0.0.1".parse().unwrap(), "admin")
             .unwrap();
+        characters::set_nation(&lobby.db.lock().unwrap(), "admin", 1).unwrap();
         assert_eq!(
             characters::create(&mut lobby.db.lock().unwrap(), "admin", &character).unwrap(),
             0
@@ -1680,11 +1678,32 @@ mod tests {
         let crypt = JvCrypt::new(KO_PUBLIC_KEY);
         let mut credentials = vec![1, 0, 0, 0, 0xF3, 5, 0];
         credentials.extend_from_slice(b"admin");
-        credentials.extend_from_slice(&[0; 6]);
+        credentials.extend_from_slice(&[4, 0]);
+        credentials.extend_from_slice(b"pass");
+        credentials.extend_from_slice(&[0; 4]);
         crypt.transform(&mut credentials);
         assert_eq!(
             exchange(&mut login, &credentials).await,
             crypt.encrypt_server_packet(&[0xF3, 1, 0xAD, 5, 1, 0])
+        );
+        let mut wrong = vec![1, 0, 0, 0, 0xf3, 5, 0];
+        wrong.extend_from_slice(b"admin");
+        wrong.extend_from_slice(&[5, 0]);
+        wrong.extend_from_slice(b"wrong");
+        wrong.extend_from_slice(&[0; 4]);
+        crypt.transform(&mut wrong);
+        assert_eq!(
+            exchange(&mut login, &wrong).await,
+            crypt.encrypt_server_packet(&[0xf3, 3])
+        );
+        assert!(
+            lobby
+                .claim_login(listener.local_addr().unwrap().ip())
+                .is_none()
+        );
+        assert_eq!(
+            exchange(&mut login, &credentials).await,
+            crypt.encrypt_server_packet(&[0xf3, 1, 0xad, 5, 1, 0])
         );
         drop(login);
         login_task.await.unwrap();
@@ -1693,7 +1712,9 @@ mod tests {
             .unwrap();
         let (socket, peer) = listener.accept().await.unwrap();
         let game_task = tokio::spawn(handle_game_client(socket, peer, lobby.clone()));
-        assert_eq!(exchange(&mut game, &[0x01]).await, vec![1, 1]);
+        assert_eq!(exchange(&mut game, &[0x01]).await, vec![1, 0]);
+        assert_eq!(exchange(&mut game, &[0x05, 1]).await, vec![5, 1]);
+        assert_eq!(exchange(&mut game, &[0x05, 2]).await, vec![5, 0]);
         assert_eq!(exchange(&mut game, &[0x0C]).await.len(), 173);
         let mut creation = vec![2, 0, 10, 0];
         creation.extend_from_slice(b"AdminSiken");
@@ -1750,7 +1771,7 @@ mod tests {
         rest.extend(frame_packet(&[0x3f, 2, 13, 0x29, 0x11, 0x38, 0x0c]));
         client.write_all(&rest).await.unwrap();
         let mut expected = frame_packet(&[0x2B, 0xAD, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        expected.extend(frame_packet(&[0x01, 0x01]));
+        expected.extend(frame_packet(&[0x01, 0xff]));
         let mut characters = vec![0x0C, 0x01];
         characters.extend([0u8; 171]);
         expected.extend(frame_packet(&characters));

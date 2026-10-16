@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
@@ -22,6 +22,7 @@ pub(crate) struct Lobby {
     pub skills: Option<super::skills::Catalog>,
     pub combat: Option<super::combat::Catalog>,
     pub monsters: Option<std::sync::Arc<super::monsters::World>>,
+    pub login_slots: Arc<tokio::sync::Semaphore>,
     pending: Mutex<HashMap<IpAddr, Vec<PendingLogin>>>,
 }
 
@@ -32,6 +33,7 @@ impl Lobby {
         bootstrap: super::world_entry::Bootstrap,
     ) -> rusqlite::Result<Self> {
         super::characters::initialize(&db)?;
+        super::auth::initialize(&db)?;
         super::admin::initialize(&db)?;
         super::movement::initialize(&db)?;
         super::skills::initialize(&db)?;
@@ -52,6 +54,7 @@ impl Lobby {
             skills: None,
             combat: None,
             monsters: None,
+            login_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             pending: Mutex::new(HashMap::new()),
         })
     }
@@ -92,6 +95,10 @@ impl Lobby {
         } else {
             None
         }
+    }
+
+    pub fn clear_login(&self, ip: IpAddr) {
+        self.pending.lock().unwrap().remove(&ip);
     }
 }
 

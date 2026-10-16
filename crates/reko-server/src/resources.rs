@@ -129,6 +129,7 @@ mod tests {
         {
             let db = lobby.db.lock().unwrap();
             crate::characters::ensure_account(&db, "mage").unwrap();
+            crate::characters::set_nation(&db, "mage", 1).unwrap();
             db.execute(
                 "INSERT INTO lobby_characters VALUES ('mage',0,'ScrollTest',3,110,0,0,?1)",
                 [[50u8, 60, 60, 70, 50].as_slice()],

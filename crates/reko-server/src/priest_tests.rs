@@ -33,6 +33,7 @@ async fn priest_healing_buffs_cures_attacks_and_npc_curses() {
     {
         let db = lobby.db.lock().unwrap();
         crate::characters::ensure_account(&db, "priest").unwrap();
+        crate::characters::set_nation(&db, "priest", 1).unwrap();
         db.execute(
             "INSERT INTO lobby_characters VALUES ('priest',0,'PriestTest',4,112,0,0,?1)",
             [c.stats.as_slice()],

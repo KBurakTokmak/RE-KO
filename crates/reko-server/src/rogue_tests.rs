@@ -31,6 +31,7 @@ async fn setup() -> Option<(Lobby, Session, TcpStream, TcpStream, SocketAddr)> {
     {
         let mut db = lobby.db.lock().unwrap();
         crate::characters::ensure_account(&db, "admin").unwrap();
+        crate::characters::set_nation(&db, "admin", 1).unwrap();
         crate::characters::create(&mut db, "admin", &character).unwrap();
         db.execute("INSERT INTO character_privileges VALUES ('admin',0,1)", [])
             .unwrap();

@@ -534,6 +534,7 @@ mod tests {
         {
             let mut db = lobby.db.lock().unwrap();
             crate::characters::ensure_account(&db, "admin").unwrap();
+            crate::characters::set_nation(&db, "admin", 1).unwrap();
             crate::characters::create(&mut db, "admin", &character).unwrap();
         }
         let mut session = Session::new(character).unwrap();

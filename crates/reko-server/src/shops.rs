@@ -624,6 +624,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         crate::characters::initialize(&db).unwrap();
         crate::characters::ensure_account(&db, "test").unwrap();
+        crate::characters::set_nation(&db, "test", 1).unwrap();
         let c = crate::characters::Character {
             slot: 0,
             name: "Buyer".into(),

@@ -114,6 +114,7 @@ mod tests {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         crate::characters::initialize(&db).unwrap();
         crate::characters::ensure_account(&db, "test").unwrap();
+        crate::characters::set_nation(&db, "test", 1).unwrap();
         db.execute(
             "INSERT INTO lobby_characters VALUES ('test',0,'WearTest',2,108,0,0,?1)",
             [[60u8, 60, 70, 50, 50].as_slice()],

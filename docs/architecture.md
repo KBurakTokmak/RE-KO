@@ -31,9 +31,11 @@ event controllers are incomplete. There is no complete shared-player world,
 party or PvP implementation. MAX_PLAYERS20 is a small-server design target,
 not a demonstrated20-player compatibility/performance guarantee.
 
-Login currently accepts a local username without validating its password.
+Login registers the first password and verifies its persisted Argon2id hash.
+Accounts choose a permanent faction for the logical server before creating
+characters; existing rosters retain their faction. See [accounts](re/accounts.md).
 The game connection consumes a recent single-use login association by IP;
-ambiguous/expired associations are rejected. Secure tokens and simultaneous
+ambiguous/expired associations are rejected. Native token binding and simultaneous
 clients behind one IP remain unfinished. The current executable must stay in
 a trusted development environment.
 

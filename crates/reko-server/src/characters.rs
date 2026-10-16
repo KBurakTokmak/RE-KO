@@ -155,6 +155,15 @@ pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY(account, slot)
         );",
     )?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS account_server_nations (
+        account TEXT NOT NULL COLLATE NOCASE REFERENCES lobby_accounts(name),
+        server_id INTEGER NOT NULL, nation INTEGER NOT NULL CHECK(nation IN (1,2)),
+        PRIMARY KEY(account,server_id));
+        INSERT OR IGNORE INTO account_server_nations
+        SELECT c.account,1,MIN(CASE WHEN c.race<10 THEN 1 ELSE 2 END)
+        FROM lobby_characters c GROUP BY c.account;",
+    )?;
     crate::starter::initialize(db)?;
     crate::progress::initialize(db)
 }
@@ -169,34 +178,38 @@ pub(crate) fn ensure_account(db: &Connection, account: &str) -> rusqlite::Result
 
 pub(crate) fn nation(db: &Connection, account: &str) -> rusqlite::Result<u8> {
     db.query_row(
-        "SELECT nation FROM lobby_accounts WHERE name = ?1",
+        "SELECT COALESCE((SELECT nation FROM account_server_nations WHERE account=?1 AND server_id=1),0)",
         [account],
         |row| row.get(0),
     )
 }
 
-pub(crate) fn set_nation(
-    db: &mut Connection,
-    account: &str,
-    selected: u8,
-) -> rusqlite::Result<bool> {
+pub(crate) fn set_nation(db: &Connection, account: &str, selected: u8) -> rusqlite::Result<bool> {
     if !matches!(selected, 1 | 2) {
         return Ok(false);
     }
-    let transaction = db.transaction()?;
-    let count: u32 = transaction.query_row(
-        "SELECT count(*) FROM lobby_characters WHERE account = ?1",
-        [account],
-        |row| row.get(0),
-    )?;
-    if count > 0 {
-        return Ok(nation(&transaction, account)? == selected);
+    let tx = db.unchecked_transaction()?;
+    let current = nation(&tx, account)?;
+    if current != 0 {
+        return Ok(current == selected);
     }
-    transaction.execute(
-        "UPDATE lobby_accounts SET nation = ?1 WHERE name = ?2",
-        params![selected, account],
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM lobby_accounts WHERE name=?1)",
+        [account],
+        |r| r.get(0),
     )?;
-    transaction.commit()?;
+    if !exists {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO account_server_nations VALUES (?1,1,?2)",
+        params![account, selected],
+    )?;
+    tx.execute(
+        "UPDATE lobby_accounts SET nation=?2 WHERE name=?1",
+        params![account, selected],
+    )?;
+    tx.commit()?;
     Ok(true)
 }
 
@@ -269,6 +282,53 @@ pub(crate) fn find(
 mod tests {
     use super::*;
 
+    #[test]
+    fn nation_is_required_locked_before_creation_and_survives_empty_roster() {
+        let mut db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        ensure_account(&db, "newuser").unwrap();
+        assert_eq!(nation(&db, "newuser").unwrap(), 0);
+        let karus = Character::parse(&captured()).unwrap();
+        assert_eq!(create(&mut db, "newuser", &karus).unwrap(), 2);
+        assert!(!set_nation(&db, "newuser", 0).unwrap());
+        assert!(set_nation(&db, "NEWUSER", 2).unwrap());
+        assert!(!set_nation(&db, "newuser", 1).unwrap());
+        assert_eq!(create(&mut db, "newuser", &karus).unwrap(), 2);
+        let mut elmorad = karus.clone();
+        elmorad.race = 12;
+        elmorad.class = 202;
+        assert_eq!(create(&mut db, "newuser", &elmorad).unwrap(), 0);
+        db.execute("DELETE FROM lobby_characters WHERE account='newuser'", [])
+            .unwrap();
+        initialize(&db).unwrap();
+        assert_eq!(nation(&db, "newuser").unwrap(), 2);
+        assert!(!set_nation(&db, "newuser", 1).unwrap());
+        db.execute(
+            "INSERT INTO account_server_nations VALUES ('newuser',2,1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(nation(&db, "newuser").unwrap(), 2);
+        assert!(!set_nation(&db, "unknown", 1).unwrap());
+    }
+
+    #[test]
+    fn legacy_accounts_keep_character_faction_while_empty_accounts_choose() {
+        let db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        ensure_account(&db, "legacy").unwrap();
+        ensure_account(&db, "empty").unwrap();
+        db.execute(
+            "INSERT INTO lobby_characters VALUES ('legacy',0,'OldElmorad',12,202,0,0,?1)",
+            [[60u8, 60, 80, 50, 50].as_slice()],
+        )
+        .unwrap();
+        initialize(&db).unwrap();
+        assert_eq!(nation(&db, "legacy").unwrap(), 2);
+        assert_eq!(nation(&db, "empty").unwrap(), 0);
+        assert!(!set_nation(&db, "legacy", 1).unwrap());
+    }
+
     fn captured() -> Vec<u8> {
         let mut packet = vec![2, 0, 10, 0];
         packet.extend_from_slice(b"AdminSiken");
@@ -281,7 +341,9 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         initialize(&db).unwrap();
         ensure_account(&db, "admin").unwrap();
+        set_nation(&db, "admin", 1).unwrap();
         ensure_account(&db, "other").unwrap();
+        set_nation(&db, "other", 1).unwrap();
         let character = Character::parse(&captured()).unwrap();
         assert_eq!(character.class, 102);
         assert_eq!(create(&mut db, "admin", &character).unwrap(), 0);
@@ -295,7 +357,7 @@ mod tests {
             list_payload(&db, Some("other")).unwrap(),
             [vec![0x0C, 1], vec![0; 171]].concat()
         );
-        assert!(!set_nation(&mut db, "admin", 2).unwrap());
+        assert!(!set_nation(&db, "admin", 2).unwrap());
     }
 
     #[test]
@@ -387,6 +449,7 @@ mod tests {
             initialize(&db).unwrap();
             crate::movement::initialize(&db).unwrap();
             ensure_account(&db, "admin").unwrap();
+            set_nation(&db, "admin", 1).unwrap();
             let character = Character::parse(&captured()).unwrap();
             assert_eq!(create(&mut db, "admin", &character).unwrap(), 0);
             crate::movement::save(

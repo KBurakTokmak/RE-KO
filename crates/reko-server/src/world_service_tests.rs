@@ -30,6 +30,7 @@ pub(crate) fn setup() -> Option<(Lobby, Session)> {
     {
         let mut db = lobby.db.lock().unwrap();
         characters::ensure_account(&db, "test").unwrap();
+        characters::set_nation(&db, "test", 1).unwrap();
         characters::create(&mut db, "test", &c).unwrap();
         db.execute(
             "INSERT INTO character_wallets VALUES ('test',0,1000000)",
