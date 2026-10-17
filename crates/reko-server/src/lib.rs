@@ -18,6 +18,8 @@ mod combat;
 pub mod crypto;
 mod durability;
 mod framing;
+mod gm_spawn;
+mod hotkeys;
 mod inventory;
 mod lobby;
 mod loot;
@@ -26,6 +28,7 @@ mod mage;
 #[cfg(test)]
 mod mage_tests;
 mod magic;
+mod model_radius;
 mod monsters;
 mod movement;
 mod npc_scripts;
@@ -450,6 +453,9 @@ async fn handle_game_payload(
                 book.register_owner(&session.character.name, session.character.nation());
             }
             if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+                session.is_admin =
+                    admin::is_admin(&lobby.db.lock().unwrap(), account, session.character.slot)
+                        .unwrap_or(false);
                 let position =
                     movement::load(&lobby.db.lock().unwrap(), account, session.character.slot);
                 match position {
@@ -699,24 +705,38 @@ async fn handle_game_payload(
             }
             let target = u16::from_le_bytes([payload[3], payload[4]]);
             let now = skills::now_ms();
+            session.is_admin = account.as_deref().is_some_and(|account| {
+                admin::is_admin(&lobby.db.lock().unwrap(), account, session.character.slot)
+                    .unwrap_or(false)
+            });
             let mut result = 0;
             if now >= session.next_attack
-                && !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10)
+                && (session.is_admin || !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10))
                 && let Some(monsters) = lobby.monsters.as_ref()
             {
                 let attack = monsters::Attack {
                     position: session.position,
                     range: session.combat.range,
-                    attack: session.combat.attack,
+                    attack: if session.is_admin {
+                        0
+                    } else {
+                        session.combat.attack
+                    },
                     percent: 100,
-                    extra: 0,
+                    extra: if session.is_admin { 10_000 } else { 0 },
                     skill: false,
                     drain_percent: 0,
                     arrow: false,
                     penetrate: false,
                     magic: None,
                 };
-                match monsters.hit_owned(target, attack, Some(&session.character.name), || Ok(())) {
+                match monsters.hit_basic_owned(
+                    target,
+                    attack,
+                    Some(&session.character.name),
+                    session.character.race,
+                    || Ok(()),
+                ) {
                     Ok(hit) => {
                         result = if hit.dead { 2 } else { 1 };
                         session.next_attack = now + session.combat.delay_ms;
@@ -967,6 +987,12 @@ async fn handle_game_payload(
                 tracing::warn!(%peer, "invalid or unsupported chat request");
                 return;
             };
+            if channel == 1
+                && let Some(account) = account.as_deref()
+                && gm_spawn::handle(sock, peer, lobby, account, session, text).await
+            {
+                return;
+            }
             if channel == 1 && text.eq_ignore_ascii_case(b"/town") {
                 if let Some(account) = account.as_deref() {
                     town::handle(sock, peer, lobby, account, session).await;
@@ -1084,6 +1110,25 @@ async fn handle_game_payload(
         0x3F => {
             for response in inventory::remove(lobby, account.as_deref(), world.as_mut(), payload) {
                 send_response(sock, peer, &None, &response, "ITEM_REMOVE").await;
+            }
+        }
+        0x79 => {
+            if let (Some(account), Some(s)) =
+                (account.as_deref(), world.as_ref().filter(|s| s.entered))
+            {
+                let result = hotkeys::process(
+                    &lobby.db.lock().unwrap(),
+                    account,
+                    s.character.slot,
+                    payload,
+                );
+                match result {
+                    Ok(Some(packet)) => {
+                        send_response(sock, peer, &None, &packet, "SKILLBAR_LOAD").await
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(%peer,%error,"skillbar request refused"),
+                }
             }
         }
         0x41 => {
@@ -1404,6 +1449,132 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admin_basic_hits_are_fixed_bounded_and_revocable_without_affecting_normal_attacks() {
+        let Some((mut lobby, mut s)) = world_service_tests::setup() else {
+            return;
+        };
+        let monsters = Arc::new(monsters::World::load(&reko_common::game_dir()).unwrap());
+        lobby.monsters = Some(monsters.clone());
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO character_privileges VALUES ('test',0,1)", [])
+            .unwrap();
+        s.position.x = 3250;
+        s.position.z = 4060;
+        s.combat.range = 2.0;
+        s.combat.weapon_kind = 100;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        let mut account = Some("test".to_string());
+        let mut world = Some(s);
+        let hp = |id| {
+            let p = monsters.health(id, 21).unwrap();
+            u32::from_le_bytes(p[8..12].try_into().unwrap())
+        };
+        let request = [8, 1, 0, 0x12, 0x27, 0, 0, 0, 0];
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &request,
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert_eq!(hp(10002), 15000);
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &request,
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert_eq!(hp(10002), 15000, "normal attack delay remains enforced");
+        world.as_mut().unwrap().next_attack = 0;
+        world.as_mut().unwrap().position.x = 5000;
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &request,
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert_eq!(hp(10002), 15000, "remote admin targets remain out of range");
+        world.as_mut().unwrap().position.x = 3250;
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &request,
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert_eq!(hp(10002), 5000);
+        world.as_mut().unwrap().next_attack = 0;
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &request,
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert_eq!(hp(10002), 0, "last hit clamps to remaining HP");
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE character_privileges SET is_admin=0", [])
+            .unwrap();
+        let s = world.as_mut().unwrap();
+        s.next_attack = 0;
+        s.position.z = 4000;
+        s.combat.weapon_kind = 0;
+        s.combat.attack = 1000;
+        s.position.x = 3130;
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &[8, 1, 0, 0x10, 0x27, 0, 0, 0, 0],
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert_eq!(
+            hp(10000),
+            25000,
+            "ordinary model-based reach remains bounded"
+        );
+        world.as_mut().unwrap().position.x = 3250;
+        handle_game_payload(
+            &mut socket,
+            peer,
+            &[8, 1, 0, 0x10, 0x27, 0, 0, 0, 0],
+            &lobby,
+            &mut account,
+            &mut world,
+        )
+        .await;
+        assert!(!world.as_ref().unwrap().is_admin);
+        assert!(
+            (15001..25000).contains(&hp(10000)),
+            "revocation restores ordinary damage immediately"
+        );
+    }
 
     async fn exchange(client: &mut TcpStream, payload: &[u8]) -> Vec<u8> {
         client.write_all(&frame_packet(payload)).await.unwrap();

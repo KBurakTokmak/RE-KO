@@ -27,6 +27,8 @@ renderer/client and an in-process game host have not been implemented.
   healing, drains, multi-arrow attacks, area spells and supported NPC debuffs.
 - HP/MP potions, natural regeneration, weapon durability and recovery updates.
 - Administrative test fixtures, packet capture and a local-client startup profile.
+- Admin-only 10,000-damage basic attacks, monster protection and native GM
+  collision bypass, monster summoning by ID/name; per-character skillbar save/load.
 
 These are working subsets, not a claim of complete retail behavior. Some NPC
 services, specialist quests, skills and multiplayer mechanics remain incomplete.

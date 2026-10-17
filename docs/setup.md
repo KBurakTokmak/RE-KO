@@ -34,6 +34,7 @@ An empty database cannot provide the documented world/combat features.
 python scripts/Import-1453WorldRules.py --apply
 python scripts/Import-1453Population.py --all-zones --apply
 python scripts/Import-1453NpcAI.py --apply
+python scripts/Import-1453MonsterCatalog.py --reference ../PV_1453/inspection/K_MONSTER.csv --apply
 python scripts/Import-1453TravelQuests.py --apply
 python scripts/Import-1453Experience.py --apply
 python scripts/Import-MapTriggers.py --apply

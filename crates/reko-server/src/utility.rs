@@ -184,8 +184,13 @@ pub(crate) async fn npc_strikes(
     let Some(world) = lobby.monsters.as_ref() else {
         return;
     };
+    s.is_admin = crate::admin::is_admin(&lobby.db.lock().unwrap(), account, s.character.slot)
+        .unwrap_or(false);
     world.observe(s, now);
     for strike in world.incoming(s.player_id) {
+        if s.is_admin {
+            continue;
+        }
         if strike.zone != s.position.zone || s.skills.hp == 0 {
             continue;
         }

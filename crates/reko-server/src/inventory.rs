@@ -95,7 +95,7 @@ fn move_items(
         anyhow::bail!("invalid slots");
     };
     anyhow::ensure!(id != 0 && from.id == id, "item ownership mismatch");
-    // TODO(re): Apply recovered class/stat requirements and equipment bonuses.
+    // TODO(re): Apply recovered class/stat eligibility requirements.
     if matches!(direction, 1 | 4) {
         anyhow::ensure!(
             catalog.equip_slot(from.id, destination),

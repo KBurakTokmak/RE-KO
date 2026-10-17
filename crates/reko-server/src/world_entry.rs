@@ -1,4 +1,4 @@
-//! Initial world-entry packets. Combat and world simulation are still pending.
+//! Native world-entry packets and authoritative character session state.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -43,6 +43,7 @@ impl Bootstrap {
 
 #[derive(Clone)]
 pub(crate) struct Session {
+    pub is_admin: bool,
     pub rewards: crate::quest_rewards::Totals,
     pub max_exp: u32,
     pub gate: Option<crate::travel::Gate>,
@@ -81,6 +82,7 @@ impl Session {
             return None;
         }
         Some(Self {
+            is_admin: false,
             rewards: crate::quest_rewards::Totals::default(),
             max_exp: 0,
             gate: None,
@@ -177,8 +179,8 @@ impl Session {
         ] {
             put_u16(&mut packet, value);
         }
-        for &stat in &self.character.stats {
-            packet.extend_from_slice(&[stat, 0]);
+        for (&stat, bonus) in self.character.stats.iter().zip(self.combat.bonus_stats) {
+            packet.extend_from_slice(&[stat, bonus.min(255) as u8]);
         }
         put_u16(&mut packet, self.combat.attack);
         put_u16(&mut packet, self.combat.defence);
@@ -186,7 +188,7 @@ impl Session {
             packet.push(value.min(255) as u8);
         }
         put_u32(&mut packet, self.coins);
-        packet.extend_from_slice(&[1, 0, 0]);
+        packet.extend_from_slice(&[u8::from(!self.is_admin), 0, 0]);
         packet.extend_from_slice(&self.progress.points);
         for item in self.equipment {
             put_u32(&mut packet, item.id);
@@ -242,8 +244,40 @@ pub(crate) fn start_matches(payload: &[u8], session: &Session) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn login_sends_equipment_bonuses_beside_base_stats() {
+        let mut player = session();
+        let normal = player.my_info(&Bootstrap { next_level_exp: 50 });
+        player.combat.bonus_stats = [1, 2, 16, 4, 300];
+        let with_bonuses = player.my_info(&Bootstrap { next_level_exp: 50 });
+        let changes: Vec<_> = normal
+            .iter()
+            .zip(&with_bonuses)
+            .enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some((i, *b)))
+            .collect();
+        assert_eq!(changes, [(74, 1), (76, 2), (78, 16), (80, 4), (82, 255)]);
+    }
+
+    #[test]
+    fn admin_entry_changes_only_the_native_authority_byte() {
+        let mut player = session();
+        let normal = player.my_info(&Bootstrap { next_level_exp: 50 });
+        player.is_admin = true;
+        let admin = player.my_info(&Bootstrap { next_level_exp: 50 });
+        let changed: Vec<_> = normal
+            .iter()
+            .zip(&admin)
+            .enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some(i))
+            .collect();
+        assert_eq!(changed, [97]);
+        assert_eq!((normal[97], admin[97]), (1, 0));
+    }
+
     fn session() -> Session {
         Session {
+            is_admin: false,
             rewards: crate::quest_rewards::Totals::default(),
             max_exp: 0,
             gate: None,

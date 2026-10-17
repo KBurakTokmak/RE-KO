@@ -25,6 +25,7 @@ struct Player {
     position: Position,
     hp: u16,
     invisible: bool,
+    is_admin: bool,
     stats: combat::Stats,
     at: u64,
 }
@@ -187,6 +188,7 @@ impl Brain {
         self.players.insert(
             s.player_id,
             Player {
+                is_admin: s.is_admin,
                 name: s.character.name.clone(),
                 position: s.position,
                 hp: s.skills.hp,
@@ -260,8 +262,9 @@ impl Brain {
                 agent.chase_start = mob.position;
             }
             agent.damage_seen = damage;
-            let valid =
-                |p: &Player| p.hp > 0 && !p.invisible && p.position.zone == mob.position.zone;
+            let valid = |p: &Player| {
+                p.hp > 0 && !p.invisible && !p.is_admin && p.position.zone == mob.position.zone
+            };
             let attacked = |p: &Player| {
                 mob.damage_by.get(&p.name).is_some_and(|damage| {
                     *damage > agent.damage_floor.get(&p.name).copied().unwrap_or(0)
@@ -405,6 +408,69 @@ impl Brain {
 mod tests {
     use super::*;
     #[test]
+    fn admins_are_excluded_from_aggro_retaliation_and_existing_targets() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let db = Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        db.execute_batch(include_str!("npc_ai.sql")).unwrap();
+        db.execute("INSERT INTO world_monster_ai VALUES(100,3,100,100,1000,1,4,5,20,30,100,0,0,0,0,1,1000)",[]).unwrap();
+        for act in [1, 3] {
+            let world = super::super::World::load(&game).unwrap();
+            world.load_population(&db, &game).unwrap();
+            let mut inner = world.inner.lock().unwrap();
+            let mobs = &mut inner.mobs;
+            let home = mobs[&12000].position;
+            let mut brain = Brain::default();
+            brain.load(&db).unwrap();
+            brain.rules.get_mut(&100).unwrap().act = act;
+            let mut admin = Player {
+                name: "Admin".into(),
+                position: home,
+                hp: 100,
+                invisible: false,
+                is_admin: true,
+                stats: combat::Stats::default(),
+                at: 1000,
+            };
+            brain.players.insert(1, admin.clone());
+            brain.tick(mobs, 1000);
+            assert!(brain.agents[&12000].target.is_none());
+            mobs.get_mut(&12000)
+                .unwrap()
+                .damage_by
+                .insert(admin.name.clone(), 1);
+            brain.tick(mobs, 1100);
+            assert!(brain.agents[&12000].target.is_none());
+            let mut normal = admin.clone();
+            normal.is_admin = false;
+            normal.name = "Normal".into();
+            mobs.get_mut(&12000)
+                .unwrap()
+                .damage_by
+                .insert(normal.name.clone(), 1);
+            brain.players.insert(2, normal.clone());
+            brain.tick(mobs, 1200);
+            assert_eq!(brain.agents[&12000].target, Some(2));
+            normal.is_admin = true;
+            normal.at = 1300;
+            brain.players.insert(2, normal);
+            brain.tick(mobs, 1300);
+            assert!(brain.agents[&12000].target.is_none());
+            admin.is_admin = false;
+            admin.at = 1400;
+            brain.players.insert(1, admin.clone());
+            mobs.get_mut(&12000)
+                .unwrap()
+                .damage_by
+                .insert(admin.name, 2);
+            brain.tick(mobs, 1400);
+            assert_eq!(brain.agents[&12000].target, Some(1));
+        }
+    }
+    #[test]
     fn ranged_retaliation_refreshes_leash_and_forgets_threat_without_erasing_damage_credit() {
         let game = reko_common::game_dir();
         if !game.join("Data/NPC_Looks.tbl").exists() {
@@ -433,6 +499,7 @@ mod tests {
             },
             hp: 100,
             invisible: false,
+            is_admin: false,
             stats: combat::Stats::default(),
             at: 1000,
         };
@@ -555,6 +622,7 @@ mod tests {
             },
             hp: 100,
             invisible: false,
+            is_admin: false,
             stats: combat::Stats::default(),
             at: 1000,
         };
@@ -622,7 +690,7 @@ mod tests {
                 amount: 17,
             }]),
         );
-        lobby.monsters = Some(world);
+        lobby.monsters = Some(world.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
             .await
@@ -649,6 +717,62 @@ mod tests {
                 .unwrap()
                 .hp,
             83
+        );
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO character_privileges VALUES ('test',0,1)", [])
+            .unwrap();
+        world.ai.lock().unwrap().strikes.insert(
+            s.player_id,
+            VecDeque::from([Strike {
+                npc: 12000,
+                zone: 21,
+                amount: 99,
+            }]),
+        );
+        crate::utility::npc_strikes(
+            &mut socket,
+            peer,
+            &lobby,
+            "test",
+            &mut s,
+            crate::skills::now_ms(),
+        )
+        .await;
+        assert_eq!(
+            s.skills.hp, 83,
+            "admin promotion discards already queued damage"
+        );
+        assert!(world.ai.lock().unwrap().players[&s.player_id].is_admin);
+        assert!(world.incoming(s.player_id).is_empty());
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE character_privileges SET is_admin=0", [])
+            .unwrap();
+        world.ai.lock().unwrap().strikes.insert(
+            s.player_id,
+            VecDeque::from([Strike {
+                npc: 12000,
+                zone: 21,
+                amount: 17,
+            }]),
+        );
+        crate::utility::npc_strikes(
+            &mut socket,
+            peer,
+            &lobby,
+            "test",
+            &mut s,
+            crate::skills::now_ms(),
+        )
+        .await;
+        assert_eq!(
+            s.skills.hp, 66,
+            "revocation restores incoming monster damage"
         );
     }
 
@@ -680,6 +804,7 @@ mod tests {
                 ..Default::default()
             },
             invisible: false,
+            is_admin: false,
             at: 1000,
         };
         brain.players.insert(1, player.clone());
@@ -752,6 +877,7 @@ mod tests {
             position: Position::default(),
             hp: 100,
             invisible: false,
+            is_admin: false,
             stats: combat::Stats {
                 evasion: 100.0,
                 ..Default::default()

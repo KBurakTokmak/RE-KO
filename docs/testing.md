@@ -40,5 +40,6 @@ Useful original-client regression passes:
 For skill reports record the exact skill, target, distance, HP/MP change,
 cooldown and visible result. For unexpected exits distinguish deliberate close,
 socket disconnect and process termination. Keep captures and test character
-details local. Administrative `hurt N` is allowed only by character_privileges;
-admin status does not bypass normal costs or grant immunity.
+details local. Administrative `hurt N` is allowed only by character_privileges.
+Tagged admins also have fixed R damage, monster protection and native GM
+collision behavior; normal skill costs still apply. See [admin testing](re/admin-testing.md).

@@ -152,6 +152,11 @@ mod tests {
             raw_over_time: false,
         };
         assert!(spell.sample(1000, 7, 100) < spell.sample(1000, 7, 0));
+        let above_base_stat_cap = MagicDamage {
+            charisma: 305,
+            ..spell
+        };
+        assert!(above_base_stat_cap.sample(1000, 7, 0) > spell.sample(1000, 7, 0));
     }
     #[test]
     fn original_client_spawn_layout_and_damage_authority() {
@@ -184,6 +189,8 @@ mod tests {
         assert_eq!(packet[23], 6);
         assert_eq!(&packet[24..30], b"Target");
         let world = World {
+            appearances: std::collections::HashSet::from([100]),
+            radii: crate::model_radius::Radii::default(),
             inner: Mutex::new(Inner {
                 mobs: HashMap::from([(mob.id, mob)]),
                 rng: 1,
@@ -239,6 +246,72 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn basic_reach_uses_original_joint_radii_and_spawn_scale() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        let world = World::load(&game).unwrap();
+        let mut definition = crate::population::load(&db, &game).unwrap().remove(0);
+        definition.appearance = 1701;
+        definition.position.x = 3250;
+        definition.position.z = 4000;
+        definition.hp = 25000;
+        definition.size = 100;
+        let small = world
+            .summon(definition.clone(), &Default::default())
+            .unwrap();
+        definition.size = 240;
+        let large = world.summon(definition, &Default::default()).unwrap();
+        let attack = |x| Attack {
+            position: Position {
+                x,
+                z: 4000,
+                ..Position::default()
+            },
+            range: 1.0,
+            attack: 0,
+            percent: 100,
+            extra: 10000,
+            skill: false,
+            drain_percent: 0,
+            arrow: false,
+            penetrate: false,
+            magic: None,
+        };
+        assert!(
+            world
+                .hit_basic_owned(small, attack(3210), Some("Test"), 2, || panic!(
+                    "out-of-range hit charged"
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            world
+                .hit_basic_owned(large, attack(3210), Some("Test"), 2, || Ok(()))
+                .unwrap()
+                .damage,
+            10000
+        );
+        assert!(
+            world
+                .hit_basic_owned(large, attack(3190), Some("Test"), 2, || panic!(
+                    "out-of-range hit charged"
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            world
+                .hit_basic_owned(small, attack(3230), Some("Test"), 2, || Ok(()))
+                .unwrap()
+                .damage,
+            10000
+        );
+    }
+
     #[test]
     fn one_life_source_spawns_do_not_reappear_on_normal_regen_ticks() {
         let game = reko_common::game_dir();
@@ -385,6 +458,8 @@ struct Inner {
 }
 
 pub(crate) struct World {
+    appearances: std::collections::HashSet<u32>,
+    radii: crate::model_radius::Radii,
     quest_kills: Mutex<HashMap<String, Vec<u16>>>,
     experience: Mutex<HashMap<String, Vec<ExperienceCredit>>>,
     ai: Mutex<ai::Brain>,
@@ -433,7 +508,7 @@ pub(crate) struct MagicDamage {
     pub first: u16,
     pub over_time: u16,
     pub duration: u8,
-    pub charisma: u8,
+    pub charisma: u16,
     pub bonus: u16,
     pub raw_over_time: bool,
     pub raw_first: bool,
@@ -590,6 +665,15 @@ impl World {
             );
         }
         Ok(Self {
+            radii: crate::model_radius::Radii::load(game, &looks)?,
+            appearances: looks
+                .rows
+                .iter()
+                .filter_map(|r| match r.first() {
+                    Some(CellValue::U32(id)) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
             loot: None,
             ai: Mutex::new(ai::Brain::default()),
             quest_kills: Mutex::new(HashMap::new()),
@@ -600,6 +684,64 @@ impl World {
             }),
             events: tokio::sync::broadcast::channel(256).0,
         })
+    }
+
+    pub(crate) fn summon(
+        &self,
+        mut s: crate::population::Spawn,
+        reserved: &std::collections::HashSet<u16>,
+    ) -> anyhow::Result<u16> {
+        anyhow::ensure!(
+            self.appearances.contains(&u32::from(s.appearance)),
+            "This monster's model is absent from the original1453 client."
+        );
+        anyhow::ensure!(
+            self.radii.monsters.contains_key(&s.appearance),
+            "This monster's original character assets are missing or unsupported."
+        );
+        anyhow::ensure!(
+            s.hp > 0
+                && s.size > 0
+                && s.name.chars().count() <= 255
+                && s.name.chars().all(|c| u32::from(c) <= 255),
+            "Invalid monster template."
+        );
+        let mut inner = self.inner.lock().unwrap();
+        let id = (30000..=32767)
+            .find(|id| !reserved.contains(id) && !inner.mobs.contains_key(id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Temporary monster IDs exhausted; restart the server to clear summons."
+                )
+            })?;
+        s.id = id;
+        s.regen_type = 1;
+        let mob = Mob {
+            id,
+            resource: s.appearance,
+            name: s.name.clone(),
+            position: s.position,
+            level: s.level,
+            hp: s.hp,
+            max_hp: s.hp,
+            armor: s.armor,
+            respawn: 0,
+            next_regen: skills::now_ms() + 10000,
+            dots: Vec::new(),
+            speed_percent: 100,
+            slow_until: 0,
+            modifiers: HashMap::new(),
+            definition: Some(s),
+            damage_by: HashMap::new(),
+        };
+        let event = Event {
+            zone: mob.position.zone,
+            packet: mob.spawn(),
+        };
+        inner.mobs.insert(id, mob);
+        drop(inner);
+        let _ = self.events.send(event);
+        Ok(id)
     }
 
     pub fn load_population(&self, db: &rusqlite::Connection, game: &Path) -> anyhow::Result<()> {
@@ -705,6 +847,26 @@ impl World {
         owner: Option<&str>,
         pay: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<Hit, &'static str> {
+        self.hit_with_body(id, attack, owner, pay, None)
+    }
+    pub(crate) fn hit_basic_owned(
+        &self,
+        id: u16,
+        attack: Attack,
+        owner: Option<&str>,
+        race: u8,
+        pay: impl FnOnce() -> Result<(), &'static str>,
+    ) -> Result<Hit, &'static str> {
+        self.hit_with_body(id, attack, owner, pay, Some(race))
+    }
+    fn hit_with_body(
+        &self,
+        id: u16,
+        attack: Attack,
+        owner: Option<&str>,
+        pay: impl FnOnce() -> Result<(), &'static str>,
+        race: Option<u8>,
+    ) -> Result<Hit, &'static str> {
         let Attack {
             position,
             range,
@@ -728,8 +890,18 @@ impl World {
         }
         let dx = (f32::from(mob.position.x) - f32::from(position.x)) / 10.0;
         let dz = (f32::from(mob.position.z) - f32::from(position.z)) / 10.0;
-        // TODO(re): Resolve each NPC model's collision radius; fixtures use one metre.
-        if dx.hypot(dz) > range + 1.0 + 1.0 {
+        let body = race
+            .and_then(|race| {
+                let player = self.radii.players.get(&race)?;
+                let target = self.radii.monsters.get(&mob.resource)?;
+                let scale = mob
+                    .definition
+                    .as_ref()
+                    .map_or(1.0, |s| f32::from(s.size) / 100.0);
+                Some((player + target * scale) / 2.0 + 0.15)
+            })
+            .unwrap_or(2.0);
+        if dx.hypot(dz) > range + body {
             tracing::info!(
                 target = id,
                 player_x = position.x,
@@ -737,7 +909,7 @@ impl World {
                 target_x = mob.position.x,
                 target_z = mob.position.z,
                 distance = dx.hypot(dz),
-                limit = range + 2.0,
+                limit = range + body,
                 "combat range rejected"
             );
             return Err("The target is too far away.");

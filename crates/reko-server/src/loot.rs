@@ -78,12 +78,17 @@ impl Book {
             unsupported_item_ids = unsupported.len(),
             "source loot rules loaded; unsupported client items retain no-drop probability"
         );
-        let levels = db
+        let mut levels: HashMap<u16, u8> = db
             .prepare(
                 "SELECT prototype,MAX(level) FROM world_spawns WHERE monster=1 GROUP BY prototype",
             )?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        for row in db.prepare("SELECT rule_id,json_extract(data,'$.level') FROM world_reference_rules WHERE table_name='MONSTER_TEMPLATE'")?
+            .query_map([], |r| Ok((r.get::<_, u16>(0)?, r.get::<_, u8>(1)?)))? {
+            let (id, level) = row?;
+            levels.entry(id).or_insert(level);
+        }
         Ok(Self {
             inner: Mutex::new(Inner {
                 bundles: HashMap::new(),

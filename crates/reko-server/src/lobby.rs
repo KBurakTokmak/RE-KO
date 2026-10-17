@@ -34,6 +34,7 @@ impl Lobby {
     ) -> rusqlite::Result<Self> {
         super::characters::initialize(&db)?;
         super::auth::initialize(&db)?;
+        super::hotkeys::initialize(&db)?;
         super::admin::initialize(&db)?;
         super::movement::initialize(&db)?;
         super::skills::initialize(&db)?;

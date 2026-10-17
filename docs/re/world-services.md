@@ -30,7 +30,9 @@ movement3 patrol, family assistance and monster spells remain incomplete.
 
 Item attachment uses original ItemOrg column12. Placement handles both hands,
 two-handed conflicts, pants and both rings, preserving displaced items
-atomically. Not all class/stat eligibility checks or item bonuses are complete.
+atomically. Primary stat, direct HP/MP, resistance and accuracy/evasion bonuses
+feed effective attributes; see [combat](skills-combat.md). Not all class/stat
+eligibility checks or special weapon effects are complete.
 Respect native UI ownership when sending inventory acknowledgements; see
 [protocol](protocol.md). Delete-item success/failure must release client waits.
 

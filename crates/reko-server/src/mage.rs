@@ -25,7 +25,7 @@ fn damage(
     row: &[reko_assets::CellValue],
 ) -> monsters::MagicDamage {
     let charisma = if is_mage(session.character.class) {
-        session.character.stats[4]
+        u16::from(session.character.stats[4]).saturating_add(session.combat.bonus_stats[4])
     } else {
         60
     };

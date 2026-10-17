@@ -39,10 +39,42 @@ requirements roll back costs. Potions retain their own consumption/cooldown rule
 
 ## Damage, equipment and durability
 
+Basic R reach follows Open-KO PlayerMySelf::AttackableDistance:
+weapon reach + (player radius + target radius)/2. Model radii are recovered
+from original NPC_Looks/UPC_DefaultLooks joint assets using the frame-zero
+joint transform bounds, matching N3Chr::Init/FindMinMax/Radius, N3Joint::Tick/
+ReCalcMatrix and N3AnimKey::Load. The target radius is multiplied by packet
+spawn size/100, matching GameProcMain's NPC ScaleSet. Skeleton parsing bounds
+names, key counts and hierarchy depth; invalid/unavailable radii are logged and
+retain the previous2m body fallback. No reference assets are modified or stored
+in Git. A0.15m tolerance covers the two positions' decimetre packet rounding.
+The server keeps its existing horizontal distance check; moving-client
+interpolation and transformed-player model scales remain limits. This change
+applies equally to ordinary/admin basic attacks, not to skill-range formulas.
+Troll King appearance1701/scale240 has about5.34m reach with a1m dagger on race2,
+before rounding tolerance; the old universal3m limit rejected valid attacks.
+Regression compares the same skeleton at sizes100/240 and rejects targets
+beyond their respective reach, plus animation keys and malformed skeletons.
+
 Class/weapon coefficients come from the local coefficient export. Physical
 hits use source-backed attack/armor/hit/random paths and original skill values.
-Not every item bonus, resistance, weapon-defense requirement or PvP formula is
-complete. Imported NPC stats and timed AC/max-HP modifiers affect their damage
+Equipped Item_Ext columns30..34 contribute STR/STA/DEX/INT/CHA (magic power),
+35/36 add direct HP/MP,37..42 add the six resistances, and10/11 add accuracy/
+evasion percentages. These are zero-based original1453 columns, corroborated
+by Open-KO's __TABLE_ITEM_EXT and supplied1453 User::SetSlotItemValue.
+Item_Ext poison/curse are reordered to the native curse/poison packet fields.
+Primary bonuses stack with timed stat buffs before AP, HP, MP, weight and
+hit/evasion calculations. Direct HP/MP bonuses are added before existing caps;
+item stat bonuses remain at zero durability, while existing broken-item
+damage/armor handling remains unchanged. Supplied1453 SetMaxHp/SetMaxMp and
+SetUserAbility corroborate these contribution paths.
+
+Mage spell and elemental-arrow magic-power reads include effective bonuses
+without truncating the total to a byte. Login sends base/bonus byte pairs;
+equipment/buff updates send the existing u16 bonus fields. Source MYINFO in
+User::SendMyInfo and Open-KO GameProcMain corroborate these layouts.
+Weapon-defense reductions, elemental weapon effects, drains and full PvP
+equipment behavior remain incomplete. Imported NPC stats and timed AC/max-HP modifiers affect their damage
 and effective maximum without overwriting prototypes.
 
 Supplementary2086 magic damage at00940640 uses charisma/186,

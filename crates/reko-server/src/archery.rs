@@ -123,7 +123,8 @@ pub(crate) async fn handle(
             first: combat::integer(row, 3).unsigned_abs().min(32767) as u16,
             over_time: combat::integer(row, 4).unsigned_abs().min(32767) as u16,
             duration: combat::integer(row, 5).clamp(0, 255) as u8,
-            charisma: session.character.stats[4],
+            charisma: u16::from(session.character.stats[4])
+                .saturating_add(session.combat.bonus_stats[4]),
             bonus: 0,
             raw_over_time: false,
             raw_first: false,

@@ -20,6 +20,70 @@ pub(crate) fn integer(row: &[CellValue], column: usize) -> i32 {
 mod tests {
     use super::*;
     #[test]
+    fn equipment_attributes_feed_formulas_and_stack_with_timed_bonuses() {
+        let mut base = vec![CellValue::I32(0); 37];
+        base[1] = CellValue::I32(23);
+        let mut ext = vec![CellValue::I32(0); 53];
+        for (col, value) in [
+            (30, 10),
+            (31, 20),
+            (32, 30),
+            (33, 40),
+            (34, 50),
+            (35, 150),
+            (36, 200),
+            (10, 25),
+            (11, 50),
+            (37, 11),
+            (38, 12),
+            (39, 13),
+            (40, 14),
+            (41, 15),
+            (42, 16),
+        ] {
+            ext[col] = CellValue::I32(value);
+        }
+        let catalog = Catalog {
+            coefficients: HashMap::from([(103, [0.001; 14])]),
+            items: HashMap::from([(330310000, base)]),
+            extensions: HashMap::from([(23, HashMap::from([(1, ext)]))]),
+        };
+        let mut character = Character {
+            slot: 0,
+            name: "Bonuses".into(),
+            race: 3,
+            class: 103,
+            face: 0,
+            hair: 0,
+            stats: [60; 5],
+        };
+        let progress = Progress {
+            level: 80,
+            points: [0; 9],
+        };
+        let empty = [Item::default(); 14];
+        let mut gear = empty;
+        gear[9] = Item {
+            id: 330310001,
+            durability: 0,
+            count: 1,
+        };
+        let actual = catalog
+            .calculate_bonuses(&character, &progress, &gear, [1, 2, 3, 4, 5])
+            .unwrap();
+        assert_eq!(actual.bonus_stats, [11, 22, 33, 44, 55]);
+        character.stats = [71, 82, 93, 104, 115];
+        let reference = catalog.calculate(&character, &progress, &empty).unwrap();
+        assert_eq!(actual.hp, reference.hp + 150);
+        assert_eq!(actual.mp, reference.mp + 200);
+        assert_eq!(actual.max_weight, reference.max_weight);
+        assert_eq!(actual.attack, reference.attack);
+        assert!((actual.hit_rate - reference.hit_rate * 1.25).abs() < 0.0001);
+        assert!((actual.evasion - reference.evasion * 1.5).abs() < 0.0001);
+        assert_eq!(actual.resistance, [11, 12, 13, 14, 16, 15]);
+    }
+
+    #[test]
     fn master_rogue_attributes_use_original_daggers_and_reference_coefficients() {
         let game = reko_common::game_dir();
         let rules = Path::new("../../logs/reference-coefficients.csv");
@@ -66,6 +130,30 @@ mod tests {
             (2690, 4110, 75, 80)
         );
         assert_eq!((stats.weight, stats.max_weight), (40, 7000));
+        let progress = Progress {
+            level: 80,
+            points: [0; 9],
+        };
+        gear[9] = Item {
+            id: 330310014,
+            durability: 1,
+            count: 1,
+        };
+        let one_ring = catalog.calculate(&character, &progress, &gear).unwrap();
+        assert_eq!(one_ring.bonus_stats, [0, 0, 8, 0, 0]);
+        gear[11] = gear[9];
+        let two_rings = catalog.calculate(&character, &progress, &gear).unwrap();
+        assert_eq!(two_rings.bonus_stats, [0, 0, 16, 0, 0]);
+        assert_eq!(two_rings.resistance, [30, 30, 30, 0, 0, 0]);
+        assert!(two_rings.attack > one_ring.attack && one_ring.attack > stats.attack);
+        assert!(two_rings.hit_rate > one_ring.hit_rate);
+        let buffed = catalog
+            .calculate_bonuses(&character, &progress, &gear, [0, 0, 15, 0, 0])
+            .unwrap();
+        assert_eq!(buffed.bonus_stats[2], 31);
+        assert!(buffed.attack > two_rings.attack);
+        gear[9] = Item::default();
+        gear[11] = Item::default();
         gear[6].durability = 0;
         gear[8].durability = 0;
         let broken = catalog
@@ -279,12 +367,35 @@ impl Catalog {
         character: &Character,
         progress: &Progress,
         gear: &[Item; 14],
-        bonuses: [u16; 5],
+        mut bonuses: [u16; 5],
     ) -> anyhow::Result<Stats> {
         let c = self
             .coefficients
             .get(&character.class)
             .ok_or_else(|| anyhow::anyhow!("missing coefficient class {}", character.class))?;
+        let mut item_hp = 0u32;
+        let mut item_mp = 0u32;
+        let mut resistance = [0u16; 6];
+        let mut accuracy = 100u32;
+        let mut evasion = 100u32;
+        for item in gear.iter().filter(|item| item.id != 0) {
+            let (_, extension) = self
+                .item(item.id)
+                .ok_or_else(|| anyhow::anyhow!("unresolved equipped item {}", item.id))?;
+            if let Some(extension) = extension {
+                for (bonus, column) in bonuses.iter_mut().zip(30..35) {
+                    *bonus = bonus.saturating_add(integer(extension, column).max(0) as u16);
+                }
+                item_hp += integer(extension, 35).max(0) as u32;
+                item_mp += integer(extension, 36).max(0) as u32;
+                accuracy += integer(extension, 10).max(0) as u32;
+                evasion += integer(extension, 11).max(0) as u32;
+                // Wire order ends in curse/poison; Item_Ext ends in poison/curse.
+                for (value, column) in resistance.iter_mut().zip([37, 38, 39, 40, 42, 41]) {
+                    *value = value.saturating_add(integer(extension, column).max(0) as u16);
+                }
+            }
+        }
         let level = f64::from(progress.level);
         let [strength, stamina, dexterity, intelligence, _] =
             std::array::from_fn(|i| f64::from(character.stats[i]) + f64::from(bonuses[i]));
@@ -341,8 +452,9 @@ impl Catalog {
         let hp = (c[8] * level * level * stamina
             + 0.1 * level * stamina
             + (stamina / 5.0).trunc()
-            + 20.0)
-            .clamp(1.0, 14000.0) as u16;
+            + 20.0
+            + f64::from(item_hp))
+        .clamp(1.0, 14000.0) as u16;
         let mp = if c[9] != 0.0 {
             let intellect = intelligence + 30.0;
             c[9] * level * level * intellect
@@ -354,17 +466,17 @@ impl Catalog {
         };
         Ok(Stats {
             hp,
-            mp: mp.clamp(1.0, 32767.0) as u16,
+            mp: (mp + f64::from(item_mp)).clamp(1.0, 32767.0) as u16,
             attack: ap.clamp(1.0, 32767.0) as u16,
             defence: (c[11] * (level + f64::from(armor))).clamp(0.0, 32767.0) as u16,
             max_weight: ((strength + level) * 50.0).min(32767.0) as u16,
             weight: weight.min(32767) as u16,
             delay_ms,
             range,
-            hit_rate: (1.0 + c[12] * level * dexterity) as f32,
-            evasion: (1.0 + c[13] * level * dexterity) as f32,
+            hit_rate: ((1.0 + c[12] * level * dexterity) * f64::from(accuracy) / 100.0) as f32,
+            evasion: ((1.0 + c[13] * level * dexterity) * f64::from(evasion) / 100.0) as f32,
             weapon_kind: kind,
-            resistance: [0; 6],
+            resistance,
             bonus_stats: bonuses,
         })
     }
