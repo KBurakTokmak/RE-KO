@@ -301,12 +301,20 @@ async fn execute(
     }
     if physical {
         for (_, hit) in &hits {
-            crate::durability::attack(sock, peer, lobby, account, session, hit.damage).await;
+            crate::durability::attack(
+                sock,
+                peer,
+                lobby,
+                account,
+                session,
+                hit.damage.min(32767) as u16,
+            )
+            .await;
         }
     }
     let mut effect = payload.to_vec();
     effect[12..14].copy_from_slice(&1u16.to_le_bytes());
     super::send_response(sock, peer, &None, &effect, "MAGE_EFFECT").await;
-    tracing::info!(%peer,id=spell.id,name=%spell.name,targets=hits.len(),damage=hits.iter().map(|(_,h)|u32::from(h.damage)).sum::<u32>(),"mage spell applied");
+    tracing::info!(%peer,id=spell.id,name=%spell.name,targets=hits.len(),damage=hits.iter().map(|(_,h)|h.damage).sum::<u32>(),"mage spell applied");
     Ok(())
 }

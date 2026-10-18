@@ -13,6 +13,7 @@ struct PendingLogin {
 }
 
 pub(crate) struct Lobby {
+    pub social: Arc<Mutex<super::social::Hub>>,
     pub merchants: Vec<super::shops::Merchant>,
     pub db: Mutex<Connection>,
     pub rules: super::characters::CreationRules,
@@ -42,10 +43,13 @@ impl Lobby {
         super::stat_points::initialize(&db)?;
         super::shops::initialize(&db)?;
         super::population::initialize(&db)?;
+        super::bosses::initialize(&db)?;
+        super::clans::initialize(&db)?;
         super::loot::initialize(&db)?;
         db.execute_batch(include_str!("npc_ai.sql"))?;
         super::quests::initialize(&db)?;
         Ok(Self {
+            social: Arc::new(Mutex::new(super::social::Hub::default())),
             merchants: Vec::new(),
             db: Mutex::new(db),
             rules,

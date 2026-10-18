@@ -73,6 +73,25 @@ fn amounts(
     }
     let share =
         |value: u32| (u64::from(value) * u64::from(credit.damage)).div_ceil(credit.total_damage);
+    if let Some((members, total_level)) = credit.party {
+        if members == 0 || total_level == 0 {
+            return (0, 0);
+        }
+        let difference = i32::from(credit.level) - (total_level / members) as i32;
+        let modifier = match difference {
+            8.. => 200,
+            5.. => 150,
+            2.. => 120,
+            _ => 100,
+        };
+        let split = |value: u32, bonus: u64| {
+            let base = (share(value) * modifier).div_ceil(100);
+            (base * (100 + bonus * u64::from(members - 1)) * u64::from(player_level))
+                .div_ceil(100 * u64::from(total_level))
+                .min(u64::from(u32::MAX)) as u32
+        };
+        return (split(xp, 30), split(np, 20));
+    }
     let difference = i16::from(credit.level) - i16::from(player_level);
     let percent = match difference {
         ..=-14 => 20,
@@ -296,6 +315,26 @@ pub(crate) fn level_packet(s: &Session) -> Vec<u8> {
 mod tests {
     use super::*;
     #[test]
+    fn party_xp_uses_group_damage_bonus_level_weighting_and_no_solo_low_level_penalty() {
+        let mut c = crate::monsters::ExperienceCredit {
+            party: Some((2, 160)),
+            prototype: 100,
+            level: 6,
+            position: crate::movement::Position::default(),
+            damage: 90,
+            total_damage: 100,
+        };
+        assert_eq!(amounts(&c, 80, 1000, 100), (585, 54));
+        c.party = None;
+        assert_eq!(amounts(&c, 80, 1000, 100), (180, 90));
+        c.party = Some((2, 100));
+        c.level = 58;
+        c.damage = 100;
+        assert_eq!(amounts(&c, 60, 1000, 100), (1560, 144));
+        assert_eq!(amounts(&c, 40, 1000, 100), (1040, 96));
+    }
+
+    #[test]
     fn new_characters_start_with_300_np_without_resetting_spent_or_monthly_points() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -372,6 +411,7 @@ mod tests {
             return;
         };
         let mut credit = crate::monsters::ExperienceCredit {
+            party: None,
             prototype: 100,
             level: 6,
             position: s.position,

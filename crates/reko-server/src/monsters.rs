@@ -3,6 +3,9 @@
 use crate::{movement::Position, skills};
 use reko_assets::{CellValue, Table};
 use std::{collections::HashMap, path::Path, sync::Mutex};
+fn basic_reach(weapon: f32, body: f32) -> f32 {
+    ((weapon + body) * 1.2).max(3.0) + 0.15
+}
 #[path = "npc_ai.rs"]
 mod ai;
 
@@ -14,6 +17,7 @@ pub(crate) struct Event {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ExperienceCredit {
+    pub party: Option<(u32, u32)>,
     pub prototype: u16,
     pub level: u8,
     pub position: Position,
@@ -24,6 +28,197 @@ pub(crate) struct ExperienceCredit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn party_monster_death_queues_each_members_rewards_and_kill_once() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let lobby = crate::social::tests::lobby();
+        let a = crate::social::tests::player(&lobby, "WorldA", 1, 80);
+        let b = crate::social::tests::player(&lobby, "WorldB", 1, 80);
+        lobby
+            .social
+            .lock()
+            .unwrap()
+            .parties
+            .insert(a.player_id, vec![a.player_id, b.player_id]);
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        let mut world = World::load(&game).unwrap();
+        world.social = Some(lobby.social.clone());
+        world.load_population(&db, &game).unwrap();
+        let position = world.inner.lock().unwrap().mobs[&12000].position;
+        let hit = world
+            .hit_owned(
+                12000,
+                Attack {
+                    position,
+                    range: 5.0,
+                    attack: 0,
+                    percent: 0,
+                    extra: 1000,
+                    skill: true,
+                    drain_percent: 0,
+                    arrow: false,
+                    penetrate: false,
+                    magic: None,
+                },
+                Some("WorldA"),
+                || Ok(()),
+            )
+            .unwrap();
+        assert!(hit.dead);
+        for name in ["WorldA", "WorldB"] {
+            let credits = world.take_experience(name);
+            assert_eq!(credits.len(), 1);
+            assert_eq!(credits[0].party, Some((2, 160)));
+            assert_eq!(world.take_quest_kills(name), [100]);
+            assert!(world.take_experience(name).is_empty());
+        }
+    }
+
+    #[test]
+    fn percent_drains_use_current_health_above_legacy_packet_limit() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let world = World::load(&game).unwrap();
+        let position = {
+            let mut inner = world.inner.lock().unwrap();
+            let mob = inner.mobs.get_mut(&10000).unwrap();
+            mob.hp = 1_000_000;
+            mob.max_hp = 1_000_000;
+            mob.position
+        };
+        let mut events = world.events.subscribe();
+        for (percent, expected, remaining) in [
+            (10, 100000, 900000),
+            (10, 90000, 810000),
+            (5, 40500, 769500),
+            (5, 38475, 731025),
+        ] {
+            let hit = world
+                .hit_owned(
+                    10000,
+                    Attack {
+                        position,
+                        range: 5.0,
+                        attack: 0,
+                        percent: 0,
+                        extra: 0,
+                        skill: true,
+                        drain_percent: percent,
+                        arrow: false,
+                        penetrate: false,
+                        magic: None,
+                    },
+                    Some("DrainTester"),
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(hit.damage, expected);
+            assert!(!hit.dead);
+            let health = events.try_recv().unwrap().packet;
+            assert_eq!(
+                u32::from_le_bytes(health[8..12].try_into().unwrap()),
+                remaining
+            );
+            assert_eq!(
+                i16::from_le_bytes(health[12..14].try_into().unwrap()),
+                -32767
+            );
+        }
+        assert_eq!(
+            world.inner.lock().unwrap().mobs[&10000].damage_by["DrainTester"],
+            268975
+        );
+    }
+
+    #[test]
+    fn basic_reach_has_owner_multiplier_and_minimum_without_affecting_skill_ranges() {
+        assert!((basic_reach(0.1, 0.2) - 3.15).abs() < 0.001);
+        assert!((basic_reach(1.0, 4.0) - 6.15).abs() < 0.001);
+    }
+
+    #[test]
+    fn natural_boss_melee_and_dot_death_use_one_timer_and_manual_summons_do_not() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        crate::bosses::initialize(&db).unwrap();
+        db.execute_batch("INSERT INTO world_boss_pools VALUES ('21:test',21,'Test Boss',21600000);INSERT INTO world_boss_members VALUES (12000,'21:test');").unwrap();
+        let world = World::load(&game).unwrap();
+        world.load_population(&db, &game).unwrap();
+        let p = world.inner.lock().unwrap().mobs[&12000].position;
+        let attack = || Attack {
+            position: p,
+            range: 5.0,
+            attack: 0,
+            percent: 100,
+            extra: 1000,
+            skill: true,
+            drain_percent: 0,
+            arrow: false,
+            penetrate: false,
+            magic: None,
+        };
+        assert!(
+            world
+                .hit_owned(12000, attack(), Some("Tester"), || Ok(()))
+                .unwrap()
+                .dead
+        );
+        assert!(world.boss_status(21, "Test")[0].contains("06:00:00"));
+        let due = world
+            .bosses
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .status(21, "", skills::now_ms());
+        assert_eq!(due.len(), 1);
+        let now = skills::now_ms();
+        world.tick(now + 21_599_000);
+        assert!(world.validate(12000, p, 100.0).is_err());
+        world.tick(now + 21_601_000);
+        assert_eq!(world.inner.lock().unwrap().mobs[&12000].hp, 100);
+        let mut definition = crate::population::load(&db, &game).unwrap().remove(0);
+        definition.position = p;
+        let manual = world.summon(definition, &Default::default()).unwrap();
+        assert!(
+            world
+                .hit_owned(manual, attack(), Some("Tester"), || Ok(()))
+                .unwrap()
+                .dead
+        );
+        assert!(world.boss_status(21, "")[0].contains("alive"));
+        let mut dot = attack();
+        dot.extra = 0;
+        dot.magic = Some(MagicDamage {
+            element: 1,
+            first: 0,
+            over_time: 100,
+            duration: 2,
+            charisma: 60,
+            bonus: 0,
+            raw_first: true,
+            raw_over_time: true,
+        });
+        let p2 = world.inner.lock().unwrap().mobs[&12000].position;
+        dot.position = p2;
+        world
+            .hit_owned(12000, dot, Some("Tester"), || Ok(()))
+            .unwrap();
+        world.tick(skills::now_ms() + 3000);
+        assert_eq!(world.inner.lock().unwrap().mobs[&12000].hp, 0);
+        assert!(world.boss_status(21, "")[0].contains("respawn in"));
+        assert_eq!(world.take_quest_kills("Tester").len(), 3);
+    }
     #[test]
     fn imported_monsters_use_database_timers_and_rectangles_for_hits_and_dots() {
         let game = reko_common::game_dir();
@@ -189,6 +384,8 @@ mod tests {
         assert_eq!(packet[23], 6);
         assert_eq!(&packet[24..30], b"Target");
         let world = World {
+            social: None,
+            bosses: Mutex::new(None),
             appearances: std::collections::HashSet::from([100]),
             radii: crate::model_radius::Radii::default(),
             inner: Mutex::new(Inner {
@@ -298,7 +495,7 @@ mod tests {
         );
         assert!(
             world
-                .hit_basic_owned(large, attack(3190), Some("Test"), 2, || panic!(
+                .hit_basic_owned(large, attack(3180), Some("Test"), 2, || panic!(
                     "out-of-range hit charged"
                 ))
                 .is_err()
@@ -458,6 +655,8 @@ struct Inner {
 }
 
 pub(crate) struct World {
+    pub social: Option<std::sync::Arc<Mutex<crate::social::Hub>>>,
+    bosses: Mutex<Option<crate::bosses::Scheduler>>,
     appearances: std::collections::HashSet<u32>,
     radii: crate::model_radius::Radii,
     quest_kills: Mutex<HashMap<String, Vec<u16>>>,
@@ -470,7 +669,7 @@ pub(crate) struct World {
 
 #[derive(Debug)]
 pub(crate) struct Hit {
-    pub damage: u16,
+    pub damage: u32,
     pub dead: bool,
 }
 
@@ -665,6 +864,8 @@ impl World {
             );
         }
         Ok(Self {
+            social: None,
+            bosses: Mutex::new(None),
             radii: crate::model_radius::Radii::load(game, &looks)?,
             appearances: looks
                 .rows
@@ -746,6 +947,9 @@ impl World {
 
     pub fn load_population(&self, db: &rusqlite::Connection, game: &Path) -> anyhow::Result<()> {
         let definitions = crate::population::load(db, game)?;
+        let bosses = crate::bosses::Scheduler::load(db, &definitions, skills::now_ms())?;
+        let controlled = bosses.members();
+        let active = bosses.active();
         let mut inner = self.inner.lock().unwrap();
         for s in definitions.into_iter().filter(|s| s.monster) {
             anyhow::ensure!(
@@ -775,6 +979,18 @@ impl World {
                 },
             );
         }
+        for id in &controlled {
+            let mob = inner.mobs.get_mut(id).unwrap();
+            mob.hp = 0;
+            mob.respawn = u64::MAX;
+        }
+        for s in active {
+            let mob = inner.mobs.get_mut(&s.id).unwrap();
+            mob.position = s.position;
+            mob.hp = mob.max_hp;
+            mob.respawn = 0;
+        }
+        *self.bosses.lock().unwrap() = Some(bosses);
         tracing::info!(
             monsters = inner.mobs.len(),
             "world combat population loaded"
@@ -898,10 +1114,15 @@ impl World {
                     .definition
                     .as_ref()
                     .map_or(1.0, |s| f32::from(s.size) / 100.0);
-                Some((player + target * scale) / 2.0 + 0.15)
+                Some((player + target * scale) / 2.0)
             })
             .unwrap_or(2.0);
-        if dx.hypot(dz) > range + body {
+        let limit = if race.is_some() {
+            basic_reach(range, body)
+        } else {
+            range + body
+        };
+        if dx.hypot(dz) > limit {
             tracing::info!(
                 target = id,
                 player_x = position.x,
@@ -909,14 +1130,14 @@ impl World {
                 target_x = mob.position.x,
                 target_z = mob.position.z,
                 distance = dx.hypot(dz),
-                limit = range + body,
+                limit,
                 "combat range rejected"
             );
             return Err("The target is too far away.");
         }
         pay()?;
         let amount = if drain_percent > 0 {
-            mob.hp * u32::from(drain_percent) / 100
+            (u64::from(mob.hp) * u64::from(drain_percent) / 100) as u32
         } else {
             let base = if penetrate {
                 u32::from(attack)
@@ -941,7 +1162,13 @@ impl World {
                 magic.sample(magic.first, random >> 16, mob.resistance(magic.element))
             }
         });
-        let damage = (amount + u32::from(magic_damage)).min(32767).min(mob.hp) as u16;
+        let amount = amount.saturating_add(u32::from(magic_damage));
+        let damage = if drain_percent > 0 {
+            amount
+        } else {
+            amount.min(32767)
+        }
+        .min(mob.hp);
         if let Some(magic) = magic
             && magic.over_time > 0
             && magic.duration >= 2
@@ -959,17 +1186,26 @@ impl World {
                 next: skills::now_ms() + 2000,
             });
         }
-        mob.hp -= u32::from(damage);
+        let natural_boss = if damage == mob.hp {
+            self.boss_death(id, skills::now_ms())?
+        } else {
+            false
+        };
+        mob.hp -= damage;
         if let Some(owner) = owner {
-            *mob.damage_by.entry(owner.to_owned()).or_default() += u32::from(damage);
+            *mob.damage_by.entry(owner.to_owned()).or_default() += damage;
         }
         let dead = mob.hp == 0;
         if dead {
-            mob.respawn = mob.respawn_at(skills::now_ms());
+            mob.respawn = if natural_boss {
+                u64::MAX
+            } else {
+                mob.respawn_at(skills::now_ms())
+            };
             mob.dots.clear();
             self.quest_death(mob);
         }
-        let health = mob.health(-(damage as i16), false);
+        let health = mob.health(-(damage.min(32767) as i16), false);
         let zone = mob.position.zone;
         let loot_packet = if dead { self.drop(mob) } else { None };
         drop(inner);
@@ -988,6 +1224,25 @@ impl World {
         Ok(Hit { damage, dead })
     }
     fn quest_death(&self, mob: &Mob) {
+        if let (Some(hub), Some(definition)) = (&self.social, &mob.definition) {
+            let hub = hub.lock().unwrap();
+            let (credits, kills) = hub.death(
+                definition.prototype,
+                mob.level,
+                mob.position,
+                &mob.damage_by,
+            );
+            let mut pending = self.experience.lock().unwrap();
+            for (owner, credit) in credits {
+                pending.entry(owner).or_default().push(credit);
+            }
+            drop(pending);
+            let mut pending = self.quest_kills.lock().unwrap();
+            for owner in kills {
+                pending.entry(owner).or_default().push(definition.prototype);
+            }
+            return;
+        }
         if let Some(definition) = &mob.definition {
             let total_damage = mob.damage_by.values().map(|v| u64::from(*v)).sum();
             let mut credits = self.experience.lock().unwrap();
@@ -997,6 +1252,7 @@ impl World {
                         .entry(owner.clone())
                         .or_default()
                         .push(ExperienceCredit {
+                            party: None,
                             prototype: definition.prototype,
                             level: mob.level,
                             position: mob.position,
@@ -1042,11 +1298,58 @@ impl World {
         )
     }
 
+    fn boss_death(&self, id: u16, now: u64) -> Result<bool, &'static str> {
+        self.bosses
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map_or(Ok(false), |b| b.death(id, now))
+            .map_err(|error| {
+                tracing::error!(entity=id,%error,"boss death timer scheduling failed");
+                "Boss timer could not be scheduled; target unchanged."
+            })
+    }
+    pub(crate) fn boss_status(&self, zone: u8, query: &str) -> Vec<String> {
+        self.bosses
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or_else(Vec::new, |b| b.status(zone, query, skills::now_ms()))
+    }
+
     pub(crate) fn tick(&self, now: u64) -> Vec<Event> {
         let mut inner = self.inner.lock().unwrap();
         let mut events = Vec::new();
         inner.rng = inner.rng.wrapping_mul(6364136223846793005).wrapping_add(1);
         let random = inner.rng;
+        let due = self
+            .bosses
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map_or_else(Vec::new, |b| b.tick(now));
+        for s in due {
+            let mob = inner.mobs.get_mut(&s.id).unwrap();
+            mob.position = s.position;
+            mob.hp = mob.max_hp;
+            mob.respawn = 0;
+            mob.damage_by.clear();
+            mob.modifiers.clear();
+            mob.dots.clear();
+            mob.speed_percent = 100;
+            mob.slow_until = 0;
+            mob.next_regen = now + 10000;
+            let mut out = vec![0x0a, 2];
+            out.extend(mob.id.to_le_bytes());
+            events.push(Event {
+                zone: mob.position.zone,
+                packet: out,
+            });
+            events.push(Event {
+                zone: mob.position.zone,
+                packet: mob.spawn(),
+            });
+        }
         for mob in inner.mobs.values_mut() {
             let hp_modified = mob.modifiers.contains_key(&1);
             mob.modifiers.retain(|_, m| now < m.until);
@@ -1106,6 +1409,14 @@ impl World {
                 mob.dots.retain(|dot| dot.remaining > 0);
                 let loss = loss.min(mob.hp).min(32767);
                 if loss > 0 {
+                    let natural_boss = if loss == mob.hp {
+                        match self.boss_death(mob.id, now) {
+                            Ok(boss) => boss,
+                            Err(_) => continue,
+                        }
+                    } else {
+                        false
+                    };
                     mob.hp -= loss;
                     events.push(Event {
                         zone: mob.position.zone,
@@ -1114,7 +1425,11 @@ impl World {
                     if mob.hp == 0 {
                         self.quest_death(mob);
                         mob.dots.clear();
-                        mob.respawn = mob.respawn_at(now);
+                        mob.respawn = if natural_boss {
+                            u64::MAX
+                        } else {
+                            mob.respawn_at(now)
+                        };
                         let mut death = vec![0x11];
                         death.extend(mob.id.to_le_bytes());
                         events.push(Event {

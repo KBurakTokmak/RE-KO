@@ -43,3 +43,22 @@ socket disconnect and process termination. Keep captures and test character
 details local. Administrative `hurt N` is allowed only by character_privileges.
 Tagged admins also have fixed R damage, monster protection and native GM
 collision behavior; normal skill costs still apply. See [admin testing](re/admin-testing.md).
+
+## Party, clan and large-drain checks
+
+- On a high-HP target, cast10percent twice and then5percent: HP loss uses the
+  remaining HP each time and can exceed32767. Large-hit notices give full totals.
+- Create a clan from the home Inn Host as a level20+ character with500000Noah.
+  Check the deducted fee, roster, own clan display and persistence after relog.
+  Invite a same-nation character; reject an enemy-nation invitation.
+- With two similar-level characters, invite/accept through native party controls.
+  Check the roster, HP/MP updates, private party chat and shared nearby XP/quest
+  kills. Pick up coins and multiple items to check level shares and item rotation.
+  Move a member beyond50m and verify they do not receive kill rewards.
+- Test leave/kick, leader promotion and disconnect. A departing leader disbands
+  the party; clans persist. Existing solo loot, shops and storage remain checks.
+
+The supported local launcher permits one game instance. Manual two-client
+coverage therefore needs a second PC/client with a different account. Complete
+one account's login/game connection before logging in another behind the same IP;
+native token binding for simultaneous pending logins remains unrecovered.

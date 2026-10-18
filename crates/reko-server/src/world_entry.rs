@@ -43,6 +43,7 @@ impl Bootstrap {
 
 #[derive(Clone)]
 pub(crate) struct Session {
+    pub clan: crate::clans::Info,
     pub is_admin: bool,
     pub rewards: crate::quest_rewards::Totals,
     pub max_exp: u32,
@@ -82,6 +83,7 @@ impl Session {
             return None;
         }
         Some(Self {
+            clan: crate::clans::Info::default(),
             is_admin: false,
             rewards: crate::quest_rewards::Totals::default(),
             max_exp: 0,
@@ -163,10 +165,12 @@ impl Session {
         put_u32(&mut packet, self.rewards.loyalty);
         put_u32(&mut packet, self.rewards.monthly);
         packet.push(0);
+        put_u16(&mut packet, self.clan.id);
+        packet.push(self.clan.fame);
         put_u16(&mut packet, 0);
-        packet.push(0);
-        put_u16(&mut packet, 0);
-        packet.extend_from_slice(&[0, 0, 0, 0]);
+        packet.extend_from_slice(&[self.clan.grade, self.clan.name.len() as u8]);
+        packet.extend_from_slice(self.clan.name.as_bytes());
+        packet.extend_from_slice(&[0, 0]);
         put_u16(&mut packet, 0);
         put_u16(&mut packet, 0);
         for value in [
@@ -277,6 +281,7 @@ mod tests {
 
     fn session() -> Session {
         Session {
+            clan: crate::clans::Info::default(),
             is_admin: false,
             rewards: crate::quest_rewards::Totals::default(),
             max_exp: 0,

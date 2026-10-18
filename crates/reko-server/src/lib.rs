@@ -12,13 +12,16 @@ use tracing::Instrument;
 mod admin;
 mod archery;
 mod auth;
+mod bosses;
 mod characters;
 mod chat;
+mod clans;
 mod combat;
 pub mod crypto;
 mod durability;
 mod framing;
 mod gm_spawn;
+mod gm_teleport;
 mod hotkeys;
 mod inventory;
 mod lobby;
@@ -32,6 +35,7 @@ mod model_radius;
 mod monsters;
 mod movement;
 mod npc_scripts;
+mod party;
 mod population;
 mod priest;
 #[cfg(test)]
@@ -44,6 +48,7 @@ mod resources;
 mod rogue_tests;
 mod shops;
 mod skills;
+mod social;
 mod starter;
 mod stat_points;
 mod storage;
@@ -324,11 +329,71 @@ async fn handle_game_payload(
     account: &mut Option<String>,
     world: &mut Option<world_entry::Session>,
 ) {
+    if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+        social::synchronize(lobby, account, s);
+        social::flush(sock, peer, lobby, s).await;
+    }
+    handle_game_payload_inner(sock, peer, payload, lobby, account, world).await;
+    if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+        social::synchronize(lobby, account, s);
+        social::flush(sock, peer, lobby, s).await;
+    }
+}
+async fn handle_game_payload_inner(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    payload: &[u8],
+    lobby: &lobby::Lobby,
+    account: &mut Option<String>,
+    world: &mut Option<world_entry::Session>,
+) {
     if payload.is_empty() {
         return;
     }
     let opcode = payload[0];
     match opcode {
+        0x16 => {
+            if let Some(s) = world.as_ref().filter(|s| s.entered)
+                && payload.len() >= 3
+            {
+                let count = usize::from(u16::from_le_bytes([payload[1], payload[2]]));
+                if count <= MAX_PLAYERS && payload.len() == 3 + 2 * count {
+                    let mut h = lobby.social.lock().unwrap();
+                    let mut seen = std::collections::HashSet::new();
+                    let mut records = Vec::new();
+                    for bytes in payload[3..].as_chunks::<2>().0 {
+                        let id = u16::from_le_bytes(*bytes);
+                        if id != s.player_id
+                            && seen.insert(id)
+                            && h.players.get(&id).is_some_and(|p| {
+                                !p.s.zone_loading
+                                    && population::same_region_view(p.s.position, s.position)
+                            })
+                        {
+                            records.push(h.user_in(id)[2..].to_vec());
+                        }
+                    }
+                    let mut p = vec![0x16];
+                    p.extend((records.len() as u16).to_le_bytes());
+                    for record in records {
+                        p.extend(record);
+                    }
+                    h.send(s.player_id, p);
+                }
+            }
+        }
+        0x2f => {
+            if let Some(s) = world.as_ref().filter(|s| s.entered) {
+                party::process(&mut lobby.social.lock().unwrap(), s.player_id, payload);
+            }
+        }
+        0x3c => {
+            if let (Some(account), Some(s)) =
+                (account.as_deref(), world.as_mut().filter(|s| s.entered))
+            {
+                clans::process(lobby, account, s, payload);
+            }
+        }
         // Opcode 0x2B: WIZ_VERSION_CHECK
         0x2B => {
             tracing::info!(%peer, dump = %format_hex(payload), "handling game server WIZ_VERSION_CHECK (0x2B)");
@@ -442,6 +507,16 @@ async fn handle_game_payload(
                 }
                 _ => None,
             };
+            let character = character.filter(|_| {
+                !lobby.social.lock().unwrap().players.values().any(|p| {
+                    account
+                        .as_deref()
+                        .is_some_and(|a| p.account.eq_ignore_ascii_case(a))
+                        && world
+                            .as_ref()
+                            .is_none_or(|current| current.player_id != p.s.player_id)
+                })
+            });
             *world = character.and_then(world_entry::Session::new);
             if let (Some(session), Some(registry)) = (world.as_ref(), lobby.monsters.as_ref()) {
                 registry.take_experience(&session.character.name);
@@ -453,6 +528,9 @@ async fn handle_game_payload(
                 book.register_owner(&session.character.name, session.character.nation());
             }
             if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+                session.clan =
+                    clans::load(&lobby.db.lock().unwrap(), account, session.character.slot)
+                        .unwrap_or_default();
                 session.is_admin =
                     admin::is_admin(&lobby.db.lock().unwrap(), account, session.character.slot)
                         .unwrap_or(false);
@@ -741,8 +819,15 @@ async fn handle_game_payload(
                         result = if hit.dead { 2 } else { 1 };
                         session.next_attack = now + session.combat.delay_ms;
                         if let Some(account) = account.as_deref() {
-                            durability::attack(sock, peer, lobby, account, session, hit.damage)
-                                .await;
+                            durability::attack(
+                                sock,
+                                peer,
+                                lobby,
+                                account,
+                                session,
+                                hit.damage.min(32767) as u16,
+                            )
+                            .await;
                             match magic::remove_stealth(lobby, account, session, false) {
                                 Ok(true) => {
                                     send_response(
@@ -989,6 +1074,12 @@ async fn handle_game_payload(
             };
             if channel == 1
                 && let Some(account) = account.as_deref()
+                && gm_teleport::handle(sock, peer, lobby, account, session, text).await
+            {
+                return;
+            }
+            if channel == 1
+                && let Some(account) = account.as_deref()
                 && gm_spawn::handle(sock, peer, lobby, account, session, text).await
             {
                 return;
@@ -1002,6 +1093,15 @@ async fn handle_game_payload(
             if channel == 1
                 && let Some(account) = account.as_deref()
                 && utility::training_command(sock, peer, lobby, account, session, text).await
+            {
+                return;
+            }
+            if matches!(channel, 3 | 6)
+                && lobby
+                    .social
+                    .lock()
+                    .unwrap()
+                    .chat(session.player_id, channel, text)
             {
                 return;
             }
@@ -1285,6 +1385,10 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     let mut idle_reported = false;
     let mut account = None;
     let mut world: Option<world_entry::Session> = None;
+    let mut social_guard = social::Guard {
+        lobby: lobby.clone(),
+        id: None,
+    };
     let mut chat_receiver = lobby.chat.subscribe();
     let mut npc_receiver = lobby.monsters.as_ref().map(|w| w.events.subscribe());
     let mut skill_tick = tokio::time::interval(Duration::from_millis(250));
@@ -1302,6 +1406,8 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
             _ = skill_tick.tick() => {
                 if let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), account.as_deref()) {
                     tick_character(&mut sock,peer,&lobby,account,session,skills::now_ms()).await;
+                    social::synchronize(&lobby,account,session);
+                    social::flush(&mut sock,peer,&lobby,session).await;
                 }
                 continue;
             }
@@ -1355,6 +1461,13 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                             )
                             .instrument(span)
                             .await;
+                            let current = world.as_ref().filter(|s| s.entered).map(|s| s.player_id);
+                            if social_guard.id != current {
+                                if let Some(old) = social_guard.id {
+                                    lobby.social.lock().unwrap().disconnect(old);
+                                }
+                                social_guard.id = current;
+                            }
                         }
                         Ok(None) => break,
                         Err(error) => {
@@ -1397,13 +1510,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let coefficients = PathBuf::from("logs/reference-coefficients.csv");
     if coefficients.exists() {
         lobby.combat = Some(combat::Catalog::load(&cfg.game_dir, &coefficients)?);
+        lobby
+            .combat
+            .as_mut()
+            .unwrap()
+            .load_level_bounds(&lobby.db.lock().unwrap())?;
     }
     let mut target_world = monsters::World::load(&cfg.game_dir)?;
+    target_world.social = Some(lobby.social.clone());
     if let Some(catalog) = lobby.combat.as_ref() {
-        target_world.loot = Some(Arc::new(loot::Book::load(
-            &lobby.db.lock().unwrap(),
-            catalog,
-        )?));
+        let mut book = loot::Book::load(&lobby.db.lock().unwrap(), catalog)?;
+        book.social = Some(lobby.social.clone());
+        target_world.loot = Some(Arc::new(book));
     }
     let targets = Arc::new(target_world);
     targets.load_population(&lobby.db.lock().unwrap(), &cfg.game_dir)?;

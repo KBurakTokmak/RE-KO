@@ -1,4 +1,4 @@
-//! v1453 chat framing; social-group routing is not implemented yet.
+//! v1453 chat framing; party/clan routing uses the shared social registry.
 
 use crate::{movement::Position, world_entry::Session};
 

@@ -33,12 +33,19 @@ An empty database cannot provide the documented world/combat features.
 ```powershell
 python scripts/Import-1453WorldRules.py --apply
 python scripts/Import-1453Population.py --all-zones --apply
+python scripts/Import-1453BossPools.py --apply
 python scripts/Import-1453NpcAI.py --apply
 python scripts/Import-1453MonsterCatalog.py --reference ../PV_1453/inspection/K_MONSTER.csv --apply
 python scripts/Import-1453TravelQuests.py --apply
 python scripts/Import-1453Experience.py --apply
+python scripts/Import-1453ItemRequirements.py --reference "path/to/ITEM.csv" --apply
 python scripts/Import-MapTriggers.py --apply
 ```
+
+Replace `path/to/ITEM.csv` with your export location. The ITEM CSV must contain `Num`, `ReqLevel` and `ReqLevelMax`, exported from the
+supplied1453 database. Boss grouping requires the population import first and
+does not replace source spawn rows. Both new importers support a dry run by
+omitting `--apply`.
 
 The final trigger importer currently queries a local reference SQL Server;
 it is an import-time dependency, not a runtime backend. Imports depend on the

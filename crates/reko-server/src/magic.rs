@@ -472,7 +472,15 @@ pub(crate) async fn handle(
         Ok(hit) => {
             resources::sync(sock, peer, lobby, account, session, paid.unwrap()).await;
             if !drain {
-                crate::durability::attack(sock, peer, lobby, account, session, hit.damage).await;
+                crate::durability::attack(
+                    sock,
+                    peer,
+                    lobby,
+                    account,
+                    session,
+                    hit.damage.min(32767) as u16,
+                )
+                .await;
             }
             if spell.types[1] == 4
                 && let Some(row) = secondary
@@ -494,6 +502,17 @@ pub(crate) async fn handle(
             let mut packet = skills::effect(id, caster);
             packet[8..10].copy_from_slice(&target.to_le_bytes());
             super::send_response(sock, peer, &None, &packet, "SKILL_EFFECT").await;
+            if drain && hit.damage > 32767 {
+                let text = format!("{} inflicted {} damage.", spell.name, hit.damage);
+                let notice = crate::chat::packet(
+                    7,
+                    session.character.nation(),
+                    u16::MAX,
+                    "",
+                    text.as_bytes(),
+                );
+                super::send_response(sock, peer, &None, &notice, "PERCENT_DAMAGE_TOTAL").await;
+            }
             tracing::info!(%peer,id,name=%spell.name,target,damage=hit.damage,dead=hit.dead,drain,"combat skill applied");
         }
         Err(reason) => refused(sock, peer, session, id, reason).await,

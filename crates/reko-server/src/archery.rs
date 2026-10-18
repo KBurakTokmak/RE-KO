@@ -153,7 +153,15 @@ pub(crate) async fn handle(
     );
     match result {
         Ok(hit) => {
-            crate::durability::attack(sock, peer, lobby, account, session, hit.damage).await;
+            crate::durability::attack(
+                sock,
+                peer,
+                lobby,
+                account,
+                session,
+                hit.damage.min(32767) as u16,
+            )
+            .await;
             if spell.types[1] == 4
                 && let Some(row) = secondary
                 && combat::integer(row, 1) == 6

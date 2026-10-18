@@ -14,8 +14,9 @@ are `magic.rs`, `archery.rs`, `mage.rs`, `priest.rs`, `utility.rs` and `skills.r
 | Mage | Direct/periodic elemental damage, ground AoE, staff attacks, resistance buffs, Absolute Power, Instantly Magic | Summoning/teleports, reflection, several player-only drains/control effects |
 | Priest | Instant/periodic self healing, HP/AC/stat/resistance buffs, cures, physical/offensive skills, NPC AC/max-HP curses | Other-player/party heals, resurrection and several control/counter-curse effects |
 
-Group effects currently support the caster where implemented; that is not a
-party system. Unsupported effects fail without charging resources. See the
+Group skill effects currently support the caster where implemented. Party
+membership and rewards now exist, but complete group-target skill delivery
+remains separate. Unsupported effects fail without charging resources. See the
 [backlog](../design/1453-feature-backlog.md) for individual dependencies.
 
 Costs, cooldowns, reagents and persistent effects commit atomically. Cast and
@@ -39,8 +40,19 @@ requirements roll back costs. Potions retain their own consumption/cooldown rule
 
 ## Damage, equipment and durability
 
-Basic R reach follows Open-KO PlayerMySelf::AttackableDistance:
-weapon reach + (player radius + target radius)/2. Model radii are recovered
+Rogue5/10percent drains use the target's **current** HP, with integer truncation,
+matching supplied1453 `MagicInstance::ExecuteType3` direct type9 below100.
+The server keeps32-bit actual damage and credit, so32767 does not cap these
+percentages. The native NPC HP packet has full32-bit maximum/current HP but a
+signed16-bit display delta; that field alone is bounded. Large drains also send
+a system notice reporting the full damage. Ordinary physical damage caps and
+other spell/recovery mechanics are unchanged.
+
+
+Basic R starts from Open-KO PlayerMySelf::AttackableDistance:
+weapon reach + (player radius + target radius)/2. At the owner's request, multiply
+that sum by1.20 and apply a3m minimum, then add0.15m packet-rounding tolerance.
+Model radii are recovered
 from original NPC_Looks/UPC_DefaultLooks joint assets using the frame-zero
 joint transform bounds, matching N3Chr::Init/FindMinMax/Radius, N3Joint::Tick/
 ReCalcMatrix and N3AnimKey::Load. The target radius is multiplied by packet
@@ -51,8 +63,8 @@ in Git. A0.15m tolerance covers the two positions' decimetre packet rounding.
 The server keeps its existing horizontal distance check; moving-client
 interpolation and transformed-player model scales remain limits. This change
 applies equally to ordinary/admin basic attacks, not to skill-range formulas.
-Troll King appearance1701/scale240 has about5.34m reach with a1m dagger on race2,
-before rounding tolerance; the old universal3m limit rejected valid attacks.
+Troll King appearance1701/scale240 has about6.41m reach with a1m dagger on race2,
+before rounding tolerance. Small targets still allow at least3.15m.
 Regression compares the same skeleton at sizes100/240 and rejects targets
 beyond their respective reach, plus animation keys and malformed skeletons.
 

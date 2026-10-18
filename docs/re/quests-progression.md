@@ -58,7 +58,8 @@ Reward eligibility requires a living entered character in the same zone within
 thresholds; at80 it caps at that level's threshold. Level-up gives3 stat points
 through60,5afterward, and2 skill points per level starting at10; stats/vitals
 recalculate. Normal point allocation preserves current HP/MP on max increases.
-Death XP loss/delevel/refunds and party reward rules remain unimplemented.
+Death XP loss/delevel/refunds remain unimplemented. Party XP and nearby quest
+kill sharing are described in [social systems](social.md).
 
 Normal new characters receive20,000Noah,300NP,0monthlyNP and the configured
 original+1 starter gear. The300NP insertion trigger runs at creation and never

@@ -11,8 +11,9 @@ generated exports, account lists and deployment history do not belong here.
 | [Testing](testing.md) | Automated checks and useful in-game regression tests |
 | [Feature backlog](design/1453-feature-backlog.md) | Selectable missing/partial systems with source pointers |
 | [Protocol](re/protocol.md) | Native packet layouts and UI ownership requirements |
+| [Parties and clans](re/social.md) | Online players, party rewards/loot, nation-specific clan membership |
 | [Accounts](re/accounts.md) | First-login password registration and permanent server faction |
-| [Admin testing](re/admin-testing.md) | Fixed damage, monster protection, GM collision and monster summoning |
+| [Admin testing](re/admin-testing.md) | Fixed damage, monster protection, GM collision, monster summoning and coordinate teleport |
 | [Skillbar](re/skillbar.md) | Per-character native shortcut save/load |
 | [Tables](re/tbl.md) | TBL cipher and binary layout |
 | [Skills and combat](re/skills-combat.md) | Supported effects, formulas, costs and known gaps |

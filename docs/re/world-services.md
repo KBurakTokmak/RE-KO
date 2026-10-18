@@ -12,6 +12,22 @@ metadata persist in SQLite. RegenType0 uses the source timer; type1 is an initia
 one-life spawn. Unsupported event conditions await controllers instead of guessed
 schedules. Dungeon-family metadata alone does not suppress initial spawns.
 
+Rare bosses use `world_boss_pools` and `world_boss_members` over the existing
+source spawn rectangles: one living boss per name/zone, choosing a random source
+location. Current imports define23pools/122candidate entities in home castles,
+Eslant and old Moradon: Talos, Harpy Queen, Deruvish founder, Snake Queen, attila,
+Kekurikekukaka, Hyde, Antares, Shaula, Samma, Troll King and Dragon tooth where
+source rows exist. Faction zones have independent pools. No missing locations
+are invented. Death by direct damage or DoT starts a six-hour timer; ordinary
+loot/XP/quest credit is unchanged. Every server start spawns all configured bosses
+and resets timers; cooldowns are memory-only. Manual admin summons remain separate.
+
+Evidence: supplied1453 AIServer `ServerDlg.cpp` creates each K_NPCPOS row/ordinal
+and assigns `sRegTime * SECOND`; its `Npc.cpp` regen fallback is overwritten.
+The supplied data has multiple candidates alive independently and mixed four-hour/
+32000-second timers. Grouping, six hours after death and restart resets are
+explicit owner requirements overriding those customizations.
+
 Visibility uses48m regions and a3x3 view, native1C lists and1D requested details.
 Requests are bounded, deduplicated and restricted to nearby living entities.
 Cross-region movement immediately updates visibility. Client movement packets
@@ -31,8 +47,20 @@ movement3 patrol, family assistance and monster spells remain incomplete.
 Item attachment uses original ItemOrg column12. Placement handles both hands,
 two-handed conflicts, pants and both rings, preserving displaced items
 atomically. Primary stat, direct HP/MP, resistance and accuracy/evasion bonuses
-feed effective attributes; see [combat](skills-combat.md). Not all class/stat
-eligibility checks or special weapon effects are complete.
+feed effective attributes; see [combat](skills-combat.md). Incoming equipment,
+including a bag item displaced into an equipment slot, validates original race,
+class family/subclass, base allocated stats and rank/title requirements. Level
+bounds come from imported supplied1453 ITEM ReqLevel/ReqLevelMax. Existing
+equipment is not automatically removed; slot mapping and displacement are unchanged.
+
+Evidence: Open-KO `UIInventory.cpp::IsValidRaceAndClass` checks ItemOrg13/14
+and stats30..34 plus conditional Item_Ext48..52; bonuses do not satisfy base-stat
+requirements. Rank/title use ItemOrg28/29 plus Item_Ext46/47, against currently
+modeled zero rank/title. Supplied1453 `ItemHandler.cpp::ItemEquipAvailable` adds
+server ITEM level bounds. Native UI does not enforce ItemOrg level on ordinary
+equipment: the starting dagger has client level8 but server level1, so client
+level is not substituted for missing server rules. Other special weapon effects
+remain incomplete.
 Respect native UI ownership when sending inventory acknowledgements; see
 [protocol](protocol.md). Delete-item success/failure must release client waits.
 
@@ -68,7 +96,7 @@ direct/DoT damage contributor owns the bundle. Training fixtures do not drop loo
   atomically. Replays/full-bag failures preserve the bundle.
 
 Bundles are memory state and disappear on daemon restart. Exact nonempty-bundle
-expiry is unrecovered; do not invent a timer. Party distribution awaits parties.
+expiry is unrecovered; do not invent a timer. Party distribution is described in [social systems](social.md).
 
 ## Travel and scripts
 

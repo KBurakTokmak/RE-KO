@@ -27,8 +27,10 @@ Administrative fixture grants are explicitly separate from normal defaults.
 
 Entity visibility uses48-metre regions and a3x3 neighborhood. Monster simulation
 includes direct pursuit and bounded roaming; terrain pathfinding and full
-event controllers are incomplete. There is no complete shared-player world,
-party or PvP implementation. MAX_PLAYERS20 is a small-server design target,
+event controllers are incomplete. A shared online registry synchronizes nearby
+players and supports runtime parties and persisted clan membership. General
+player-target combat, full remote skill effects and PvP remain incomplete.
+See [social systems](re/social.md). MAX_PLAYERS20 is a small-server design target,
 not a demonstrated20-player compatibility/performance guarantee.
 
 Login registers the first password and verifies its persisted Argon2id hash.

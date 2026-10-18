@@ -10,7 +10,8 @@ Successful admin basic R attacks apply 10,000 physical damage, clamped to the
 target's remaining HP. Life, attack delay and target validation still apply.
 Basic attacks use weapon reach plus half the sum of the player's original
 skeleton radius and the target's radius scaled by its spawn size. This applies
-to normal and admin characters equally; see [combat](skills-combat.md).
+to normal and admin characters equally, with the owner's20percent multiplier,
+3m minimum and0.15m rounding tolerance; see [combat](skills-combat.md).
 The old fixed2m body allowance rejected native large-boss R attacks (observed
 on Troll King). The supplied source's generous15m base is not used as a substitute
 for model geometry. Skill range handling remains separate. Admin hits still
@@ -104,3 +105,27 @@ Offline setup: export supplied1453 K_MONSTER as CSV, then run
 `python scripts/Import-1453MonsterCatalog.py --reference <K_MONSTER.csv> --apply`
 with the daemon stopped. The importer backs up the save and only upserts
 MONSTER_TEMPLATE rows in world_reference_rules. The CSV remains external.
+
+## Natural boss status
+
+Type `bossstatus` in All chat to list this zone's natural rare bosses, or
+`bossstatus Talos` to filter by name. Admin-only notices show the selected spawn
+coordinates while alive, or the remaining six-hour timer after death. Each server
+start resets timers and spawns one boss per configured boss/zone pool. Manual
+`spawn` summons are separate one-life entities and do not change these pools.
+
+## Coordinate teleport
+
+In All chat, type `teleport 445 555` (or `tp 445 555`) to warp within the
+current zone using displayed map X/Y coordinates. Commas and decimal coordinates
+are accepted, for example `teleport 445.5,555`. The second map coordinate is the
+server's horizontal Z; height is resolved by the native warp/terrain behavior.
+Protocol coordinates support0..6553.5m at0.1m precision; this does not guarantee
+every destination lies on playable terrain.
+
+Each request rechecks the character's database admin role and requires a living,
+entered character outside zone loading. Save failure leaves the current location
+unchanged. The shared Town relocation path saves before native WIZ_WARP0x1E,
+clears stale cast/NPC/sitting/movement state and immediately refreshes regions.
+Supplied1453/Open-KO `User::Warp` is the packet/coordinate reference. Use bare
+commands: the original client may intercept unknown slash commands locally.

@@ -35,9 +35,16 @@ fn execute(
         s.entered && !s.zone_loading && s.skills.hp > 0,
         "Enter the world alive before using monster commands."
     );
+    if command == "/bossstatus" {
+        let mut status = world.boss_status(s.position.zone, args.trim_matches('"'));
+        if status.is_empty() {
+            status.push("No matching natural boss pools in this zone.".into());
+        }
+        return Ok(status);
+    }
     if args.is_empty() {
         return Ok(vec![
-            "Usage: spawn <monster ID or full name>; mobfind [page] <name>.".into(),
+            "Usage: spawn <ID or name>; mobfind [page] <name>; bossstatus [name].".into(),
         ]);
     }
     let (page, query) = if command == "/mobfind" {
@@ -163,6 +170,7 @@ fn parse(text: &str) -> Option<(&'static str, &str)> {
     let command = match token.to_ascii_lowercase().as_str() {
         "spawn" | "monsummon" => "/spawn",
         "mobfind" => "/mobfind",
+        "bossstatus" => "/bossstatus",
         _ => return None,
     };
     Some((command, args.trim()))
@@ -212,6 +220,10 @@ mod tests {
             Some(("/spawn", "Rabid Bandicoot"))
         );
         assert_eq!(parse("mobfind 2 harpy"), Some(("/mobfind", "2 harpy")));
+        for text in ["bossstatus Talos", "/bossstatus Talos", "+bossstatus Talos"] {
+            assert_eq!(parse(text), Some(("/bossstatus", "Talos")));
+        }
+        assert_eq!(parse("bossstatus"), Some(("/bossstatus", "")));
         for text in ["respawn 803", "spawned 803", "normal chat"] {
             assert_eq!(parse(text), None);
         }
@@ -315,6 +327,7 @@ mod tests {
         let mut events = world.events.subscribe();
         let initial = world.spawns(s.position.zone).len();
         assert!(execute(&db, &world, "gm", &s, "/spawn", "100").unwrap()[0].contains("admin"));
+        assert!(execute(&db, &world, "gm", &s, "/bossstatus", "").unwrap()[0].contains("admin"));
         assert_eq!(world.spawns(s.position.zone).len(), initial);
         db.execute("INSERT INTO character_privileges VALUES ('gm',0,1)", [])
             .unwrap();

@@ -20,6 +20,64 @@ pub(crate) fn integer(row: &[CellValue], column: usize) -> i32 {
 mod tests {
     use super::*;
     #[test]
+    fn original_equip_requirements_preserve_starter_dagger_and_gate_master_armor() {
+        let game = reko_common::game_dir();
+        let rules = Path::new("../../logs/reference-coefficients.csv");
+        if !game.join("Data/item_org_us.tbl").exists() || !rules.exists() {
+            return;
+        }
+        let mut catalog = Catalog::load(&game, rules).unwrap();
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::loot::initialize(&db).unwrap();
+        db.execute_batch("INSERT INTO world_reference_rules VALUES ('ITEM_LEVEL',110110001,'[1,80]'),('ITEM_LEVEL',246002001,'[60,80]');").unwrap();
+        catalog.load_level_bounds(&db).unwrap();
+        let mut c = Character {
+            slot: 0,
+            name: "Requirements".into(),
+            race: 2,
+            class: 108,
+            face: 0,
+            hair: 0,
+            stats: [60, 150, 255, 50, 50],
+        };
+        assert!(
+            catalog.eligible(110110001, &c, 1).is_ok(),
+            "server level1 dagger rule takes precedence over unused client gear-level value"
+        );
+        assert!(catalog.eligible(246002001, &c, 80).is_ok());
+        assert!(catalog.eligible(246002001, &c, 59).is_err());
+        assert!(
+            catalog.eligible(206002001, &c, 80).is_err(),
+            "warrior pads cannot equip on rogue"
+        );
+        c.class = 208;
+        c.race = 12;
+        assert!(
+            catalog.eligible(246002001, &c, 80).is_ok(),
+            "other nation uses same class family"
+        );
+        c.class = 107;
+        assert!(
+            catalog.eligible(246002001, &c, 80).is_err(),
+            "unmastered rogue cannot wear master armor"
+        );
+        c.class = 108;
+        c.stats[2] = 65;
+        assert!(
+            catalog.eligible(110110001, &c, 80).is_err(),
+            "base stats alone must meet requirements"
+        );
+        c.stats[2] = 66;
+        assert!(catalog.eligible(110110001, &c, 80).is_ok());
+        assert!(catalog.eligible(110110001, &c, 81).is_err());
+        catalog.items.get_mut(&110110000).unwrap()[13] = CellValue::U8(2);
+        c.race = 12;
+        assert!(catalog.eligible(110110001, &c, 80).is_err());
+        c.race = 2;
+        assert!(catalog.eligible(110110001, &c, 80).is_ok());
+    }
+
+    #[test]
     fn equipment_attributes_feed_formulas_and_stack_with_timed_bonuses() {
         let mut base = vec![CellValue::I32(0); 37];
         base[1] = CellValue::I32(23);
@@ -44,6 +102,7 @@ mod tests {
             ext[col] = CellValue::I32(value);
         }
         let catalog = Catalog {
+            level_bounds: HashMap::new(),
             coefficients: HashMap::from([(103, [0.001; 14])]),
             items: HashMap::from([(330310000, base)]),
             extensions: HashMap::from([(23, HashMap::from([(1, ext)]))]),
@@ -224,12 +283,71 @@ impl Default for Stats {
 }
 
 pub(crate) struct Catalog {
+    level_bounds: HashMap<u32, (u8, u8)>,
     coefficients: HashMap<u16, [f64; 14]>,
     items: HashMap<u32, Vec<CellValue>>,
     extensions: HashMap<u8, HashMap<u32, Vec<CellValue>>>,
 }
 
 impl Catalog {
+    pub fn load_level_bounds(&mut self, db: &rusqlite::Connection) -> anyhow::Result<()> {
+        let mut q = db.prepare(
+            "SELECT rule_id,data FROM world_reference_rules WHERE table_name='ITEM_LEVEL'",
+        )?;
+        for row in q.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, data) = row?;
+            self.level_bounds.insert(id, serde_json::from_str(&data)?);
+        }
+        Ok(())
+    }
+    pub fn eligible(&self, id: u32, character: &Character, level: u8) -> anyhow::Result<()> {
+        let (base, Some(ext)) = self
+            .item(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown equipment"))?
+        else {
+            anyhow::bail!("unknown equipment extension");
+        };
+        let race = integer(base, 13);
+        anyhow::ensure!(
+            race == 0 || race == i32::from(character.race),
+            "equipment race requirement"
+        );
+        let required = integer(base, 14);
+        let class = i32::from(character.class % 100);
+        let class_ok = match required {
+            0 => true,
+            1 => matches!(class, 1 | 5 | 6),
+            2 => matches!(class, 2 | 7 | 8),
+            3 => matches!(class, 3 | 9 | 10),
+            4 => matches!(class, 4 | 11 | 12),
+            5..=12 => class == required,
+            _ => i32::from(character.class) == required,
+        };
+        anyhow::ensure!(class_ok, "equipment class requirement");
+        // Gear level bounds are server ITEM rules; native UI does not enforce
+        // its different ItemOrg level value on ordinary equipment.
+        if let Some(&(minimum, maximum)) = self.level_bounds.get(&id) {
+            anyhow::ensure!(
+                (minimum..=maximum).contains(&level),
+                "equipment level requirement"
+            );
+        }
+        for ((&stat, column), ext_column) in character.stats.iter().zip(30..35).zip(48..53) {
+            let base_need = integer(base, column);
+            let need = if base_need == 0 {
+                0
+            } else {
+                base_need + integer(ext, ext_column)
+            };
+            anyhow::ensure!(i32::from(stat) >= need, "equipment stat requirement");
+        }
+        // Rank/title are currently sent as zero; they cannot grant eligibility.
+        anyhow::ensure!(
+            integer(base, 28) + integer(ext, 46) <= 0 && integer(base, 29) + integer(ext, 47) <= 0,
+            "equipment rank/title requirement"
+        );
+        Ok(())
+    }
     pub fn equip_slot(&self, id: u32, slot: usize) -> bool {
         let Some((row, Some(_))) = self.item(id) else {
             return false;
@@ -324,6 +442,7 @@ impl Catalog {
             }
         }
         Ok(Self {
+            level_bounds: HashMap::new(),
             coefficients,
             items,
             extensions,

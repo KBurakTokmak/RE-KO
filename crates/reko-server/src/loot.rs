@@ -11,7 +11,7 @@ pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(include_str!("world_services.sql"))
 }
 struct Bundle {
-    owner: String,
+    owners: Vec<String>,
     position: Position,
     items: Vec<(u32, u16)>,
 }
@@ -22,6 +22,7 @@ struct Inner {
     nations: HashMap<String, u8>,
 }
 pub(crate) struct Book {
+    pub social: Option<std::sync::Arc<Mutex<crate::social::Hub>>>,
     inner: Mutex<Inner>,
     monsters: HashMap<u16, (u32, u32)>,
     rules: HashMap<u32, Vec<(u8, u32, u16)>>,
@@ -90,6 +91,7 @@ impl Book {
             levels.entry(id).or_insert(level);
         }
         Ok(Self {
+            social: None,
             inner: Mutex::new(Inner {
                 bundles: HashMap::new(),
                 next: 1,
@@ -119,6 +121,19 @@ impl Book {
         owner: &str,
     ) -> Option<Vec<u8>> {
         let (money, drop) = *self.monsters.get(&prototype)?;
+        let owners = self
+            .social
+            .as_ref()
+            .and_then(|hub| {
+                let h = hub.lock().unwrap();
+                h.named(owner).map(|id| {
+                    h.group(id)
+                        .iter()
+                        .map(|id| h.players[id].s.character.name.to_ascii_lowercase())
+                        .collect()
+                })
+            })
+            .unwrap_or_else(|| vec![owner.to_ascii_lowercase()]);
         let mut inner = self.inner.lock().unwrap();
         // TODO(re): Source cleanup lifetime is unverified; keep bundles until emptied/restart.
         let mut items = Vec::new();
@@ -178,7 +193,7 @@ impl Book {
         inner.bundles.insert(
             id,
             Bundle {
-                owner: owner.to_ascii_lowercase(),
+                owners,
                 position,
                 items,
             },
@@ -194,13 +209,20 @@ impl Book {
             .unwrap()
             .bundles
             .get(&id)
-            .is_some_and(|b| b.owner.eq_ignore_ascii_case(name))
+            .is_some_and(|b| {
+                b.owners
+                    .iter()
+                    .any(|owner| owner.eq_ignore_ascii_case(name))
+            })
     }
 }
 fn allowed(bundle: &Bundle, session: &Session) -> bool {
     session.entered
         && session.skills.hp > 0
-        && bundle.owner.eq_ignore_ascii_case(&session.character.name)
+        && bundle
+            .owners
+            .iter()
+            .any(|owner| owner.eq_ignore_ascii_case(&session.character.name))
         && bundle.position.zone == session.position.zone
         && u64::from(bundle.position.x.abs_diff(session.position.x)).pow(2)
             + u64::from(bundle.position.z.abs_diff(session.position.z)).pow(2)
@@ -228,6 +250,73 @@ fn pickup(
         .position(|(i, c)| *i == item && *c > 0)
         .ok_or_else(|| anyhow::anyhow!("item no longer in bundle"))?;
     let count = b.items[index].1;
+    if item == GOLD && b.owners.len() > 1 {
+        let group = {
+            let h = lobby.social.lock().unwrap();
+            if h.party(session.player_id).is_some() {
+                h.group(session.player_id)
+                    .into_iter()
+                    .map(|id| (id, h.players[&id].clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+        if group.len() > 1 {
+            let total_levels: u32 = group
+                .iter()
+                .map(|(_, p)| u32::from(p.s.progress.level))
+                .sum();
+            let db = lobby.db.lock().unwrap();
+            let tx = db.unchecked_transaction()?;
+            let mut updates = Vec::new();
+            for (id, player) in group {
+                if !allowed(b, &player.s) {
+                    continue;
+                }
+                let amount = u32::from(count) * u32::from(player.s.progress.level) / total_levels;
+                let before = starter::coins(&tx, &player.account, player.s.character.slot)?;
+                let after = before
+                    .checked_add(amount)
+                    .filter(|v| *v <= 2100000000)
+                    .ok_or_else(|| anyhow::anyhow!("party coin limit"))?;
+                anyhow::ensure!(
+                    tx.execute(
+                        "UPDATE character_wallets SET coins=?3 WHERE account=?1 AND slot=?2",
+                        params![player.account, player.s.character.slot, after]
+                    )? == 1,
+                    "party wallet missing"
+                );
+                let mut response = vec![0x26, 1, 255];
+                response.extend(GOLD.to_le_bytes());
+                response.extend((amount as u16).to_le_bytes());
+                response.extend(after.to_le_bytes());
+                updates.push((id, after, response));
+            }
+            anyhow::ensure!(!updates.is_empty(), "no eligible party loot members");
+            tx.commit()?;
+            drop(db);
+            b.items.remove(index);
+            if b.items.is_empty() {
+                inner.bundles.remove(&id);
+            }
+            let mut own = None;
+            let mut hub = lobby.social.lock().unwrap();
+            for (target, coins, packet) in updates {
+                if target == session.player_id {
+                    session.coins = coins;
+                    own = Some(packet);
+                } else {
+                    hub.refresh.insert(target);
+                    hub.send(target, packet);
+                }
+            }
+            return Ok((
+                own.ok_or_else(|| anyhow::anyhow!("looter no longer eligible"))?,
+                Vec::new(),
+            ));
+        }
+    }
     let db = lobby.db.lock().unwrap();
     let tx = db.unchecked_transaction()?;
     let mut coins = starter::coins(&tx, account, session.character.slot)?;
@@ -306,6 +395,88 @@ fn pickup(
     tracing::info!(%peer,bundle=id,item,count,coins,"loot pickup committed");
     Ok((response, changed))
 }
+fn pickup_routed(
+    book: &Book,
+    lobby: &Lobby,
+    account: &str,
+    s: &mut Session,
+    peer: SocketAddr,
+    id: u32,
+    item: u32,
+) -> anyhow::Result<Pickup> {
+    if item == GOLD {
+        return pickup(book, lobby, account, s, peer, id, item);
+    }
+    let owners = {
+        let inner = book.inner.lock().unwrap();
+        let bundle = inner
+            .bundles
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("unknown bundle"))?;
+        anyhow::ensure!(allowed(bundle, s), "loot ownership/range/life mismatch");
+        bundle.owners.clone()
+    };
+    let group = {
+        let mut h = lobby.social.lock().unwrap();
+        let Some(leader) = h
+            .party(s.player_id)
+            .filter(|leader| h.parties[leader].len() > 1)
+        else {
+            drop(h);
+            return pickup(book, lobby, account, s, peer, id, item);
+        };
+        let mut ids = h.group(s.player_id);
+        let offset = *h.loot_rotation.entry(leader).or_default() % ids.len();
+        ids.rotate_left(offset);
+        ids.into_iter()
+            .filter(|id| {
+                owners
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&h.players[id].s.character.name))
+            })
+            .map(|id| (leader, id, h.players[&id].clone()))
+            .collect::<Vec<_>>()
+    };
+    for (leader, target, mut player) in group {
+        match pickup(book, lobby, &player.account, &mut player.s, peer, id, item) {
+            Ok((mut response, changed)) => {
+                let mut h = lobby.social.lock().unwrap();
+                if let Some(index) = h
+                    .parties
+                    .get(&leader)
+                    .and_then(|ids| ids.iter().position(|id| *id == target))
+                {
+                    h.loot_rotation.insert(leader, index + 1);
+                }
+                let mut notice = vec![0x26, 3];
+                notice.extend(id.to_le_bytes());
+                notice.extend(item.to_le_bytes());
+                crate::social::string(&mut notice, &player.s.character.name);
+                let ids = h.group(s.player_id);
+                h.send_many(&ids, &notice);
+                if target == s.player_id {
+                    *s = player.s;
+                    return Ok((response, changed));
+                }
+                response[1] = 5;
+                response.splice(2..2, id.to_le_bytes());
+                h.send(target, response);
+                if !changed.is_empty() {
+                    h.send(target, inventory::count_packet(&changed));
+                }
+                if let Some(catalog) = &lobby.combat {
+                    crate::durability::refresh(&mut player.s, catalog, lobby.skills.as_ref());
+                    h.send(target, inventory::attributes(&player.s.combat, 2));
+                }
+                h.refresh.insert(target);
+                return Ok((vec![0x26, 4], Vec::new()));
+            }
+            Err(error) => tracing::debug!(%error,target,"party loot recipient unavailable"),
+        }
+    }
+    anyhow::bail!("no eligible party item recipient")
+}
+
 pub(crate) async fn handle(
     sock: &mut TcpStream,
     peer: SocketAddr,
@@ -341,7 +512,7 @@ pub(crate) async fn handle(
         return;
     }
     let item = u32::from_le_bytes(p[5..9].try_into().unwrap());
-    let result = pickup(book, lobby, account, session, peer, id, item);
+    let result = pickup_routed(book, lobby, account, session, peer, id, item);
     match result {
         Ok((response, changed)) => {
             super::send_response(sock, peer, &None, &response, "LOOT_GET").await;
@@ -370,6 +541,76 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn party_loot_is_owned_atomic_level_weighted_and_rotates_items_without_touching_solo_rules() {
+        let Some((lobby, mut a)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        crate::social::synchronize(&lobby, "test", &mut a);
+        let mut b = crate::social::tests::player(&lobby, "LootMate", 1, 80);
+        let mut outsider = crate::social::tests::player(&lobby, "LootOutsider", 1, 80);
+        lobby
+            .social
+            .lock()
+            .unwrap()
+            .parties
+            .insert(a.player_id, vec![a.player_id, b.player_id]);
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute("INSERT INTO world_monster_loot VALUES (100,1000,1)", [])
+                .unwrap();
+            db.execute(
+                "INSERT INTO world_drop_rules VALUES(1,2,389014000,10000)",
+                [],
+            )
+            .unwrap();
+        }
+        let mut book =
+            Book::load(&lobby.db.lock().unwrap(), lobby.combat.as_ref().unwrap()).unwrap();
+        book.social = Some(lobby.social.clone());
+        let packet = book
+            .create(100, 12000, a.position, &a.character.name)
+            .unwrap();
+        let id = u32::from_le_bytes(packet[3..7].try_into().unwrap());
+        assert!(book.visible(id, &b.character.name));
+        assert!(!book.visible(id, &outsider.character.name));
+        let count = book.inner.lock().unwrap().bundles[&id].items[0].1;
+        let peer = "127.0.0.1:1".parse().unwrap();
+        assert!(
+            pickup_routed(&book, &lobby, "LootOutsider", &mut outsider, peer, id, GOLD).is_err()
+        );
+        lobby.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_party_coin BEFORE UPDATE ON character_wallets WHEN NEW.account='LootMate' BEGIN SELECT RAISE(ABORT,'test');END;").unwrap();
+        assert!(pickup_routed(&book, &lobby, "test", &mut a, peer, id, GOLD).is_err());
+        assert_eq!(
+            starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            1000000
+        );
+        assert_eq!(book.inner.lock().unwrap().bundles[&id].items[0].1, count);
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_party_coin;")
+            .unwrap();
+        pickup_routed(&book, &lobby, "test", &mut a, peer, id, GOLD).unwrap();
+        crate::social::synchronize(&lobby, "LootMate", &mut b);
+        assert_eq!(a.coins, 1000000 + u32::from(count) / 2);
+        assert_eq!(b.coins, a.coins);
+        pickup_routed(&book, &lobby, "test", &mut a, peer, id, 389014000).unwrap();
+        assert_eq!(a.inventory[0].id, 389014000);
+        let packet = book
+            .create(100, 12000, a.position, &a.character.name)
+            .unwrap();
+        let next = u32::from_le_bytes(packet[3..7].try_into().unwrap());
+        let (reply, _) =
+            pickup_routed(&book, &lobby, "test", &mut a, peer, next, 389014000).unwrap();
+        assert_eq!(reply, [0x26, 4]);
+        crate::social::synchronize(&lobby, "LootMate", &mut b);
+        assert_eq!(b.inventory[0].id, 389014000);
+        assert_eq!(a.inventory[0].count, 1);
+        assert!(pickup_routed(&book, &lobby, "LootMate", &mut b, peer, next, 389014000).is_err());
+    }
+
     #[test]
     fn independent_drop_rolls_atomic_pickup_ownership_and_replay() {
         let Some((lobby, mut s)) = crate::world_service_tests::setup() else {

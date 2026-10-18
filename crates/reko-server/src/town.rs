@@ -50,16 +50,7 @@ pub(crate) async fn handle(
     account: &str,
     session: &mut Session,
 ) {
-    let result = destination(lobby, session, false).and_then(|position| {
-        movement::save(
-            &lobby.db.lock().unwrap(),
-            account,
-            session.character.slot,
-            position,
-        )
-        .map_err(|_| "Town position could not be saved.")?;
-        Ok(position)
-    });
+    let result = destination(lobby, session, false);
     let position = match result {
         Ok(p) => p,
         Err(reason) => {
@@ -74,6 +65,34 @@ pub(crate) async fn handle(
             return;
         }
     };
+    if let Err(error) = relocate(sock, peer, lobby, account, session, position).await {
+        tracing::error!(%error, "town relocation failed");
+        let notice = chat::packet(
+            7,
+            session.character.nation(),
+            u16::MAX,
+            "",
+            b"Town position could not be saved.",
+        );
+        super::send_response(sock, peer, &None, &notice, "TOWN_REFUSED").await;
+    }
+}
+
+/// Save first, then update the native warp and region view together.
+pub(crate) async fn relocate(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    lobby: &Lobby,
+    account: &str,
+    session: &mut Session,
+    position: movement::Position,
+) -> rusqlite::Result<()> {
+    movement::save(
+        &lobby.db.lock().unwrap(),
+        account,
+        session.character.slot,
+        position,
+    )?;
     session.position = position;
     session.movement = movement::Validator::default();
     session.pending_cast = None;
@@ -84,10 +103,11 @@ pub(crate) async fn handle(
     let mut packet = vec![0x1e];
     packet.extend(position.x.to_le_bytes());
     packet.extend(position.z.to_le_bytes());
-    super::send_response(sock, peer, &None, &packet, "TOWN_WARP").await;
+    super::send_response(sock, peer, &None, &packet, "PLAYER_WARP").await;
     session.entity_region = None;
     crate::population::refresh(sock, peer, lobby, session).await;
-    tracing::info!(%peer,account,x=position.x,z=position.z,zone=position.zone,"town teleport committed");
+    tracing::info!(%peer,account,x=position.x,z=position.z,zone=position.zone,"same-zone teleport committed");
+    Ok(())
 }
 
 pub(crate) async fn respawn(

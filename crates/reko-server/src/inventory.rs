@@ -95,14 +95,15 @@ fn move_items(
         anyhow::bail!("invalid slots");
     };
     anyhow::ensure!(id != 0 && from.id == id, "item ownership mismatch");
-    // TODO(re): Apply recovered class/stat eligibility requirements.
     if matches!(direction, 1 | 4) {
+        catalog.eligible(from.id, &session.character, session.progress.level)?;
         anyhow::ensure!(
             catalog.equip_slot(from.id, destination),
             "invalid equipment destination"
         );
     }
     if matches!(direction, 2 | 4) && to.id != 0 {
+        catalog.eligible(to.id, &session.character, session.progress.level)?;
         anyhow::ensure!(catalog.equip_slot(to.id, source), "invalid equipment swap");
     }
     match direction {
@@ -550,7 +551,7 @@ mod tests {
         };
         {
             let db = lobby.db.lock().unwrap();
-            db.execute("INSERT INTO character_inventory VALUES ('test',0,0,206002001,2000,1),('test',0,1,330110002,1,1),('test',0,2,330110002,1,1)",[]).unwrap();
+            db.execute("INSERT INTO character_inventory VALUES ('test',0,0,246002001,2000,1),('test',0,1,330110002,1,1),('test',0,2,330110002,1,1)",[]).unwrap();
             s.inventory = starter::inventory(&db, "test", 0).unwrap();
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -562,7 +563,7 @@ mod tests {
         let mut world = Some(s);
         use tokio::io::AsyncReadExt;
         for (id, source, dest) in [
-            (206002001u32, 0u8, 10u8),
+            (246002001u32, 0u8, 10u8),
             (330110002, 1, 9),
             (330110002, 2, 11),
         ] {
@@ -598,7 +599,7 @@ mod tests {
         let gear = starter::equipment(&db, "test", 0).unwrap();
         assert_eq!(
             (gear[10].id, gear[9].id, gear[11].id),
-            (206002001, 330110002, 330110002)
+            (246002001, 330110002, 330110002)
         );
         assert!(
             starter::inventory(&db, "test", 0)
@@ -606,6 +607,32 @@ mod tests {
                 .iter()
                 .all(|i| i.id == 0)
         );
+    }
+
+    #[test]
+    fn failed_equip_requirements_acknowledge_and_preserve_every_item_and_wallet() {
+        let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO character_inventory VALUES ('test',0,0,206002001,2000,1)",
+                [],
+            )
+            .unwrap();
+            s.inventory = starter::inventory(&db, "test", 0).unwrap();
+        }
+        let before = s.inventory;
+        let mut p = vec![0x1f, 1];
+        p.extend(206002001u32.to_le_bytes());
+        p.extend([0, 10]);
+        assert_eq!(handle(&lobby, Some("test"), Some(&mut s), &p), [0x1f, 0]);
+        let db = lobby.db.lock().unwrap();
+        assert_eq!(starter::inventory(&db, "test", 0).unwrap(), before);
+        assert_eq!(s.inventory, before);
+        assert_eq!(starter::equipment(&db, "test", 0).unwrap()[10].id, 0);
+        assert_eq!(starter::coins(&db, "test", 0).unwrap(), 1_000_000);
     }
 
     #[test]
