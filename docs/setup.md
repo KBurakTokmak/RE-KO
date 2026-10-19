@@ -54,6 +54,21 @@ server releases. Review dry runs and script inputs before `--apply`. They back
 up the save and refuse the running default daemon. Existing installations with
 populated data do not need to rerun these imports for normal startup.
 
+For the owner-approved suppression loot repair, after the population/quest
+imports, review a dry run with the daemon running or stopped:
+
+```powershell
+python scripts/Repair-1453SuppressionLoot.py
+```
+
+Stop the daemon before adding `--apply`. The repair backs up the save and changes
+only the specified suppression drop slots/groups. It restores quest certificate
+availability and adds estimated +1 defense armor pools, validated against original
+client tables. See [loot evidence and rates](re/world-services.md#suppression-quest-loot-repair).
+It requires the locally built `target/debug/reko.exe` table reader; game assets
+can be selected with `--game-dir` or REKO_GAME_DIR. Do not rerun general imports
+merely to apply this bounded repair.
+
 The current combat loader expects `logs/reference-coefficients.csv`; supplementary
 cure definitions use `logs/reference-rules/MAGIC_TYPE5.csv`. These are local
 reference **inputs** despite their legacy directory name. Keep them locally;

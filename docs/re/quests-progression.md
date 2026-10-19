@@ -82,6 +82,11 @@ handshake. Supplied1453 QuestHandler::QuestV2PacketProcess case5 corroborates
 returning players from suppression zones on cancellation. Other quests and
 their independent counters remain intact.
 
+The suppression loot repair supplies the missing certificates through ordinary
+corpse bundles, including Grape Ripper's Certificate and the zone83 equivalents.
+It does not grant quest completion, change exchanges/rewards or refund cancelled
+progress. See [loot evidence and estimated armor rates](world-services.md#suppression-quest-loot-repair).
+
 ## XP, points and starting defaults
 
 All80 imported LEVEL_UP thresholds are checked against original

@@ -551,6 +551,238 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     #[test]
+    fn suppression_repair_preserves_other_loot_and_delivers_original_certificates_and_defense_armor()
+     {
+        let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        if !root.join("target/debug/reko.exe").exists() {
+            return;
+        }
+        let monsters = [
+            (82, 7005, 910138000),
+            (82, 7006, 910138000),
+            (82, 7007, 910138000),
+            (82, 7009, 910138000),
+            (82, 7040, 910138000),
+            (82, 7008, 910135000),
+            (83, 7010, 910137000),
+            (83, 7011, 910137000),
+            (83, 7012, 910137000),
+            (83, 7014, 910137000),
+            (83, 7013, 910136000),
+        ];
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "reko-suppression-{}-{stamp}.db",
+            std::process::id()
+        ));
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute_batch(
+                "INSERT INTO world_monster_loot VALUES (100,1000,100);
+                INSERT INTO world_drop_rules VALUES (100,2,379021000,10000);",
+            )
+            .unwrap();
+            for (exchange, first, second) in
+                [(94, 910138000, 910135000), (98, 910137000, 910136000)]
+            {
+                let data = serde_json::json!({"nOriginItemNum1":first,"nOriginItemCount1":3,"nOriginItemNum2":second,"nOriginItemCount2":1});
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES ('ITEM_EXCHANGE',?1,?2)",
+                    params![exchange, data.to_string()],
+                )
+                .unwrap();
+            }
+            for (zone, prototype, _) in monsters {
+                crate::population::tests::seed(&db);
+                db.execute(
+                    "UPDATE world_spawns SET id=?1,zone=?2,prototype=?3,source_row=?3 WHERE id=12000",
+                    params![12000 + prototype, zone, prototype],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO world_monster_loot VALUES (?1,1000,?1)",
+                    [prototype],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO world_drop_rules VALUES (?1,2,0,0)",
+                    [prototype],
+                )
+                .unwrap();
+            }
+            db.execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+                .unwrap();
+        }
+        let repair = || {
+            let output = std::process::Command::new("python")
+                .arg(root.join("scripts/Repair-1453SuppressionLoot.py"))
+                .args(["--apply", "--db"])
+                .arg(&path)
+                .arg("--game-dir")
+                .arg(reko_common::game_dir())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        repair();
+        let db = Connection::open(&path).unwrap();
+        let snapshot = || {
+            let rules=db.query_row("SELECT group_concat(printf('%d:%d:%d:%d',drop_id,slot,item,chance),'|') FROM (SELECT * FROM world_drop_rules ORDER BY drop_id,slot)",[],|r|r.get::<_,String>(0)).unwrap();
+            let groups=db.query_row("SELECT group_concat(printf('%d:%d:%d',group_id,slot,item),'|') FROM (SELECT * FROM world_drop_groups ORDER BY group_id,slot)",[],|r|r.get::<_,String>(0)).unwrap();
+            (rules, groups)
+        };
+        let before = snapshot();
+        repair();
+        assert_eq!(before, snapshot());
+        assert_eq!(
+            db.query_row(
+                "SELECT item FROM world_drop_rules WHERE drop_id=100 AND slot=2",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            379021000
+        );
+        assert_eq!(starter::coins(&db, "test", 0).unwrap(), 1000000);
+        assert_eq!(db.query_row("SELECT count(*) FROM world_drop_groups WHERE group_id IN (82001,82002,83001,83002)",[],|r|r.get::<_,u32>(0)).unwrap(),120);
+        let catalog = lobby.combat.as_ref().unwrap();
+        for row in db
+            .prepare("SELECT DISTINCT item FROM world_drop_groups")
+            .unwrap()
+            .query_map([], |r| r.get::<_, u32>(0))
+            .unwrap()
+        {
+            let id = row.unwrap();
+            assert_eq!(id % 1000, 541);
+            let (base, ext) = catalog.item(id).unwrap();
+            let part = combat::integer(base, 12);
+            let (column, value) = match part {
+                5 => (17, 5),
+                6 => (18, 5),
+                7 => (15, 3),
+                8 => (16, 5),
+                9 => (19, 3),
+                _ => panic!("invalid armor part"),
+            };
+            assert_eq!(combat::integer(ext.unwrap(), column), value);
+        }
+        let mut book = Book::load(&db, catalog).unwrap();
+        book.inner.get_mut().unwrap().rng = 42;
+        let peer = "127.0.0.1:1".parse().unwrap();
+        s.position.zone = 82;
+        // Use the repaired book with the character's separate SQLite save, as normal pickup does.
+        for (zone, prototype, certificate) in monsters {
+            let mut position = s.position;
+            position.zone = zone;
+            let packet = book
+                .create(prototype, 12000, position, &s.character.name)
+                .unwrap();
+            let id = u32::from_le_bytes(packet[3..7].try_into().unwrap());
+            assert!(
+                book.inner.lock().unwrap().bundles[&id]
+                    .items
+                    .contains(&(certificate, 1))
+            );
+            if matches!(prototype, 7005..=7008) {
+                pickup_routed(&book, &lobby, "test", &mut s, peer, id, certificate).unwrap();
+                assert!(
+                    pickup_routed(&book, &lobby, "test", &mut s, peer, id, certificate).is_err()
+                );
+            }
+        }
+        assert_eq!(
+            s.inventory
+                .iter()
+                .filter(|i| i.id == 910138000)
+                .map(|i| i.count)
+                .sum::<u16>(),
+            3
+        );
+        assert!(
+            s.inventory
+                .iter()
+                .any(|i| i.id == 910135000 && i.count == 1)
+        );
+        let mut helmet = None;
+        for _ in 0..20000 {
+            let packet = book
+                .create(7005, 12000, s.position, &s.character.name)
+                .unwrap();
+            let id = u32::from_le_bytes(packet[3..7].try_into().unwrap());
+            if book.inner.lock().unwrap().bundles[&id]
+                .items
+                .iter()
+                .any(|(item, _)| *item == 245003541)
+            {
+                helmet = Some(id);
+                break;
+            }
+        }
+        let id =
+            helmet.expect("fixed source RNG sequence must produce a rogue dagger-defense helmet");
+        pickup_routed(&book, &lobby, "test", &mut s, peer, id, 245003541).unwrap();
+        assert!(
+            s.inventory
+                .iter()
+                .any(|i| i.id == 245003541 && i.count == 1)
+        );
+        assert!(pickup_routed(&book, &lobby, "test", &mut s, peer, id, 245003541).is_err());
+        // A conflicting owner customization is rejected without partial certificate/group edits.
+        db.execute(
+            "UPDATE world_drop_rules SET item=379021000 WHERE drop_id=7005 AND slot=0",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "DELETE FROM world_drop_rules WHERE drop_id=7008 AND slot=2",
+            [],
+        )
+        .unwrap();
+        let output = std::process::Command::new("python")
+            .arg(root.join("scripts/Repair-1453SuppressionLoot.py"))
+            .args(["--apply", "--db"])
+            .arg(&path)
+            .arg("--game-dir")
+            .arg(reko_common::game_dir())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM world_drop_rules WHERE drop_id=7008 AND slot=2",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT item FROM world_drop_rules WHERE drop_id=7005 AND slot=0",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            379021000
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn caitharos_key_belongs_to_the_clan_chief_without_party_rotation() {
         let Some((lobby, mut chief)) = crate::world_service_tests::setup() else {
             return;

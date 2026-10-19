@@ -32,6 +32,12 @@ Useful original-client regression passes:
 - Accept multiple kill/item quests; verify per-kill updates, relog persistence,
   independent counters and immediate coin/XP rewards. Complete or abandon one
   and confirm other progress remains.
+- In MSS II, loot three hunting certificates from normal mobs and the Grape
+  Ripper certificate from its boss. Check the corresponding water/marble in
+  MSS III. Verify ordinary full-bag/range/party/replay rules still apply. Defense
+  armor is rare; use the deterministic importer/loot regression rather than
+  expecting a dagger helmet on a short run. Selected +1 variants use original
+  extension541; the estimates and relative part/class weights are documented.
 - Exercise class skill costs, effects, cancel/expiry, potion recovery, standing
   and sitting regen. Test arrows at close range and mage ground AoE after moving.
 - Use the local startup launcher and leave the client idle beyond the former

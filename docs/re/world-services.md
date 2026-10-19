@@ -114,6 +114,49 @@ direct/DoT damage contributor owns the bundle. Training fixtures do not drop loo
 Bundles are memory state and disappear on daemon restart. Exact nonempty-bundle
 expiry is unrecovered; do not invent a timer. Party distribution is described in [social systems](social.md).
 
+### Suppression quest loot repair
+
+The supplied1453 lunar1453.bak, full backup position2, has empty K_MONSTER_ITEM
+rows for7005/7007/7040, missing7006/7008 rows, and similarly incomplete7010..7014.
+SQLite correctly imported those omissions; this was not a random-roll or client
+item-filter bug. The supplementary2086 export uses newer810418000 drops and is
+not suitable for the original1453 suppression quests.
+
+`scripts/Repair-1453SuppressionLoot.py` is an explicit offline repair, not a
+startup grant. It validates original client items, quest exchanges94/98 and
+zone/prototype/drop links. Normal zone82 mobs7005/7006/7007/7009/7040 drop
+Certificate of Hunting910138000; Grape Ripper7008 drops910135000. Zone83 mobs
+7010/7011/7012/7014 drop910137000; Patos's messenger7013 drops910136000.
+Each certificate occupies direct slot2 with chance10000. This guaranteed local
+repair uses the existing1453 certificate-drop pattern (7000/7001) to unblock
+progress; the missing monsters' exact retail rates have not been recovered.
+Gates do not receive loot, and no certificate is inserted into a character at
+startup or on script execution. Normal corpse ownership/pickup rules apply.
+
+The owner approved estimated old defense-armor drops after the empty source
+tables were confirmed. [Kalais' first-person MSS guide](https://ko.kalais.net/mss.php)
+reports tier5/chitin for MSS II and tier1 for MSS III, all at+1, with dagger
+helmets, club pauldrons, sword gloves, axe pads and spear boots. Original1453
+ItemOrg and Item_Ext13..17 verify all40 selected class/part variants: suffix541,
+helmet/boots defense3 and other parts5. No item stats or client assets are edited.
+
+The guide's aggregate and per-defense estimates are not mathematically
+consistent enough to recover a complete table. The approved local approximation
+uses independent slot0 mage/priest and slot1 warrior/rogue pools at150/10000 and
+100/10000. Each pool contains30 entries; each of its two classes has helmet1,
+boots2, pauldron3, pads4 and gloves5 entries. Any armor drops on2.485percent of
+kills (expected0.025armor per kill), with a0.015percent chance of two armors.
+Any-class dagger helmets are approximately0.1666percent of kills. Class bias
+and exact part weights are local choices preserving the guide's qualitative
+rarity order, not measured retail probabilities. These pools apply to regular
+suppression mobs; bosses receive their quest certificate only.
+
+Group IDs82001/82002/83001/83002 are reserved for this repair. Imports refuse
+collisions with nonempty unrelated rules/groups and preserve all other loot,
+coins, spawns, characters and quest progress. Rates can be selected for an empty
+installation using --light-rate/--heavy-rate; changing existing rates requires
+explicit review rather than silently replacing customized data.
+
 ## Travel and scripts
 
 Town via menu and `/town` share source eligibility and persisted travel.
