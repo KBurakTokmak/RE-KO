@@ -30,6 +30,8 @@ renderer/client and an in-process game host have not been implemented.
 - HP/MP potions, natural regeneration, weapon durability and recovery updates.
 - Eight-member parties with invitations, chat, shared XP/quest kills and loot routing.
 - Persistent nation-specific clans: creation, invitations, member roles and clan chat.
+- Source-based clan grades, Caitharos knight promotion and persistent cape purchases.
+- Private quest journal chat commands to list, inspect and abandon active quests.
 - Nearby player presence, movement and equipment synchronization.
 - Administrative test fixtures, packet capture and a local-client startup profile.
 - Admin-only 10,000-damage basic attacks, monster protection and native GM

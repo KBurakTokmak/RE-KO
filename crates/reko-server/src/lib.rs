@@ -15,6 +15,7 @@ mod auth;
 mod bosses;
 mod characters;
 mod chat;
+mod clan_promotion;
 mod clans;
 mod combat;
 pub mod crypto;
@@ -41,6 +42,7 @@ mod priest;
 #[cfg(test)]
 mod priest_tests;
 mod progress;
+mod quest_journal;
 mod quest_rewards;
 mod quests;
 mod resources;
@@ -330,6 +332,7 @@ async fn handle_game_payload(
     world: &mut Option<world_entry::Session>,
 ) {
     if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+        clan_promotion::transfer(sock, peer, lobby, s).await;
         social::synchronize(lobby, account, s);
         social::flush(sock, peer, lobby, s).await;
     }
@@ -1074,6 +1077,12 @@ async fn handle_game_payload_inner(
             };
             if channel == 1
                 && let Some(account) = account.as_deref()
+                && quest_journal::handle(sock, peer, lobby, account, session, text).await
+            {
+                return;
+            }
+            if channel == 1
+                && let Some(account) = account.as_deref()
                 && gm_teleport::handle(sock, peer, lobby, account, session, text).await
             {
                 return;
@@ -1229,6 +1238,11 @@ async fn handle_game_payload_inner(
                     Ok(None) => {}
                     Err(error) => tracing::warn!(%peer,%error,"skillbar request refused"),
                 }
+            }
+        }
+        0x70 => {
+            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+                clan_promotion::cape(sock, peer, lobby, account, session, payload).await;
             }
         }
         0x41 => {
@@ -1405,6 +1419,8 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
             }
             _ = skill_tick.tick() => {
                 if let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), account.as_deref()) {
+                    clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
+                    if !session.entered { continue; }
                     tick_character(&mut sock,peer,&lobby,account,session,skills::now_ms()).await;
                     social::synchronize(&lobby,account,session);
                     social::flush(&mut sock,peer,&lobby,session).await;

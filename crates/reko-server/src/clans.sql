@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS clan_members (
  FOREIGN KEY(account,slot) REFERENCES lobby_characters(account,slot) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS clan_one_chief ON clan_members(clan_id) WHERE fame=1;
+CREATE TABLE IF NOT EXISTS clan_progress (
+ clan_id INTEGER PRIMARY KEY REFERENCES clans(id) ON DELETE CASCADE,
+ rank INTEGER NOT NULL DEFAULT 1 CHECK(rank IN (1,2)),
+ cape INTEGER NOT NULL DEFAULT 65535 CHECK(cape BETWEEN 0 AND 65535)
+);
 CREATE TRIGGER IF NOT EXISTS clan_member_nation BEFORE INSERT ON clan_members
 WHEN (SELECT nation FROM clans WHERE id=NEW.clan_id) !=
  (SELECT CASE WHEN race<10 THEN 1 ELSE 2 END FROM lobby_characters WHERE account=NEW.account AND slot=NEW.slot)

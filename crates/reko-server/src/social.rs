@@ -19,6 +19,7 @@ pub(crate) struct Hub {
     pub clan_invites: HashMap<u16, (u16, u16, u64)>,
     queues: HashMap<u16, Vec<Vec<u8>>>,
     pub refresh: HashSet<u16>,
+    pub transfers: HashMap<u16, Position>,
     pub loot_rotation: HashMap<u16, usize>,
     visible: HashMap<u16, HashSet<u16>>,
 }
@@ -70,6 +71,7 @@ impl Hub {
             .unwrap_or_else(|| vec![id])
     }
     pub fn disconnect(&mut self, id: u16) {
+        self.transfers.remove(&id);
         party::leave(self, id, id);
         self.party_invites
             .retain(|target, (leader, _)| *target != id && *leader != id);
@@ -198,7 +200,7 @@ impl Hub {
         p.extend(s.clan.name.as_bytes());
         p.extend([s.clan.grade, 0]);
         p.extend(0u16.to_le_bytes());
-        p.extend(u16::MAX.to_le_bytes());
+        p.extend(s.clan.cape.to_le_bytes());
         p.extend([s.progress.level, s.character.race]);
         p.extend(s.character.class.to_le_bytes());
         p.extend(s.position.x.to_le_bytes());
@@ -277,7 +279,15 @@ pub(crate) fn synchronize(lobby: &Lobby, account: &str, s: &mut Session) {
             }
         }
         match clans::load(&lobby.db.lock().unwrap(), account, s.character.slot) {
-            Ok(info) => s.clan = info,
+            Ok(info) => {
+                if info.id != 0 && info.id == s.clan.id && info.grade != s.clan.grade {
+                    let mut p = vec![0x3c, 0x12, 1, 0];
+                    p.extend(info.id.to_le_bytes());
+                    p.extend([info.grade, 0]);
+                    lobby.social.lock().unwrap().send(s.player_id, p);
+                }
+                s.clan = info;
+            }
             Err(error) => tracing::error!(%error,"clan refresh failed"),
         }
         lobby.social.lock().unwrap().synchronize(account, s);

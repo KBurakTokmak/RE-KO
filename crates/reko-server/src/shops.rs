@@ -413,6 +413,12 @@ pub(crate) async fn handle(
                 p.extend(merchant.group.to_le_bytes());
                 super::send_response(sock, peer, &None, &p, "MERCHANT_OPEN").await;
             } else {
+                if merchant.kind == 25 {
+                    session.merchant = Some(id);
+                    super::send_response(sock, peer, &None, &[0x3c, 0x1b], "CAPE_SERVICE_OPEN")
+                        .await;
+                    return;
+                }
                 if merchant.kind == 24 {
                     let mut request = vec![0x33];
                     request.extend(merchant.prototype.to_le_bytes());
@@ -528,6 +534,44 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn habice_opens_native_cape_service_only_when_nearby() {
+        use tokio::io::AsyncReadExt;
+        let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        {
+            let db = lobby.db.lock().unwrap();
+            crate::population::tests::seed(&db);
+            db.execute("UPDATE world_spawns SET monster=0,prototype=26031,appearance=22000,name='[Mantle]Habice',kind=25,zone=?1,x0=?2,x1=?2,z0=?3,z1=?3",params![s.position.zone,s.position.x,s.position.z]).unwrap();
+            lobby.merchants = load_population(&db, &reko_common::game_dir()).unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        let mut request = vec![0x20];
+        request.extend(12000u16.to_le_bytes());
+        handle(&mut socket, peer, &lobby, "test", &mut s, &request).await;
+        let mut packet = [0; 8];
+        client.read_exact(&mut packet).await.unwrap();
+        assert_eq!(packet, crate::frame_packet(&[0x3c, 0x1b]).as_slice());
+        assert_eq!(s.merchant, Some(12000));
+        assert!(s.npc_dialog.is_none());
+        s.position.x += 1000;
+        handle(&mut socket, peer, &lobby, "test", &mut s, &request).await;
+        assert!(s.merchant.is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), client.read_u8())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            1000000
+        );
+    }
     #[test]
     fn anvil_object_registers_native_resource_instead_of_character_model() {
         let db = Connection::open_in_memory().unwrap();

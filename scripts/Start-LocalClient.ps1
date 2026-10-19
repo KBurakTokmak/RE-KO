@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $game = Join-Path (Split-Path -Parent $root) 'KnightOnline1453'
+$localGame = Join-Path $root '.local/client-1453'
+if (Test-Path -LiteralPath (Join-Path $localGame '.reko-local-client.json')) { $game = $localGame }
 if (Get-Process KnightOnline -ErrorAction SilentlyContinue) { throw 'Close the running game before starting the local-server client.' }
 if (-not (Get-NetTCPConnection -LocalPort 15001 -State Listen -ErrorAction SilentlyContinue)) { throw 'Start RE-KO server before the client.' }
 $serverIni = Get-Content (Join-Path $game 'Server.ini')
@@ -8,7 +10,7 @@ if (-not ($serverIni | Where-Object { $_ -match '^IP0=127\.0\.0\.1\s*$' })) { th
 $log = Join-Path $root ('logs/local-client-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
 New-Item -ItemType Directory -Path (Join-Path $root 'logs') -Force | Out-Null
 $python = (Get-Command python -ErrorAction Stop).Source
-$process = Start-Process -FilePath $python -WorkingDirectory $root -ArgumentList @((Join-Path $PSScriptRoot 'local_client.py')) -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError ($log + '.error') -PassThru
+$process = Start-Process -FilePath $python -WorkingDirectory $root -ArgumentList @(('"' + (Join-Path $PSScriptRoot 'local_client.py') + '"'),'--game-dir',('"' + $game + '"')) -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError ($log + '.error') -PassThru
 $log | Set-Content (Join-Path $root 'logs/latest-local-client.txt')
 Write-Output "Local client startup PID $($process.Id); log $log"
 $deadline = (Get-Date).AddSeconds(50)

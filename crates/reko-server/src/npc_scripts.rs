@@ -86,6 +86,21 @@ fn open_state(status: u8, state: u8) -> bool {
         _ => false,
     }
 }
+fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper) -> &'a Helper {
+    if h.status == 255 && matches!(h.npc, 11510 | 21510) && matches!(h.flag, 603 | 605) {
+        all.iter()
+            .find(|other| {
+                other.npc == h.npc
+                    && other.flag == h.flag
+                    && other.class == h.class
+                    && other.nation == h.nation
+                    && other.status == 0
+            })
+            .unwrap_or(h)
+    } else {
+        h
+    }
+}
 
 fn database_quest_script(all: &[Helper], context: &Context) -> Option<Vec<u8>> {
     let h = all.iter().find(|h| h.id == context.helper)?;
@@ -125,19 +140,46 @@ end
     if h.flag == 0 || h.kind != 1 || h.exchange == 0 || h.talk <= 0 {
         return None;
     }
-    let active = all
-        .iter()
-        .find(|other| other.flag == h.flag && other.npc == h.npc && other.status == 1)?;
-    let done = all
-        .iter()
-        .find(|other| other.flag == h.flag && other.npc == h.npc && other.status == 2)?;
+    let active = all.iter().find(|other| {
+        other.flag == h.flag
+            && other.npc == h.npc
+            && other.class == h.class
+            && other.nation == h.nation
+            && other.status == 1
+    })?;
+    let done = all.iter().find(|other| {
+        other.flag == h.flag
+            && other.npc == h.npc
+            && other.class == h.class
+            && other.nation == h.nation
+            && other.status == 2
+    })?;
+    let suppression = matches!(h.npc, 11510 | 21510) && matches!(h.flag, 603 | 605);
+    let enter = if suppression {
+        "EnterSuppression(UID)"
+    } else {
+        ""
+    };
+    let incomplete = if suppression {
+        format!(
+            "SelectMsg(UID,4,{},{},{},22,2147483004,23,2147483003)",
+            h.flag, h.talk, h.npc
+        )
+    } else {
+        format!(
+            "SelectMsg(UID,2,{},{},{},10,2147483003)",
+            h.flag, h.talk, h.npc
+        )
+    };
     // Menu events remain scoped to the server's offered choices.
     Some(
         format!(
             r#"
 local status=GetQuestStatus(UID,{flag})
 if EVENT==2147483001 then
-    if status==0 or status==4 then SaveEvent(UID,{active}); end
+    if status==0 or status==4 then SaveEvent(UID,{active}); {enter}; end
+elseif EVENT==2147483004 then
+    if status==1 or status==3 then {enter}; end
 elseif EVENT==2147483002 then
     if (status==1 or status==3) and CheckQuestExchange(UID,{exchange}) then
         RunQuestExchange(UID,{exchange}); SaveEvent(UID,{done});
@@ -149,7 +191,7 @@ elseif EVENT~=2147483003 then
         if CheckQuestExchange(UID,{exchange}) then
             SelectMsg(UID,4,{flag},{talk},{npc},4006,2147483002,23,2147483003)
         else
-            SelectMsg(UID,2,{flag},{talk},{npc},10,2147483003)
+            {incomplete}
         end
     else
         SelectMsg(UID,2,{flag},{talk},{npc},10,2147483003)
@@ -161,12 +203,15 @@ end
             done = done.id,
             exchange = h.exchange,
             talk = h.talk,
-            npc = h.npc
+            npc = h.npc,
+            enter = enter,
+            incomplete = incomplete
         )
         .into_bytes(),
     )
 }
 struct Changes {
+    travel: Option<crate::movement::Position>,
     class: Option<u16>,
     rewards: crate::quest_rewards::State,
     level_state: Option<(combat::Stats, combat::Stats, crate::skills::State)>,
@@ -313,6 +358,7 @@ fn check_progress(
     let current = quests.get(&h.flag).copied().unwrap_or(0);
     anyhow::ensure!(matches!(current, 1 | 3), "quest not active");
     let state = Changes {
+        travel: None,
         class: None,
         level_state: None,
         rewards: crate::quest_rewards::State::new(&tx, account, s)?,
@@ -357,6 +403,7 @@ fn exchange(
     )?;
     let v: serde_json::Value = serde_json::from_str(&text)?;
     let mut next = Changes {
+        travel: None,
         rewards: state.rewards.clone(),
         level_state: None,
         class: None,
@@ -400,6 +447,7 @@ fn exchange(
                 .filter(|(id, count)| *id != 0 && *count > 0)
                 .any(|&(id, count)| {
                     let mut candidate = Changes {
+                        travel: None,
                         rewards: next.rewards.clone(),
                         level_state: None,
                         class: None,
@@ -432,6 +480,7 @@ fn exchange(
         for &(id, count) in &rewards {
             if id != 0 && count != 0 {
                 let mut possible = Changes {
+                    travel: None,
                     rewards: next.rewards.clone(),
                     level_state: None,
                     class: None,
@@ -492,6 +541,7 @@ fn execute(
         })?
         .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     let state = RefCell::new(Changes {
+        travel: None,
         rewards: crate::quest_rewards::State::new(&tx, account, s)?,
         level_state: None,
         class: None,
@@ -560,6 +610,26 @@ fn execute(
             .character
             .nation()));
         function!("GetZoneID", |_, _: Variadic<i64>| Ok(s.position.zone));
+        function!("EnterSuppression", |_, _: Variadic<i64>| {
+            let mut st = state.borrow_mut();
+            let helper = all.iter().find(|h| h.id == st.context.helper)
+                .ok_or_else(|| mlua::Error::runtime("invalid suppression helper"))?;
+            if !matches!(helper.npc,11510|21510) || !matches!(helper.flag,603|605)
+                || merchant.prototype != helper.npc || !eligible(helper,s)
+                || s.position.zone != s.character.nation() || s.zone_loading
+                || !matches!(st.quests.get(&helper.flag),Some(1|3)) || st.travel.is_some() {
+                return Err(mlua::Error::runtime("suppression entry unavailable"));
+            }
+            let zone = if helper.flag == 603 {82} else {83};
+            let (x,z):(u16,u16) = tx.query_row(
+                "SELECT karus_x,karus_z FROM world_town_starts WHERE zone=?1", [zone], |r| Ok((r.get(0)?,r.get(1)?)))
+                .map_err(mlua::Error::external)?;
+            let (x,z) = if zone==82 {(202,199)} else {(x,z)};
+            st.travel=Some(crate::movement::Position { zone,
+                x:x.checked_mul(10).ok_or_else(||mlua::Error::runtime("invalid suppression X"))?,
+                z:z.checked_mul(10).ok_or_else(||mlua::Error::runtime("invalid suppression Z"))?, y:0 });
+            Ok(())
+        });
         function!("HowmuchItem", |_, a: Variadic<i64>| Ok(state
             .borrow()
             .count(*a.get(1).unwrap_or(&0) as u32)));
@@ -779,7 +849,8 @@ fn execute(
             || result.coins != before.1
             || result.quests != before.2
             || result.rewards != before.3
-            || result.class.is_some(),
+            || result.class.is_some()
+            || result.travel.is_some(),
         "no matching event in supplied NPC script"
     );
     let c = lobby
@@ -822,6 +893,9 @@ fn execute(
     for (quest, status) in &result.quests {
         tx.execute("INSERT INTO character_quests VALUES (?1,?2,?3,?4) ON CONFLICT(account,slot,quest) DO UPDATE SET state=excluded.state",params![account,s.character.slot,quest,status])?;
     }
+    if let Some(position) = result.travel {
+        crate::movement::save(&tx, account, s.character.slot, position)?;
+    }
     if result.rewards != before.3 {
         result.rewards.save(&tx, account, s.character.slot)?;
     }
@@ -854,6 +928,26 @@ fn execute(
     Ok(result)
 }
 
+pub(crate) fn cancellation_request(
+    db: &Connection,
+    account: &str,
+    s: &Session,
+    flag: u16,
+) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(flag > 0 && flag < 32000, "Invalid quest ID.");
+    let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3 AND state IN (1,3))",params![account,s.character.slot,flag],|r|r.get(0))?;
+    anyhow::ensure!(active, "This quest is not active on your character.");
+    let helper = helpers(db)?
+        .into_iter()
+        .find(|h| h.flag == flag && h.kind == 1 && eligible(h, s))
+        .ok_or_else(|| {
+            anyhow::anyhow!("This quest cannot be abandoned through the quest journal.")
+        })?;
+    let mut p = vec![0x64, 5];
+    p.extend(helper.id.to_le_bytes());
+    Ok(p)
+}
+
 pub(crate) async fn handle(
     sock: &mut TcpStream,
     peer: SocketAddr,
@@ -862,6 +956,9 @@ pub(crate) async fn handle(
     s: &mut Session,
     p: &[u8],
 ) {
+    if crate::clan_promotion::handle(sock, peer, lobby, account, s, p).await {
+        return;
+    }
     let progress_reset=s.entered && p.len()==6 && p[..2]==[0x64,12] && (||->anyhow::Result<bool> {
         let db=lobby.db.lock().unwrap();
         let id=u32::from_le_bytes(p[2..6].try_into()?);
@@ -881,17 +978,40 @@ pub(crate) async fn handle(
     }
     if s.entered && p.len() == 6 && p[..2] == [0x64, 5] {
         let id = u32::from_le_bytes(p[2..6].try_into().unwrap());
-        let result = (|| -> anyhow::Result<u16> {
+        let result = (|| -> anyhow::Result<(u16, Option<crate::movement::Position>)> {
             let db = lobby.db.lock().unwrap();
             let h = helpers(&db)?
                 .into_iter()
                 .find(|h| h.id == id && h.flag > 0 && eligible(h, s))
                 .ok_or_else(|| anyhow::anyhow!("invalid quest cancellation"))?;
-            crate::quests::cancel(&db, account, s.character.slot, h.flag)?;
-            Ok(h.flag)
+            let destination = if matches!((h.flag, s.position.zone), (603, 82) | (605, 83)) {
+                let nation = s.character.nation();
+                let (kx, kz, ex, ez): (u16, u16, u16, u16) = db.query_row(
+                    "SELECT karus_x,karus_z,elmo_x,elmo_z FROM world_town_starts WHERE zone=?1",
+                    [nation],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
+                let (x, z) = if nation == 1 { (kx, kz) } else { (ex, ez) };
+                Some(crate::movement::Position {
+                    zone: nation,
+                    x: x.checked_mul(10)
+                        .ok_or_else(|| anyhow::anyhow!("invalid home X"))?,
+                    z: z.checked_mul(10)
+                        .ok_or_else(|| anyhow::anyhow!("invalid home Z"))?,
+                    y: 0,
+                })
+            } else {
+                None
+            };
+            if destination.is_some() {
+                crate::quests::cancel_at(&db, account, s.character.slot, h.flag, destination)?;
+            } else {
+                crate::quests::cancel(&db, account, s.character.slot, h.flag)?;
+            }
+            Ok((h.flag, destination))
         })();
         match result {
-            Ok(flag) => {
+            Ok((flag, destination)) => {
                 s.npc_dialog = None;
                 let mut packet = vec![0x64, 2];
                 packet.extend(flag.to_le_bytes());
@@ -904,6 +1024,11 @@ pub(crate) async fn handle(
                 );
                 if let Ok(counts) = counts {
                     super::send_response(sock, peer, &None, &counts, "QUEST_COUNTS").await;
+                }
+                if let Some(position) = destination {
+                    let packet = crate::travel::begin(lobby, s, position);
+                    super::send_response(sock, peer, &None, &packet, "SUPPRESSION_CANCEL_RETURN")
+                        .await;
                 }
             }
             Err(error) => tracing::info!(%peer,%error,"quest cancellation refused"),
@@ -938,6 +1063,7 @@ pub(crate) async fn handle(
                             }
                     })
                     .ok_or_else(|| anyhow::anyhow!("no compatible NPC event"))?;
+                let h = entry_helper(&all, h);
                 if requested != 0 && h.flag != 0 {
                     let state=lobby.db.lock().unwrap().query_row("SELECT COALESCE((SELECT state FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3),0)",params![account,s.character.slot,h.flag],|r|r.get::<_,u8>(0))?;
                     anyhow::ensure!(open_state(h.status, state), "quest state mismatch");
@@ -999,6 +1125,7 @@ pub(crate) async fn handle(
                     .iter()
                     .find(|h| h.id == id && h.level <= s.progress.level && eligible(h, s))
                     .ok_or_else(|| anyhow::anyhow!("invalid quest helper"))?;
+                let h = entry_helper(&all, h);
                 let merchant = lobby
                     .merchants
                     .iter()
@@ -1195,6 +1322,10 @@ pub(crate) async fn handle(
             if let Some(c) = lobby.combat.as_ref() {
                 crate::durability::refresh(s, c, lobby.skills.as_ref());
             }
+            if let Some(position) = result.travel {
+                let packet = crate::travel::begin(lobby, s, position);
+                super::send_response(sock, peer, &None, &packet, "SUPPRESSION_ZONE_CHANGE").await;
+            }
         }
         Err(error) => {
             tracing::warn!(%peer,%error,"NPC script request refused atomically");
@@ -1212,6 +1343,133 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn suppression_solo_entry_commits_quest_and_position_together() {
+        for (flag, zone, level) in [(603u16, 82u8, 46u8), (605, 83, 64)] {
+            let Some((mut lobby, mut s)) = setup() else {
+                return;
+            };
+            s.position.zone = 1;
+            lobby.merchants[0].prototype = 21510;
+            lobby.merchants[0].position = s.position;
+            let npc = lobby.merchants[0].id;
+            {
+                let db = lobby.db.lock().unwrap();
+                db.execute(
+                    "INSERT INTO world_town_starts VALUES (?1,200,200,200,200,0,0,'test/source')",
+                    [zone],
+                )
+                .unwrap();
+                for (class, base) in [(1, 9000), (2, 9010)] {
+                    db.execute("INSERT OR IGNORE INTO world_town_starts VALUES (1,100,110,100,110,0,0,'test/home')",[]).unwrap();
+                    for (offset, status) in [(0, 0), (1, 1), (2, 2), (4, 255)] {
+                        let row = serde_json::json!({"sNpcId":21510,"sEventDataIndex":flag,"bEventStatus":status,"bLevel":level,"bClass":class,"bNation":1,"bQuestType":1,"nExchangeIndex":95,"nEventTalkIndex":6071,"nEventTriggerIndex":6092,"strLuaFilename":"21510_Hwargo.lua"});
+                        db.execute(
+                            "INSERT INTO world_reference_rules VALUES('QUEST_HELPER',?1,?2)",
+                            params![base + offset, row.to_string()],
+                        )
+                        .unwrap();
+                    }
+                }
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES('ITEM_EXCHANGE',95,?1)",
+                    [r#"{"nOriginItemNum1":910135000,"nOriginItemCount1":1}"#],
+                )
+                .unwrap();
+                db.execute_batch("CREATE TRIGGER fail_suppression BEFORE INSERT ON character_positions BEGIN SELECT RAISE(ABORT,'test position failure'); END;").unwrap();
+            }
+            let all = helpers(&lobby.db.lock().unwrap()).unwrap();
+            let context = Context {
+                npc,
+                helper: 9010,
+                file: "21510_Hwargo.lua".into(),
+                choices: [2147483001; 10],
+            };
+            let script = database_quest_script(&all, &context).unwrap();
+            assert!(String::from_utf8_lossy(&script).contains("SaveEvent(UID,9011)"));
+            assert!(
+                execute(
+                    &lobby,
+                    "test",
+                    &s,
+                    &lobby.merchants[0],
+                    context,
+                    (2147483001, -1),
+                    &script
+                )
+                .is_err()
+            );
+            {
+                let db = lobby.db.lock().unwrap();
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM character_quests WHERE account='test' AND quest=?1",
+                        [flag],
+                        |r| r.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+                db.execute_batch("DROP TRIGGER fail_suppression").unwrap();
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (mut socket, peer) = listener.accept().await.unwrap();
+            let mut request = vec![0x64, 7];
+            request.extend(9014u32.to_le_bytes());
+            handle(&mut socket, peer, &lobby, "test", &mut s, &request).await;
+            assert_eq!(s.npc_dialog.as_ref().unwrap().helper, 9010);
+            receive_until(&mut client, 0x55).await;
+            handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 0, 0]).await;
+            let replies = receive_until(&mut client, 0x27).await;
+            assert_eq!(&replies.last().unwrap()[..4], &[0x27, 3, zone, 0]);
+            assert!(s.zone_loading && !s.entered && s.npc_dialog.is_none());
+            assert_eq!(s.position.zone, zone);
+            {
+                let db = lobby.db.lock().unwrap();
+                assert_eq!(crate::movement::load(&db, "test", 0).unwrap(), s.position);
+                assert_eq!(
+                    db.query_row(
+                        "SELECT state FROM character_quests WHERE account='test' AND quest=?1",
+                        [flag],
+                        |r| r.get::<_, u8>(0)
+                    )
+                    .unwrap(),
+                    1
+                );
+                assert_eq!(starter::coins(&db, "test", 0).unwrap(), 1000000);
+                assert!(
+                    starter::inventory(&db, "test", 0)
+                        .unwrap()
+                        .iter()
+                        .all(|i| i.id == 0)
+                );
+            }
+            s.entered = true;
+            s.zone_loading = false;
+            let mut cancel = vec![0x64, 5];
+            cancel.extend(9010u32.to_le_bytes());
+            handle(&mut socket, peer, &lobby, "test", &mut s, &cancel).await;
+            let replies = receive_until(&mut client, 0x27).await;
+            assert_eq!(&replies.last().unwrap()[..4], &[0x27, 3, 1, 0]);
+            assert_eq!(
+                (s.position.zone, s.position.x, s.position.z),
+                (1, 1000, 1100)
+            );
+            let db = lobby.db.lock().unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT state FROM character_quests WHERE account='test' AND quest=?1",
+                    [flag],
+                    |r| r.get::<_, u8>(0)
+                )
+                .unwrap(),
+                4
+            );
+        }
+    }
     #[tokio::test]
     async fn forty_quests_accept_and_count_independently_without_erasing_other_progress() {
         let Some((lobby, mut s)) = setup() else {
@@ -1729,6 +1987,24 @@ mod tests {
             }
         }
         lobby.merchants = crate::shops::load_population(&source, &reko_common::game_dir()).unwrap();
+        {
+            let db = lobby.db.lock().unwrap();
+            let mut towns = source.prepare("SELECT * FROM world_town_starts").unwrap();
+            for row in towns
+                .query_map([], |r| {
+                    (0..8)
+                        .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+            {
+                db.execute(
+                    "INSERT OR REPLACE INTO world_town_starts VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    rusqlite::params_from_iter(row.unwrap()),
+                )
+                .unwrap();
+            }
+        }
         let all = helpers(&lobby.db.lock().unwrap()).unwrap();
         let mut tested = std::collections::HashSet::new();
         let mut report = Vec::new();

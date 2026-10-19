@@ -127,6 +127,15 @@ impl Book {
             .and_then(|hub| {
                 let h = hub.lock().unwrap();
                 h.named(owner).map(|id| {
+                    if prototype == 2690 && position.zone == 54 && h.players[&id].s.clan.id != 0 {
+                        let clan = h.players[&id].s.clan.id;
+                        return h
+                            .players
+                            .values()
+                            .filter(|p| p.s.clan.id == clan && p.s.clan.fame == 1)
+                            .map(|p| p.s.character.name.to_ascii_lowercase())
+                            .collect();
+                    }
                     h.group(id)
                         .iter()
                         .map(|id| h.players[id].s.character.name.to_ascii_lowercase())
@@ -541,6 +550,49 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caitharos_key_belongs_to_the_clan_chief_without_party_rotation() {
+        let Some((lobby, mut chief)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let mut member = crate::social::tests::player(&lobby, "TrialMate", 1, 80);
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute_batch(
+                "INSERT INTO clans VALUES (1,'KeyClan',1);
+                INSERT INTO clan_members VALUES ('test',0,1,1),('TrialMate',0,1,4);
+                INSERT INTO world_monster_loot VALUES (2690,0,2690);
+                INSERT INTO world_drop_rules VALUES (2690,2,910045000,10000);",
+            )
+            .unwrap();
+        }
+        chief.position.zone = 54;
+        member.position = chief.position;
+        crate::social::synchronize(&lobby, "test", &mut chief);
+        crate::social::synchronize(&lobby, "TrialMate", &mut member);
+        lobby
+            .social
+            .lock()
+            .unwrap()
+            .parties
+            .insert(member.player_id, vec![member.player_id, chief.player_id]);
+        let mut book =
+            Book::load(&lobby.db.lock().unwrap(), lobby.combat.as_ref().unwrap()).unwrap();
+        book.social = Some(lobby.social.clone());
+        let p = book
+            .create(2690, 12000, chief.position, &member.character.name)
+            .unwrap();
+        let id = u32::from_le_bytes(p[3..7].try_into().unwrap());
+        assert!(book.visible(id, &chief.character.name));
+        assert!(!book.visible(id, &member.character.name));
+        let peer = "127.0.0.1:1".parse().unwrap();
+        assert!(
+            pickup_routed(&book, &lobby, "TrialMate", &mut member, peer, id, 910045000).is_err()
+        );
+        pickup_routed(&book, &lobby, "test", &mut chief, peer, id, 910045000).unwrap();
+        assert_eq!(chief.inventory[0].id, 910045000);
+        assert!(pickup_routed(&book, &lobby, "test", &mut chief, peer, id, 910045000).is_err());
+    }
     #[test]
     fn party_loot_is_owned_atomic_level_weighted_and_rotates_items_without_touching_solo_rules() {
         let Some((lobby, mut a)) = crate::world_service_tests::setup() else {

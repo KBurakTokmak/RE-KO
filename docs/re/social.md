@@ -84,7 +84,53 @@ are loaded into MYINFO on login and into online appearance/chat routing. Clan ch
 is restricted to matching membership across zones. Ordinary members cannot change
 roles or disband; leader withdrawal disbands the clan as in the source.
 
-This is core training-clan membership, initially grade5. Promotion/NP donation,
-rankings, symbols, capes, clan banks, alliances, wars and siege ownership remain
-unimplemented. They do not follow merely from receiving a clan ID. Specialist
-clerk/ranking services remain separate from the Inn creation and clan member UI.
+Clan grade follows the sum of members' current national points:77000/144000/
+360000/720000 for grades4/3/2/1. These are supplied1453 GameServerDlg defaults;
+GetKnightsGrade does not divide the sum by36. Open-KO1298 EbenezerApp instead
+divides by24 and uses2000/5000/10000/20000; those older thresholds are not
+applied here. Its KnightsManager corroborates promoted-clan/cape serialization.
+
+## Knight promotion and capes
+
+At the nation's knight clerk, choose **I want to earn knight privileges**.
+The original4150/4250 clerk menu remains in use; its mission option enters a
+server-owned dialog using original1453 talks4165/4168/4172 and4265/4268/4272.
+The supplementary2086 intermediate talks6382/6421 are absent from1453 and must
+not be sent. They previously caused a native client crash. Other clerk services
+retain their existing handling; specialist ranking rewards remain incomplete.
+
+Only the current chief of a training clan of Grade3 or better may start the
+trial. Acceptance saves the chief and living online clan members on mainland
+zones below30 into zone54 at150,150, then sends the native loading handshake.
+All positions commit together before transfer notifications. Solo chiefs may
+enter. Reentry repeats eligibility checks. These are shared source populations,
+not isolated instances; no extra horse or immediate respawn is manufactured.
+
+Caitharos2690 uses the imported ordinary loot rule for Key of Honor910045000.
+For a clan's kill in zone54, its bundle belongs to the online chief rather than
+the party's item rotation: original talk4168 explicitly requires personal pickup.
+The existing bag capacity, range and replay checks apply. The nearby Judge13010
+offers return to the nation's imported home-town start. Judge's supplementary
+2086 return to newer Moradon21/817,451 is deliberately not copied.
+
+Back at the knight clerk, choose **I brought what you asked for** and confirm.
+The current chief, grade and training status are revalidated from SQLite.
+One key,10000000Noah and rank2/default cape0 commit in one transaction.
+Failure rolls everything back; a repeated claim cannot consume more resources.
+Grade remains based on national points; promotion changes clan type, not NP.
+SQLite clan_progress persists rank/cape and cascades on clan deletion.
+
+Promoted chiefs can use type25 cape merchants such as Habice. Prices and grade
+requirements come from original Cloak.tbl; cape99 is unavailable. Native70
+success/error and3C24 clan updates follow supplied1453 NPCHandler and
+Knights::SendUpdate, corroborated by Open-KO KnightsManager. Purchases require
+a nearby cape merchant, current leadership, sufficient coins and grade; the
+wallet and cape commit together. Selecting the current cape costs nothing.
+MYINFO and player presence include the saved cape after reconnecting.
+Native006A0188 stores the pre-name byte as clan type;006A02D4/006A02FA
+read grade/ranking after the name and006A03C8 passes them to KnightsInfoSet.
+The previous MYINFO grade/type labels were reversed. They now match original
+native consumption and supplied1453 User::SendMyInfo; player IN has no type byte.
+
+NP donation, rankings, symbols, clan banks, alliances, wars and siege ownership
+remain unimplemented. Do not infer these from basic knight promotion.

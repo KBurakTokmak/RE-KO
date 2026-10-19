@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "XPatch"
 path = "src/xpatch_stub.rs"
 
+[[bin]]
+name = "reko-local-guard"
+path = "src/local_guard_stub.rs"
+
 [dependencies]
 reko-common.workspace = true
 reko-assets.workspace = true

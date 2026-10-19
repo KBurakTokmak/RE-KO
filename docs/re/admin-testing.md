@@ -93,6 +93,9 @@ missing prototype levels from the catalog, preserving existing map-derived value
 
 Original-client model/skeleton asset availability and template validity are
 checked before insertion.
+Complete `.n3chr` files supply their own root skeleton, matching native character
+initialization. This covers Felankor6200 even though its table's joint/animation
+fields are reversed; the original files remain unchanged.
 Private-source entries without a1453 model return an error rather than spawning
 an invisible replacement. No client files are modified. Summons join the normal
 region event, combat, death, loot, XP and quest paths. They exist until killed or

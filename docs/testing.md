@@ -46,6 +46,22 @@ collision behavior; normal skill costs still apply. See [admin testing](re/admin
 
 ## Party, clan and large-drain checks
 
+- On an eligible Grade3+ training clan chief, open the nation's knight clerk and
+  select knight privileges. Confirm the native1453 dialog opens without the
+  former missing-talk crash. Start the trial; verify zone54 and transfers for
+  online mainland clan members, including solo entry. Kill Caitharos and pick
+  up its Key of Honor as chief. Use Judge to return home and claim promotion
+  with the key and10000000Noah. Check one fee/key consumption, rank/cape after
+  relog, and rejection of a repeated claim or non-chief request.
+- At Habice, select a cape allowed by the clan grade. Verify its original table
+  price, persistence and appearance. Check that insufficient funds, a distant
+  merchant or a training clan cannot purchase, and reselecting the current cape
+  does not charge again. Keep existing saves unchanged merely to reach this gate.
+- Type `quests`, `quest <ID>` and `questcancel <ID>` in ordinary chat. Check
+  private pages, original descriptions and current kill counters. Abandon one
+  quest while another remains active; only its own counters reset. Completed
+  quests/internal flags cannot be abandoned. Check suppression return as well.
+
 - On a high-HP target, cast10percent twice and then5percent: HP loss uses the
   remaining HP each time and can exceed32767. Large-hit notices give full totals.
 - Create a clan from the home Inn Host as a level20+ character with500000Noah.

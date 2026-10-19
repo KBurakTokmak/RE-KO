@@ -68,6 +68,11 @@ the background server and its client-startup watcher. Double-click
 `server_stopper.bat` to stop this checkout's server/watcher and checkpoint
 the save for copying (Python is required for the checkpoint). The scripts
 resolve paths from their own location. They do not manage reference SQL services.
+The start BAT runs `git pull --ff-only` before starting and cancels startup if
+the update fails. The stop BAT attempts the same update after stopping, so a
+network or Git error cannot prevent shutdown. Pull never forces a merge or
+discards local changes; resolve any reported conflict before restarting.
+Direct PowerShell invocation does not pull updates.
 
 ```powershell
 # Background daemon, capture and client-startup observer
@@ -98,6 +103,10 @@ Use a separate local-testing client configuration with `IP0=127.0.0.1` in
 Server.ini. Do not use scripts to modify the reference installation. With the
 server running, double-click `scripts/Start-LocalClient.cmd`. Its hash-checked
 startup profile is described in [client startup](re/client-startup.md).
+If the legacy XTrap child closes the client on this machine, prepare the isolated
+copy once with `scripts/Prepare-LocalClient.ps1`, then use the same CMD launcher.
+Preparation preserves the reference installation and requires roughly1.1GB of
+local space. The copied profile disables the XTrap child; its API DLL remains.
 
 `reko.db` is the authoritative save and imported world-rule store. Preserve its
 WAL state when backing up a live server: use SQLite's backup API, or stop the

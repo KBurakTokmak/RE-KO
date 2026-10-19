@@ -45,8 +45,8 @@ list is `6B 0000`. The full player parser is0069FA60:
 | nation,race,class,face,hair | u8,u8,u16,u8,u8 |
 | rank,title,level,free stats | u8,u8,u8,i16 |
 | required/current XP, two loyalty values | fouru32 |
-| city,clan,fame,alliance,grade | u8,i16,u8,i16,u8 |
-| clan name,rating,rank,mark,cape | u8 length/bytes,u8,u8,i16,u16 |
+| city,clan,fame,alliance,clan type | u8,i16,u8,i16,u8 |
+| clan name,grade,ranking,mark,cape | u8 length/bytes,u8,u8,i16,u16 |
 | maximum/current HP, maximum/current MP, maximum/current weight | sixi16 |
 | five stats with bonus bytes | tenu8 |
 | attack,defense,resistances,coins | i16,i16,sixu8,u32 |

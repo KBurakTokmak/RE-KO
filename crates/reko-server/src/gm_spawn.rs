@@ -396,4 +396,36 @@ mod tests {
         assert!(execute(&db, &world, "gm", &s, "/spawn", "113").unwrap()[0].contains("admin"));
         assert_eq!(world.spawns(s.position.zone).len(), initial + 1);
     }
+
+    #[test]
+    fn felankor_summons_with_the_original_complete_character_assets() {
+        let Some((lobby, s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let game = reko_common::game_dir();
+        let world = World::load(&game).unwrap();
+        let mut events = world.events.subscribe();
+        let db = lobby.db.lock().unwrap();
+        let data = serde_json::json!({"prototype":7035,"appearance":6200,"name":"Felankor","kind":0,"group":0,"nation":0,"level":110,"size":120,"hp":1981241,"armor":0,"weapons":[0,0],"resistance":[500,500,500,500,500,500]});
+        db.execute(
+            "INSERT INTO world_reference_rules VALUES ('MONSTER_TEMPLATE',7035,?1)",
+            [data.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO world_monster_ai VALUES (7035,0,1,1,1000,1,2,2,10,20,100,0,0,0,0,0,1000)",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO character_privileges VALUES ('test',0,1)", [])
+            .unwrap();
+        let messages = execute(&db, &world, "test", &s, "/spawn", "Felankor").unwrap();
+        assert!(messages[0].starts_with("Spawned Felankor"));
+        let event = events.try_recv().unwrap();
+        assert_eq!(&event.packet[..2], &[0x0a, 1]);
+        assert_eq!(
+            u16::from_le_bytes(event.packet[6..8].try_into().unwrap()),
+            6200
+        );
+    }
 }

@@ -181,6 +181,15 @@ pub(crate) fn monster_snapshot_for(
 }
 
 pub(crate) fn cancel(db: &Connection, account: &str, slot: u8, quest: u16) -> rusqlite::Result<()> {
+    cancel_at(db, account, slot, quest, None)
+}
+pub(crate) fn cancel_at(
+    db: &Connection,
+    account: &str,
+    slot: u8,
+    quest: u16,
+    destination: Option<crate::movement::Position>,
+) -> rusqlite::Result<()> {
     let tx = db.unchecked_transaction()?;
     let state = tx
         .query_row(
@@ -197,6 +206,9 @@ pub(crate) fn cancel(db: &Connection, account: &str, slot: u8, quest: u16) -> ru
     let monster:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM world_reference_rules WHERE table_name='QUEST_MONSTER' AND rule_id=?1)",[quest],|r|r.get(0))?;
     if monster && matches!(state, 1 | 3) {
         reset_counts(&tx, account, slot, quest)?;
+    }
+    if let Some(position) = destination {
+        crate::movement::save(&tx, account, slot, position)?;
     }
     tx.commit()
 }

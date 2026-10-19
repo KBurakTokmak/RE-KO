@@ -6,6 +6,27 @@ QUEST_MONSTER requirements/rewards. States are0/unset,1/accepted,2/completed,
 actions. Rewards, costs, items and progression commit atomically; replaying a
 completed menu cannot pay again. Specialist quests remain partial.
 
+## Quest journal commands
+
+In ordinary chat, type `quests` (or `quests 2` for the next page) to privately
+list this character's accepted/ready quests, eight per page. `quest <ID>` shows
+the original Quest_guide_us.tbl title/accepted description and independent
+monster counters. Quests without a matching guide title retain their numeric
+ID. Completed, abandoned and internal32000+ flags are excluded.
+
+`questcancel <ID>` abandons an active ordinary quest using the same native
+helper cancellation handler, ownership/class/nation validation and persisted
+counter reset as the client. Completed quests cannot be reset this way.
+Suppression-zone return behavior below applies equally to this command.
+Only the selected quest's counters change. Commands and replies are private,
+available to ordinary players, and accept an optional leading slash. Use plain
+commands if the native client intercepts an unknown slash command.
+
+This extends server access to concurrent quests; it does not add a new client
+window. Open-KO's native Quest tab is disabled and its Q binding is GM movement,
+so it is not a verified1453 journal shortcut. Clan promotion is a separate
+clerk service described in [social systems](social.md).
+
 ## Concurrent objectives
 
 The server supports **40 accepted/ready quests**, excluding completed, abandoned
@@ -38,6 +59,28 @@ Quest XP uses1A00/current XP. Native chat output is conditional: a missing chat
 line alone is not proof of a missing reward. The reported Bulcan500XP reward
 was verified against client/imported exchange, live packet and saved XP; no
 regrant was necessary.
+
+## Monster Suppression Squad entry
+
+Captain Fargo21510 and the matching11510 captain use imported quest603/605
+helpers and exchanges. Acceptance commits the active quest and saved destination
+in one transaction, then starts the existing27 zone-loading handshake. Incomplete
+active quests offer entry again; turn-in still checks the source exchange and
+can pay only once. Helper state selection preserves the quest's class/nation.
+
+Quest603 enters zone82 at202,199, corroborated by supplementary21510_Hwargo.lua
+event6095 and the original map's Grape Ripper population. Quest605 enters zone83
+at its imported START_POSITION, with the matching Patos messenger population.
+No new monsters, quest items or rewards are synthesized. Original1453 talk/menu
+IDs and existing inventory capacity/weight checks remain in use.
+
+The owner explicitly allows solo entry. This path transfers the interacting
+character; coordinated party-wide transfers are separate. Cancelling603/605
+inside their respective zones atomically abandons that quest and saves the
+nation's imported home-town position before returning through the same loading
+handshake. Supplied1453 QuestHandler::QuestV2PacketProcess case5 corroborates
+returning players from suppression zones on cancellation. Other quests and
+their independent counters remain intact.
 
 ## XP, points and starting defaults
 

@@ -168,11 +168,11 @@ impl Session {
         put_u16(&mut packet, self.clan.id);
         packet.push(self.clan.fame);
         put_u16(&mut packet, 0);
-        packet.extend_from_slice(&[self.clan.grade, self.clan.name.len() as u8]);
+        packet.extend_from_slice(&[self.clan.rank, self.clan.name.len() as u8]);
         packet.extend_from_slice(self.clan.name.as_bytes());
-        packet.extend_from_slice(&[0, 0]);
+        packet.extend_from_slice(&[self.clan.grade, 0]);
         put_u16(&mut packet, 0);
-        put_u16(&mut packet, 0);
+        put_u16(&mut packet, self.clan.cape);
         for value in [
             self.skills.max_hp,
             self.skills.hp,
@@ -337,6 +337,24 @@ mod tests {
         assert!(start_matches(&start, &session()));
         start[3] = b'x';
         assert!(!start_matches(&start, &session()));
+    }
+
+    #[test]
+    fn promoted_clan_type_grade_and_saved_cape_match_native_myinfo_fields() {
+        let mut s = session();
+        s.clan = crate::clans::Info {
+            id: 42,
+            name: "Capes".into(),
+            fame: 1,
+            grade: 3,
+            rank: 2,
+            cape: 4,
+        };
+        let p = s.my_info(&Bootstrap { next_level_exp: 50 });
+        assert_eq!(
+            &p[48..66],
+            b"\x2a\x00\x01\x00\x00\x02\x05Capes\x03\x00\x00\x00\x04\x00"
+        );
     }
 
     #[test]

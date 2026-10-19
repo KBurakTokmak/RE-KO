@@ -42,6 +42,13 @@ struct Reader<'a> {
     points: Vec<[f32; 3]>,
 }
 impl Reader<'_> {
+    fn string(&mut self) -> anyhow::Result<String> {
+        let length = self.word()? as usize;
+        ensure!(length <= 512, "excessive asset filename");
+        let start = self.data.position() as usize;
+        self.skip(length)?;
+        Ok(std::str::from_utf8(&self.data.get_ref()[start..start + length])?.to_string())
+    }
     fn word(&mut self) -> anyhow::Result<u32> {
         let mut bytes = [0; 4];
         self.data.read_exact(&mut bytes)?;
@@ -108,6 +115,46 @@ impl Reader<'_> {
         Ok(())
     }
 }
+fn asset_path(name: &str) -> anyhow::Result<String> {
+    let relative = name.replace('\\', "/").to_ascii_lowercase();
+    ensure!(
+        !relative.is_empty()
+            && Path::new(&relative)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+        "invalid character asset path"
+    );
+    Ok(relative)
+}
+fn character_joint(bytes: &[u8]) -> anyhow::Result<String> {
+    let mut reader = Reader {
+        data: Cursor::new(bytes),
+        points: Vec::new(),
+    };
+    reader.string()?;
+    reader.floats::<10>()?;
+    reader.key([0.0; 3], 0)?;
+    reader.key([0.0, 0.0, 0.0, 1.0], 1)?;
+    reader.key([1.0; 3], 0)?;
+    reader.string()?; // Collision and climb meshes precede the root joint.
+    reader.string()?;
+    let joint = asset_path(&reader.string()?)?;
+    ensure!(joint.ends_with(".n3joint"), "invalid character root joint");
+    Ok(joint)
+}
+fn joint_asset(game: &Path, row: &[CellValue]) -> anyhow::Result<String> {
+    // Native InitChr loads the complete character before consulting table joint fields.
+    if let Some(CellValue::String(character)) = row.get(15)
+        && !character.is_empty()
+    {
+        let relative = asset_path(character)?;
+        return character_joint(&std::fs::read(game.join(relative))?);
+    }
+    let Some(CellValue::String(joint)) = row.get(2) else {
+        anyhow::bail!("missing table root joint");
+    };
+    asset_path(joint)
+}
 fn skeleton_radius(bytes: &[u8]) -> anyhow::Result<f32> {
     let mut reader = Reader {
         data: Cursor::new(bytes),
@@ -151,19 +198,13 @@ impl Radii {
         let mut cache = HashMap::new();
         for (rows, player) in [(&looks.rows, false), (&players.rows, true)] {
             for row in rows {
-                let Some(CellValue::String(joint)) = row.get(2) else {
-                    continue;
+                let relative = match joint_asset(game, row) {
+                    Ok(relative) => relative,
+                    Err(error) => {
+                        tracing::warn!(appearance=crate::combat::integer(row, 0),%error,"native character root unavailable");
+                        continue;
+                    }
                 };
-                if joint.is_empty() {
-                    continue;
-                }
-                let relative = joint.replace('\\', "/").to_ascii_lowercase();
-                ensure!(
-                    Path::new(&relative)
-                        .components()
-                        .all(|c| matches!(c, std::path::Component::Normal(_))),
-                    "invalid joint asset path"
-                );
                 let radius = if let Some(radius) = cache.get(&relative) {
                     *radius
                 } else {
@@ -176,7 +217,7 @@ impl Radii {
                             radius
                         }
                         Err(error) => {
-                            tracing::warn!(joint,%error,"native model radius unavailable");
+                            tracing::warn!(joint=%relative,%error,"native model radius unavailable");
                             continue;
                         }
                     }
@@ -252,5 +293,17 @@ mod tests {
         let troll = radii.monsters[&1701];
         let player = radii.players[&2];
         assert!(troll > player);
+        assert!(
+            radii.monsters[&6200] > player,
+            "Felankor uses its N3Chr root joint"
+        );
+        let character = std::fs::read(game.join("Chr/mon_dragon.n3chr")).unwrap();
+        assert_eq!(
+            character_joint(&character).unwrap(),
+            "chr/mon_dragon.n3joint"
+        );
+        for end in 0..100.min(character.len()) {
+            assert!(character_joint(&character[..end]).is_err());
+        }
     }
 }

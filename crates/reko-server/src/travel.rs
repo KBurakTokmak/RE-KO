@@ -165,7 +165,7 @@ fn select(
     Ok((begin(lobby, s, position), w.coins))
 }
 
-fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position) -> Vec<u8> {
+pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position) -> Vec<u8> {
     let same_zone = s.position.zone == position.zone;
     s.position = position;
     s.zone_loading = !same_zone;

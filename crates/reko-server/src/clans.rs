@@ -11,12 +11,27 @@ pub(crate) struct Info {
     pub name: String,
     pub fame: u8,
     pub grade: u8,
+    pub rank: u8,
+    pub cape: u16,
 }
 pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(include_str!("clans.sql"))
 }
 pub(crate) fn load(db: &Connection, account: &str, slot: u8) -> rusqlite::Result<Info> {
-    Ok(db.query_row("SELECT c.id,c.name,m.fame FROM clan_members m JOIN clans c ON c.id=m.clan_id WHERE m.account=?1 AND m.slot=?2",params![account,slot],|r|Ok(Info{id:r.get(0)?,name:r.get(1)?,fame:r.get(2)?,grade:5})).optional()?.unwrap_or_default())
+    Ok(db.query_row("SELECT c.id,c.name,m.fame,COALESCE(p.rank,1),COALESCE(p.cape,65535),
+        (SELECT COALESCE(SUM(COALESCE(r.loyalty,300)),0) FROM clan_members members
+         LEFT JOIN character_quest_rewards r USING(account,slot) WHERE members.clan_id=c.id)
+        FROM clan_members m JOIN clans c ON c.id=m.clan_id LEFT JOIN clan_progress p ON p.clan_id=c.id
+        WHERE m.account=?1 AND m.slot=?2",params![account,slot],|r|Ok(Info{id:r.get(0)?,name:r.get(1)?,fame:r.get(2)?,rank:r.get(3)?,cape:r.get(4)?,grade:grade(r.get(5)?)})).optional()?.unwrap_or_default())
+}
+fn grade(points: u64) -> u8 {
+    match points {
+        720000.. => 1,
+        360000.. => 2,
+        144000.. => 3,
+        77000.. => 4,
+        _ => 5,
+    }
 }
 fn member_count(db: &Connection, id: u16) -> Result<u16, u8> {
     db.query_row(
@@ -169,6 +184,8 @@ fn apply(
                 name: text.into(),
                 fame: 1,
                 grade: 5,
+                rank: 1,
+                cape: u16::MAX,
             };
             let mut p = vec![0x3c, 1, 1];
             p.extend(s.player_id.to_le_bytes());

@@ -42,6 +42,14 @@ return. Threat reset is separate from XP/loot damage contribution history.
 Movement1/2 performs bounded idle roaming;0/4 do not. Terrain pathfinding,
 movement3 patrol, family assistance and monster spells remain incomplete.
 
+Complete character assets take precedence over the table joint/animation fields,
+following Open-KO `CPlayerBase::InitChr` and `CN3Chr::Load`. The radius reader
+resolves the root skeleton from original NPC_Looks column15 (`.n3chr`) when
+present. Felankor appearance6200 has reversed table joint/animation filenames;
+its valid `Chr/mon_dragon.n3chr` names `Chr/mon_dragon.n3joint`. Reading that root
+restores the original model radius and admin summoning without modifying assets.
+Malformed, missing or unsafe character paths remain rejected.
+
 ## Inventory and services
 
 Item attachment uses original ItemOrg column12. Placement handles both hands,
@@ -69,6 +77,14 @@ and tariff initialization use the verified transaction flow. Innkeepers expose
 account-shared storage:192slots, eight pages of24, with validated deposit,
 withdrawal, stack/bag moves and bank coins. All transactions check ownership,
 quantity, range, capacity, weight and applicable coin caps before commit.
+
+Type25 mantle clerks, including Habice, open the native cape window with3C1B
+instead of searching for a QUEST_HELPER row. Supplied1453 NPCHandler::NpcEvent
+and native006B89AC agree. Source NPCHandler::HandleCapeChange requires a
+promoted clan leader. Native70 purchases now validate the nearby service,
+leadership, original Cloak.tbl grade/price and wallet before atomically saving
+the cape. Training clans receive error-1 without a charge. Knight promotion,
+key pickup and persistent capes are described in [social systems](social.md).
 
 The Moradon anvil is **map object5001**, kind24, at approximately337.888,389.948,
 not Heppa's character model. Original OPD event5001/type8/status1 and supplied

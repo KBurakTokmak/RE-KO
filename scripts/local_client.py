@@ -4,15 +4,30 @@ from ctypes import wintypes as w
 import hashlib
 from pathlib import Path
 import time
-import sys
+import argparse
+import json
 
-GAME = Path(__file__).resolve().parents[2] / "KnightOnline1453"
+ROOT = Path(__file__).resolve().parents[1]
+ORIGINAL_GAME = ROOT.parent / "KnightOnline1453"
+LOCAL_GAME = ROOT / ".local" / "client-1453"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--attach-new', type=int)
+parser.add_argument('--game-dir', type=Path)
+args = parser.parse_args()
+GAME = (args.game_dir or (LOCAL_GAME if (LOCAL_GAME / '.reko-local-client.json').is_file() else ORIGINAL_GAME)).resolve()
+assert GAME in (ORIGINAL_GAME.resolve(), LOCAL_GAME.resolve()), 'Unexpected client directory'
 EXE = GAME / "KnightOnline.exe"
 EXPECTED_HASH = "9513ecdf29e99bfee307fa8dc93ef64bf616d77d475d57fde906107f32169bb0"
 WATCHDOG_ADDRESS = 0x78D8C0
 WATCHDOG_CODE = bytes.fromhex("a1f4029e0081ecf40100005668c0d4010050")
 EVENT_ADDRESS = 0x9E02F4
 assert hashlib.sha256(EXE.read_bytes()).hexdigest() == EXPECTED_HASH, "Unknown client build"
+if GAME == LOCAL_GAME.resolve():
+    profile = json.loads((GAME / '.reko-local-client.json').read_text(encoding='utf-8-sig'))
+    assert profile['profile'] == 'local-1453-inert-guard-v1', 'Unknown local client profile'
+    assert profile['client_sha256'] == EXPECTED_HASH, 'Unexpected profile client build'
+    for relative, key in [('XTrap/XTrap.exe', 'guard_sha256'), ('XPatch.exe', 'patch_sha256')]:
+        assert hashlib.sha256((GAME / relative).read_bytes()).hexdigest() == profile[key], 'Local helper changed; prepare a fresh copy'
 
 class Startup(c.Structure):
     _fields_ = [("cb", w.DWORD), ("reserved", w.LPWSTR), ("desktop", w.LPWSTR),
@@ -40,12 +55,12 @@ startup.cb = c.sizeof(startup)
 startup.flags = 1
 startup.show = 5
 process = Process()
-if len(sys.argv) == 3 and sys.argv[1] == '--attach-new':
+if args.attach_new is not None:
     k.OpenProcess.argtypes = [w.DWORD,w.BOOL,w.DWORD]
     k.OpenProcess.restype = w.HANDLE
     k.QueryFullProcessImageNameW.argtypes = [w.HANDLE,w.DWORD,w.LPWSTR,c.POINTER(w.DWORD)]
     k.GetProcessTimes.argtypes = [w.HANDLE,c.POINTER(w.FILETIME),c.POINTER(w.FILETIME),c.POINTER(w.FILETIME),c.POINTER(w.FILETIME)]
-    process.pid = int(sys.argv[2])
+    process.pid = args.attach_new
     process.process = k.OpenProcess(0x100000 | 0x1000 | 0x40 | 0x10,False,process.pid)
     assert process.process, c.get_last_error()
     path = c.create_unicode_buffer(32768); length=w.DWORD(32768)
@@ -57,7 +72,6 @@ if len(sys.argv) == 3 and sys.argv[1] == '--attach-new':
     assert 0 <= age <= 30, 'Startup profile refuses late attachment'
     print(f'NEW_DIRECT_LAUNCH_AGE={age:.3f}',flush=True)
 else:
-    assert len(sys.argv) == 1, 'Unknown launcher arguments'
     command = c.create_unicode_buffer(f'"{EXE}" USAKnightOnline')
     assert k.CreateProcessW(str(EXE), command, None, None, False, 0, None, str(GAME),
                             c.byref(startup), c.byref(process)), c.get_last_error()
