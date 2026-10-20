@@ -60,13 +60,49 @@ spawn size/100, matching GameProcMain's NPC ScaleSet. Skeleton parsing bounds
 names, key counts and hierarchy depth; invalid/unavailable radii are logged and
 retain the previous2m body fallback. No reference assets are modified or stored
 in Git. A0.15m tolerance covers the two positions' decimetre packet rounding.
-The server keeps its existing horizontal distance check; moving-client
-interpolation and transformed-player model scales remain limits. This change
+The server keeps its horizontal distance check with the bounded moving-melee
+forecast handling below; transformed-player model scales remain a limit. This change
 applies equally to ordinary/admin basic attacks, not to skill-range formulas.
 Troll King appearance1701/scale240 has about6.41m reach with a1m dagger on race2,
 before rounding tolerance. Small targets still allow at least3.15m.
 Regression compares the same skeleton at sizes100/240 and rejects targets
 beyond their respective reach, plus animation keys and malformed skeletons.
+
+### Moving melee and false misses
+
+Basic R remains unreliable against walking and sometimes stationary monsters
+in native-client testing. Moving Assassin skills appear improved according to
+the owner, but broader gameplay verification remains open. The forecast and NPC
+synchronization changes below are partial compatibility improvements, not a
+complete fix for R attacks; automated coverage does not reproduce every failure.
+
+Native moving06 packets describe NextPos(PACKET_INTERVAL_MOVE), while stop
+packets report the current position. Open-KO GameProcMain::MsgSend_Move and
+GameDef.h corroborate the1.5-second forecast interval; original captured movement
+shows the same lead. At Light Feet speed, treating that endpoint as the current
+position rejected a near-target Spike with a13.9–15.8m apparent distance.
+
+After movement passes the existing speed/time/distance envelopes, retain a
+bounded segment ending at that report. Its trailing length cannot exceed the
+reported allowed speed times1.5seconds. Advance its starting point with elapsed
+time and choose the closest point to the target only for basic R and the current
+melee-skill path. After1.5seconds, on stop, zone change or mismatched report, use
+the ordinary reported position. Sideways distance is not expanded; rejected
+movement cannot replace the segment. Persistence, visibility, loot, projectiles,
+skill ranges, damage and payment-before-hit rules retain their existing rules.
+AI observation uses the elapsed current point instead of chasing the player
+forecast endpoint. This is a
+documented compatibility inference for native forecasts, not a recovered full
+retail movement simulation. Socket/SQLite Spike108655 and R regressions cover
+moving hits, stopped/sideways refusal and no resource charge on refusal.
+
+Current basic NPC attacks do not roll a random hit/evasion miss: result0 also
+represents range/target/cooldown refusal. The reported R capture shows repeated range
+refusals on the same target, including native-reported0.9m versus authoritative
+6.83m. Both player forecasts and NPC visual synchronization matter; see the NPC
+movement notes in world-services. No new accuracy multiplier is applied. Supplied1453
+Unit::GetHitRate has probabilistic tiers; complete retail accuracy sampling
+remains separate from the current physical damage path.
 
 Class/weapon coefficients come from the local coefficient export. Physical
 hits use source-backed attack/armor/hit/random paths and original skill values.

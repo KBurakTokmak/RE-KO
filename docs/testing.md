@@ -1,5 +1,37 @@
 # Testing
 
+Native reverse requests use5B/7 with the same55-byte mode/NPC/ten-item layout;
+verify +7 Shard conversion through that actual client path and source recipe,
+not just a forged normal5B/2 request. The focused test checks native7 response,
+preview preservation and one-time consumption. For moving combat, test Spike
+108655 while running past a target with Light Feet, plus R; stop outside range
+and attack a target sideways outside the validated path to confirm refusal.
+Neither case may spend mana on a refused skill. The Win32 tooltip harness hides
+the tooltip before every draw, matching the actual inventory render lifecycle.
+
+Inventory regressions include consuming a Trina at the anvil, depositing and
+withdrawing another nonstackable item, and partial scroll-stack transfers. The
+native5B/45 replies must own these icons without duplicate3D updates. Verify that
+no ghost icon remains after closing/reopening the bag or bank. Reverse conversion
+tests cover preview, source poison +7, requested plain +7, Exceptional Shard +7,
+replay refusal and an ineligible Cleaver preserving its scroll. Native-client
+visual checks remain necessary. Test `/autoloot` on/off in ordinary chat, owned
+versus other-player/distant boxes, a full bag, and movement away from an NPC
+service context. Login starts with autoloot off.
+
+The local UI cache has an additional Win32 calling-convention/behavior harness;
+see [client startup](re/client-startup.md#local-inventory-ui-fixes). It checks real
+x86 code execution in an isolated test process, not the game's measured FPS.
+
+For the suppression reward/merchant regression, hand in the three regular and
+one boss certificate to Fargo as a rogue. Confirm both source weapons appear
+in the vacated bag slots, with received-item notices. Then open Moradon's
+[Scrolls] Charon and confirm the bag icons transfer to the shop without a crash.
+Repeat the NPC interaction to confirm no duplicate payout. Automated socket and
+SQLite coverage verifies the bundle, ordered icon removal/creation, notices,
+unchanged unrelated bag items and single completion; native rendering still
+requires this manual client check.
+
 Run from the repository root:
 
 ```powershell
@@ -38,6 +70,13 @@ Useful original-client regression passes:
   armor is rare; use the deterministic importer/loot regression rather than
   expecting a dagger helmet on a short run. Selected +1 variants use original
   extension541; the estimates and relative part/class weights are documented.
+- In both suppression zones, destroy the room gates and confirm their visible
+  barriers disappear. Check the own-nation exit portal, rejection of a distant
+  click/forged destination, free travel and preserved quest/items. Defeat the
+  natural boss by direct damage or DoT, collect its certificate during the
+  60-second chat countdown, then verify automatic home travel. Relog during the
+  countdown to check that it does not restart; early portal departure must not
+  cause a later unexpected warp. Native visual/collision checks require the client.
 - Exercise class skill costs, effects, cancel/expiry, potion recovery, standing
   and sitting regen. Test arrows at close range and mage ground AoE after moving.
 - Use the local startup launcher and leave the client idle beyond the former
@@ -84,3 +123,13 @@ The supported local launcher permits one game instance. Manual two-client
 coverage therefore needs a second PC/client with a different account. Complete
 one account's login/game connection before logging in another behind the same IP;
 native token binding for simultaneous pending logins remains unrecovered.
+
+For native NPC synchronization, verify walking and stopping targets with R and
+moving Assassin skills after relogin. The deterministic interpolation regression
+models1453 MoveTo at2/4/8m/s and checks arrival cancellation and visual melee
+distance; it does not simulate packet loss or stalled rendering. The Win32 tooltip
+harness covers hundreds of cursor moves, screen-edge anchoring, per-frame hiding
+and immediate item/stat invalidation. Native-client testing still reports failed
+R hits against walking and sometimes stationary monsters; moving Assassin skills
+appear improved. Keep R marked unresolved despite the automated checks passing.
+Additional item combinations and broader combat feel still need verification.

@@ -125,7 +125,19 @@ try:
     assert read(EVENT_ADDRESS, 4) == bytes(4), "Watchdog did not complete its own cleanup"
     assert read(WATCHDOG_ADDRESS, len(WATCHDOG_CODE)) == WATCHDOG_CODE
     assert hashlib.sha256(EXE.read_bytes()).hexdigest() == EXPECTED_HASH
-    print("LOCAL_PROFILE_READY: legacy heartbeat watchdog exited through its shutdown event; no code or file changes", flush=True)
+    if GAME == LOCAL_GAME.resolve() and profile.get('tooltip_cache', True):
+        try:
+            from client_tooltip_cache import install
+            print(install(process.pid), flush=True)
+        except (OSError, RuntimeError, AssertionError) as error:
+            print(f'TOOLTIP_CACHE_UNAVAILABLE: {error}', flush=True)
+    if GAME == LOCAL_GAME.resolve() and profile.get('autoloot_command', True):
+        try:
+            from client_tooltip_cache import install
+            print(install(process.pid, command=True), flush=True)
+        except (OSError, RuntimeError, AssertionError) as error:
+            print(f'AUTOLOOT_COMMAND_UNAVAILABLE: {error}', flush=True)
+    print("LOCAL_PROFILE_READY: legacy heartbeat watchdog exited through its shutdown event; original files unchanged", flush=True)
     while k.WaitForSingleObject(process.process, 1000) != 0:
         pass
     exit_code = w.DWORD()

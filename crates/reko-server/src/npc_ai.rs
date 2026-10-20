@@ -42,6 +42,7 @@ struct Agent {
     roam: Option<Position>,
     next_roam: u64,
     pattern: i8,
+    moving: bool,
 }
 #[derive(Clone)]
 pub(crate) struct Strike {
@@ -102,14 +103,21 @@ fn physical(rule: &Rule, target: &Player, attack_percent: u16, seed: &mut u64) -
     }
     damage.min((2.6 * f32::from(rule.damage)) as u32).min(32767) as u16
 }
-fn move_toward(mob: &mut Mob, target: Position, meters: f32, speed: f32) -> Option<Event> {
+fn move_toward(
+    mob: &mut Mob,
+    target: Position,
+    meters: f32,
+    speed: f32,
+    stop: f32,
+) -> Option<Event> {
     let dx = f32::from(target.x) - f32::from(mob.position.x);
     let dz = f32::from(target.z) - f32::from(mob.position.z);
     let length = dx.hypot(dz);
     if length < 0.5 || meters <= 0.0 {
         return None;
     }
-    let step = (meters * 10.0).min(length);
+    let remaining = (length - stop * 10.0).max(0.0);
+    let step = (meters * 10.0).min(remaining);
     let old = mob.position;
     mob.position.x = (f32::from(old.x) + dx / length * step)
         .round()
@@ -120,14 +128,29 @@ fn move_toward(mob: &mut Mob, target: Position, meters: f32, speed: f32) -> Opti
     if old == mob.position {
         return None;
     }
-    Some(movement_event(mob, speed))
+    // Native NPC MoveTo approaches destinations over 1.5 / 0.85 seconds.
+    // Send a bounded destination ahead of the simulated position, not each tiny step.
+    if remaining - step < 0.5 {
+        return Some(movement_event(mob, 0.0, mob.position));
+    }
+    let lead = speed * 10.0 * 1.5 / 0.85;
+    let destination = Position {
+        x: (f32::from(mob.position.x) + dx / length * lead)
+            .round()
+            .clamp(0.0, 65535.0) as u16,
+        z: (f32::from(mob.position.z) + dz / length * lead)
+            .round()
+            .clamp(0.0, 65535.0) as u16,
+        ..mob.position
+    };
+    Some(movement_event(mob, speed, destination))
 }
-fn movement_event(mob: &Mob, speed: f32) -> Event {
+fn movement_event(mob: &Mob, speed: f32, destination: Position) -> Event {
     let mut p = vec![0x0b];
     p.extend(mob.id.to_le_bytes());
-    p.extend(mob.position.x.to_le_bytes());
-    p.extend(mob.position.z.to_le_bytes());
-    p.extend(mob.position.y.to_le_bytes());
+    p.extend(destination.x.to_le_bytes());
+    p.extend(destination.z.to_le_bytes());
+    p.extend(destination.y.to_le_bytes());
     p.extend(((speed * 10.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes());
     Event {
         zone: mob.position.zone,
@@ -190,7 +213,9 @@ impl Brain {
             Player {
                 is_admin: s.is_admin,
                 name: s.character.name.clone(),
-                position: s.position,
+                position: s
+                    .movement
+                    .current_position(s.position, std::time::Instant::now()),
                 hp: s.skills.hp,
                 invisible: s.skills.buffs.get(&91).is_some_and(|b| now < b.until),
                 stats: s.combat,
@@ -235,6 +260,7 @@ impl Brain {
                 roam: None,
                 next_roam: now.saturating_add(rule.stand),
                 pattern: 0,
+                moving: false,
             });
             let elapsed = now.saturating_sub(agent.last).min(500) as f32 / 1000.0;
             agent.last = now;
@@ -245,6 +271,7 @@ impl Brain {
                 agent.roam = None;
                 agent.damage_seen = 0;
                 agent.damage_floor.clear();
+                agent.moving = false;
                 continue;
             }
             if !agent.alive {
@@ -255,6 +282,7 @@ impl Brain {
                 agent.pattern = 0;
                 agent.roam = None;
                 agent.next_roam = now.saturating_add(rule.stand);
+                agent.moving = false;
             }
             let damage = mob.damage_by.values().map(|v| u64::from(*v)).sum();
             if damage > agent.damage_seen {
@@ -323,6 +351,7 @@ impl Brain {
                 }
             }
             let speed = rule.run * f32::from(mob.speed_percent) / 100.0;
+            let event_start = events.len();
             if let Some(id) = agent.target {
                 let target = &self.players[&id];
                 let bulk = rule.bulk * f32::from(s.size) / 100.0;
@@ -338,6 +367,7 @@ impl Brain {
                         target.position,
                         (speed * elapsed).min((dist - reach).max(0.0)),
                         speed,
+                        reach,
                     ) {
                         events.push(e);
                     }
@@ -364,7 +394,7 @@ impl Brain {
                     agent.pattern = 0;
                     agent.roam = None;
                     agent.next_roam = now.saturating_add(rule.stand);
-                } else if let Some(e) = move_toward(mob, agent.home, speed * elapsed, speed) {
+                } else if let Some(e) = move_toward(mob, agent.home, speed * elapsed, speed, 0.0) {
                     events.push(e);
                 }
             } else if matches!(s.move_type, 1 | 2)
@@ -389,15 +419,21 @@ impl Brain {
                 }
                 if let Some(destination) = agent.roam {
                     let walk = rule.walk * f32::from(mob.speed_percent) / 100.0;
-                    if let Some(e) = move_toward(mob, destination, walk * elapsed, walk) {
+                    if let Some(e) = move_toward(mob, destination, walk * elapsed, walk, 0.0) {
                         events.push(e);
                     }
                     if distance(mob.position, destination) < 0.2 {
                         agent.roam = None;
                         agent.next_roam = now.saturating_add(rule.stand);
-                        events.push(movement_event(mob, 0.0));
+                        events.push(movement_event(mob, 0.0, mob.position));
                     }
                 }
+            }
+            if events.len() > event_start {
+                agent.moving = events.last().is_some_and(|e| e.packet[9..11] != [0, 0]);
+            } else if agent.moving {
+                events.push(movement_event(mob, 0.0, mob.position));
+                agent.moving = false;
             }
         }
         events
@@ -407,6 +443,50 @@ impl Brain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_npc_interpolation_tracks_walk_run_and_stop_without_crossing_the_goal() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let world = super::super::World::load(&game).unwrap();
+        let original = world.inner.lock().unwrap().mobs[&10000].clone();
+        for speed in [2.0, 4.0, 8.0] {
+            let mut mob = original.clone();
+            mob.position.x = 1000;
+            let goal = Position {
+                x: 2000,
+                ..mob.position
+            };
+            let mut rendered = 100.0f32;
+            let mut destination = rendered;
+            let mut velocity = 0.0f32;
+            for _ in 0..240 {
+                rendered += (destination - rendered).signum()
+                    * (velocity * 0.25).min((destination - rendered).abs());
+                if let Some(e) = move_toward(&mut mob, goal, speed * 0.25, speed, 2.0) {
+                    destination = f32::from(u16::from_le_bytes([e.packet[3], e.packet[4]])) / 10.0;
+                    if e.packet[9..11] != [0, 0] {
+                        velocity = (destination - rendered).abs() / 1.5 * 0.85;
+                    }
+                } else {
+                    let stop = movement_event(&mob, 0.0, mob.position);
+                    destination =
+                        f32::from(u16::from_le_bytes([stop.packet[3], stop.packet[4]])) / 10.0;
+                }
+                assert!(
+                    (f32::from(mob.position.x) / 10.0 - rendered).abs() < 3.0,
+                    "native visual target must remain within basic melee reach at speed {speed}"
+                );
+                assert!(
+                    rendered <= 198.05,
+                    "arrival must cancel the extrapolated destination before overshoot: {rendered} at speed {speed}"
+                );
+            }
+            assert_eq!(mob.position.x, 1980);
+            assert!((rendered - 198.0).abs() < 0.01);
+        }
+    }
     #[test]
     fn admins_are_excluded_from_aggro_retaliation_and_existing_targets() {
         let game = reko_common::game_dir();
@@ -815,7 +895,13 @@ mod tests {
         player.position = mobs.mobs[&12000].position;
         player.at = 1500;
         brain.players.insert(1, player.clone());
-        brain.tick(&mut mobs.mobs, 1500);
+        let stopped = brain.tick(&mut mobs.mobs, 1500);
+        assert!(
+            stopped
+                .iter()
+                .any(|e| e.packet[0] == 0x0b && e.packet[9..11] == [0, 0]),
+            "entering attack range must cancel the last forecast destination"
+        );
         assert_eq!(brain.take(1).len(), 1);
         brain.tick(&mut mobs.mobs, 1750);
         assert!(brain.take(1).is_empty());

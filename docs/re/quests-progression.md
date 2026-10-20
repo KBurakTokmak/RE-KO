@@ -68,6 +68,15 @@ in one transaction, then starts the existing27 zone-loading handshake. Incomplet
 active quests offer entry again; turn-in still checks the source exchange and
 can pay only once. Helper state selection preserves the quest's class/nation.
 
+The supplied1453 rogue exchange95 has bRandomFlag11 and awards both Crossbow
+168110045 and Cleaver111010045, one each. Source GameServer/ItemHandler.cpp
+RunExchange treats11 as an all-rewards bundle, not a choice. Consuming three
+910138000 and one910135000 and completing603 therefore delivers both weapons;
+do not regrant/reset a completed quest merely because a choice window was
+expected. Exchange12 selection is a separate existing path. Quest item updates
+now clear replaced IDs before creating reward icons and mark received items
+for native notifications; see [inventory protocol](protocol.md).
+
 Quest603 enters zone82 at202,199, corroborated by supplementary21510_Hwargo.lua
 event6095 and the original map's Grape Ripper population. Quest605 enters zone83
 at its imported START_POSITION, with the matching Patos messenger population.
@@ -86,6 +95,37 @@ The suppression loot repair supplies the missing certificates through ordinary
 corpse bundles, including Grape Ripper's Certificate and the zone83 equivalents.
 It does not grant quest completion, change exchanges/rewards or refund cancelled
 progress. See [loot evidence and estimated armor rates](world-services.md#suppression-quest-loot-repair).
+
+## Suppression exits and boss completion
+
+The original K_OBJECTPOS portals have groups821/822 in zone82 and831/832 in
+zone83, scoped to Karus/El Morad. When no historical warp destination exists,
+those exact portals offer a free return to the nation's imported START_POSITION.
+Existing native gate-list/selection and27 loading packets retain distance,
+nation, offered-ID and persistence checks. Supplementary Map/Map SMD files send
+players to newer Moradon815,539 for1000Noah; those mismatched destinations are
+not copied. Other zones and existing warp records retain their current behavior.
+
+Natural Grape Ripper7008 and Patos's messenger7013 deaths start a shared-zone
+60-second loot grace period. English private-chat countdown notices appear on
+entry/reconnect, every10seconds and the last5seconds. This is an explicit local
+duration; the exact original1453 completion delay/native timer window is not
+established. No unverified event-window packets are sent. Direct and periodic
+damage deaths use the same transition; repeated death checks cannot extend it,
+and manually summoned copies cannot close a natural run.
+
+At expiry each entered character in the zone saves its home position before
+starting the normal zone-loading handshake. Failed saves leave the character
+in place for a later retry. Loot, wallets, accepted quests and other counters
+are preserved; NPC reward turn-in is still required. Early portal travel clears
+the character's local notice context. Reconnecting in the same running server
+uses the existing deadline. Expired shared runs refuse new clerk entry.
+
+Destructible Gate7033/7034 deaths also emit native NPC_OUT, removing the dead
+barrier immediately rather than leaving its character/collision until corpse
+cleanup. The gate's imported HP and one-life regeneration policy remain intact.
+These are shared populations, not party instances: one boss ends the shared
+zone, and restarting the server resets its populations and completion timer.
 
 ## XP, points and starting defaults
 

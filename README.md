@@ -15,14 +15,16 @@ renderer/client and an in-process game host have not been implemented.
   nation selection, character creation and persistent characters.
 - Movement, sitting, location persistence, Town and zone gates, including
   walkthrough Eslant teleport triggers.
-- Inventory, equipment, buying/selling, repairs, account storage, and normal anvil
-  upgrades using imported recipes and rates; class, race, level and stat equip checks.
+- Inventory, equipment, buying/selling, repairs, account storage, normal anvil
+  upgrades and eligible Reverse Scroll conversion using imported rules;
+  class, race, level and stat equip checks.
 - NPC population and supported shop, storage, dialog and quest interactions.
 - Imported monster populations, roaming, aggression, ranged retaliation,
   chasing, physical attacks, regeneration and source-based respawn timers. Rare
   bosses pick one source location per zone, respawn six hours after death, and
   reset on server startup.
-- Monster loot boxes, drop tables, item pickup, coins, solo/party XP and leveling to 80.
+- Monster loot boxes, drop tables, item pickup, optional `/autoloot`, coins,
+  solo/party XP and leveling to 80.
 - Ordinary kill/item quests, rewards, progress notifications, level10 first job
   change, and up to **40 concurrent accepted quests** with separate kill counters.
 - Combat and many Rogue, Warrior, Mage and Priest skills, including timed buffs,

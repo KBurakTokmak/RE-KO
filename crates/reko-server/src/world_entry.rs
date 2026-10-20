@@ -43,6 +43,8 @@ impl Bootstrap {
 
 #[derive(Clone)]
 pub(crate) struct Session {
+    pub autoloot: Option<u64>,
+    pub suppression_notice: Option<(u8, u64, u64)>,
     pub clan: crate::clans::Info,
     pub is_admin: bool,
     pub rewards: crate::quest_rewards::Totals,
@@ -83,6 +85,8 @@ impl Session {
             return None;
         }
         Some(Self {
+            autoloot: None,
+            suppression_notice: None,
             clan: crate::clans::Info::default(),
             is_admin: false,
             rewards: crate::quest_rewards::Totals::default(),
@@ -281,6 +285,8 @@ mod tests {
 
     fn session() -> Session {
         Session {
+            autoloot: None,
+            suppression_notice: None,
             clan: crate::clans::Info::default(),
             is_admin: false,
             rewards: crate::quest_rewards::Totals::default(),

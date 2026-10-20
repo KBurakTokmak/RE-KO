@@ -53,6 +53,31 @@ fn entries(db: &rusqlite::Connection, s: &Session, gate: &Gate) -> anyhow::Resul
             out.push(w);
         }
     }
+    if out.is_empty()
+        && matches!(gate.source.zone, 82 | 83)
+        && gate.source.zone == s.position.zone
+        && gate.group == u16::from(s.position.zone) * 10 + u16::from(s.character.nation())
+        && gate.object == gate.group * 10 + 1
+    {
+        let home = crate::suppression::home(db, s.character.nation())?;
+        out.push(Warp {
+            id: gate.group * 10 + 1,
+            name: if home.zone == 1 {
+                "Luferson Castle"
+            } else {
+                "El Morad Castle"
+            }
+            .into(),
+            text: "Return to your nation's castle.".into(),
+            coins: 0,
+            zone: home.zone,
+            x: f32::from(home.x) / 10.0,
+            y: 0.0,
+            z: f32::from(home.z) / 10.0,
+            radius: 0.0,
+            nation: home.zone,
+        });
+    }
     Ok(out)
 }
 fn open(lobby: &Lobby, s: &Session, p: &[u8]) -> anyhow::Result<(Gate, Vec<u8>)> {
@@ -166,6 +191,7 @@ fn select(
 }
 
 pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position) -> Vec<u8> {
+    s.suppression_notice = None;
     let same_zone = s.position.zone == position.zone;
     s.position = position;
     s.zone_loading = !same_zone;
@@ -415,6 +441,73 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use tokio::{io::AsyncReadExt, net::TcpListener};
+    #[test]
+    fn suppression_portals_offer_only_the_own_nation_home_and_preserve_the_quest() {
+        for zone in [82, 83] {
+            for nation in [1, 2] {
+                let lobby = crate::social::tests::lobby();
+                let mut s = crate::social::tests::player(&lobby, "ExitTest", nation, 80);
+                s.position = movement::Position {
+                    zone,
+                    x: 2020,
+                    z: 1990,
+                    y: 0,
+                };
+                let group = u16::from(zone) * 10 + u16::from(nation);
+                let object = group * 10 + 1;
+                {
+                    let db = lobby.db.lock().unwrap();
+                    db.execute(
+                        "INSERT INTO world_town_starts VALUES (?1,354,1610,1644,333,0,0,'test')",
+                        [nation],
+                    )
+                    .unwrap();
+                    let v = serde_json::json!({"Type":5,"Belong":nation,"ControlNpcID":group,"PosX":202,"PosZ":199,"PosY":0});
+                    db.execute(
+                        "INSERT INTO world_reference_rules VALUES ('K_OBJECTPOS',?1,?2)",
+                        params![u32::from(zone) * 100000 + u32::from(object), v.to_string()],
+                    )
+                    .unwrap();
+                    db.execute(
+                        "INSERT INTO character_quests VALUES ('ExitTest',0,603,1)",
+                        [],
+                    )
+                    .unwrap();
+                }
+                let mut request = vec![0x33];
+                request.extend(object.to_le_bytes());
+                request.extend([0, 0]);
+                assert!(is_gate(&lobby, &s, &request));
+                let (gate, p) = open(&lobby, &s, &request).unwrap();
+                assert_eq!(&p[..4], &[0x4b, 1, 1, 0]);
+                s.gate = Some(gate);
+                let mut bad = vec![0x4b];
+                bad.extend((object + 10).to_le_bytes());
+                assert!(select(&lobby, "ExitTest", &mut s, &bad).is_err());
+                let mut choose = vec![0x4b];
+                choose.extend(object.to_le_bytes());
+                let (p, cost) = select(&lobby, "ExitTest", &mut s, &choose).unwrap();
+                assert_eq!(cost, 0);
+                assert_eq!(&p[..4], &[0x27, 3, nation, 0]);
+                assert!(select(&lobby, "ExitTest", &mut s, &choose).is_err());
+                let db = lobby.db.lock().unwrap();
+                assert_eq!(
+                    crate::movement::load(&db, "ExitTest", 0).unwrap().zone,
+                    nation
+                );
+                assert_eq!(crate::starter::coins(&db, "ExitTest", 0).unwrap(), 1000000);
+                assert_eq!(
+                    db.query_row(
+                        "SELECT state FROM character_quests WHERE account='ExitTest'",
+                        [],
+                        |r| r.get::<_, u8>(0)
+                    )
+                    .unwrap(),
+                    1
+                );
+            }
+        }
+    }
     #[tokio::test]
     async fn eslant_walkthrough_uses_primary_action_and_intersects_fast_crossing() {
         let Some((lobby, mut s)) = crate::world_service_tests::setup() else {

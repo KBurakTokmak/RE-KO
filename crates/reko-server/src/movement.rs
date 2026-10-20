@@ -68,6 +68,7 @@ pub(crate) fn save(
 
 #[derive(Clone)]
 pub(crate) struct Validator {
+    forecast: Option<Forecast>,
     last: Instant,
     distance_budget: f32,
     origin: Option<(f32, f32)>,
@@ -78,6 +79,7 @@ pub(crate) struct Validator {
 impl Default for Validator {
     fn default() -> Self {
         Self {
+            forecast: None,
             last: Instant::now(),
             distance_budget: 8.25,
             origin: None,
@@ -88,6 +90,42 @@ impl Default for Validator {
     }
 }
 impl Validator {
+    pub(crate) fn current_position(&self, reported: Position, now: Instant) -> Position {
+        self.forecast
+            .as_ref()
+            .filter(|p| p.to == reported)
+            .map_or(reported, |p| p.current(now))
+    }
+    pub(crate) fn combat_position(
+        &self,
+        reported: Position,
+        target: Position,
+        now: Instant,
+    ) -> Position {
+        let Some(path) = self.forecast.as_ref().filter(|p| {
+            p.to == reported
+                && target.zone == reported.zone
+                && now.saturating_duration_since(p.at).as_secs_f32() < 1.5
+        }) else {
+            return reported;
+        };
+        let from = path.current(now);
+        let dx = f32::from(reported.x) - f32::from(from.x);
+        let dz = f32::from(reported.z) - f32::from(from.z);
+        let length = dx * dx + dz * dz;
+        if length < 1.0 {
+            return reported;
+        }
+        let t = ((f32::from(target.x) - f32::from(from.x)) * dx
+            + (f32::from(target.z) - f32::from(from.z)) * dz)
+            / length;
+        let t = t.clamp(0.0, 1.0);
+        Position {
+            x: (f32::from(from.x) + dx * t).round() as u16,
+            z: (f32::from(from.z) + dz * t).round() as u16,
+            ..reported
+        }
+    }
     pub fn validate(
         &mut self,
         payload: &[u8],
@@ -138,6 +176,37 @@ impl Validator {
                 return None;
             }
         }
+        self.forecast = if payload[9] & 1 != 0 && speed != 0 {
+            let anchor = self
+                .forecast
+                .as_ref()
+                .filter(|p| p.to == previous)
+                .map_or(previous, |p| p.current(now));
+            let dx = f32::from(next.x) - f32::from(anchor.x);
+            let dz = f32::from(next.z) - f32::from(anchor.z);
+            let length = dx.hypot(dz);
+            if length > 0.0 {
+                let trail = (f32::from(speed.unsigned_abs()) * 1.5).min(length);
+                let from = Position {
+                    x: (f32::from(next.x) - dx / length * trail)
+                        .round()
+                        .clamp(0.0, 65535.0) as u16,
+                    z: (f32::from(next.z) - dz / length * trail)
+                        .round()
+                        .clamp(0.0, 65535.0) as u16,
+                    ..next
+                };
+                Some(Forecast {
+                    from,
+                    to: next,
+                    at: now,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         self.origin = Some((ox, oz));
         self.travel = total;
         self.last = now;
@@ -150,9 +219,81 @@ impl Validator {
     }
 }
 
+#[derive(Clone)]
+struct Forecast {
+    from: Position,
+    to: Position,
+    at: Instant,
+}
+impl Forecast {
+    fn current(&self, now: Instant) -> Position {
+        let t = (now.saturating_duration_since(self.at).as_secs_f32() / 1.5).clamp(0.0, 1.0);
+        Position {
+            x: (f32::from(self.from.x) + (f32::from(self.to.x) - f32::from(self.from.x)) * t)
+                .round() as u16,
+            z: (f32::from(self.from.z) + (f32::from(self.to.z) - f32::from(self.from.z)) * t)
+                .round() as u16,
+            ..self.to
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn melee_uses_only_the_recent_validated_forecast_segment_and_stop_expires_it() {
+        let mut movement = Validator::default();
+        let now = movement.last;
+        let anchor = Position {
+            zone: 21,
+            x: 3200,
+            z: 4000,
+            y: 0,
+        };
+        let mut packet = vec![6];
+        packet.extend(3335u16.to_le_bytes());
+        packet.extend(4000u16.to_le_bytes());
+        packet.extend(0i16.to_le_bytes());
+        packet.extend(90i16.to_le_bytes());
+        packet.push(1);
+        let reported = movement.validate(&packet, anchor, now, 90).unwrap();
+        let target = Position { x: 3210, ..anchor };
+        assert_eq!(movement.combat_position(reported, target, now), target);
+        let halfway = movement.combat_position(
+            reported,
+            target,
+            now + std::time::Duration::from_millis(750),
+        );
+        assert!((3267..=3268).contains(&halfway.x));
+        let sideways = Position {
+            x: 3210,
+            z: 4200,
+            ..anchor
+        };
+        assert_eq!(movement.combat_position(reported, sideways, now).z, 4000);
+        assert_eq!(
+            movement.combat_position(
+                reported,
+                target,
+                now + std::time::Duration::from_millis(1501)
+            ),
+            reported
+        );
+        assert_eq!(
+            movement.combat_position(reported, Position { zone: 1, ..target }, now),
+            reported
+        );
+        let mut forged = packet.clone();
+        forged[1..3].copy_from_slice(&6000u16.to_le_bytes());
+        assert!(movement.validate(&forged, reported, now, 90).is_none());
+        assert_eq!(movement.combat_position(reported, target, now), target);
+        packet[9] = 0;
+        packet[7..9].copy_from_slice(&0i16.to_le_bytes());
+        packet[1..3].copy_from_slice(&3200u16.to_le_bytes());
+        let stopped = movement.validate(&packet, reported, now, 90).unwrap();
+        assert_eq!(movement.combat_position(stopped, target, now), stopped);
+    }
     #[test]
     fn native_walk_capture_keeps_server_position_through_turns_and_stops() {
         let path = std::path::Path::new("../../logs/capture-20261015-170007.log");

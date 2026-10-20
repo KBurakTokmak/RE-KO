@@ -1,5 +1,5 @@
 //! Map anvil objects and transactional reference-table upgrades.
-use crate::{combat, inventory, lobby::Lobby, movement::Position, starter, world_entry::Session};
+use crate::{combat, lobby::Lobby, movement::Position, starter, world_entry::Session};
 use rusqlite::{OptionalExtension, params};
 use std::{collections::HashSet, net::SocketAddr};
 use tokio::net::TcpStream;
@@ -12,6 +12,7 @@ fn object(lobby: &Lobby, s: &Session, index: u16) -> anyhow::Result<(u8, Positio
     let db = lobby.db.lock().unwrap();
     Ok(db.query_row("SELECT CAST(json_extract(data,'$.Type') AS INTEGER),CAST(round(json_extract(data,'$.PosX')*10) AS INTEGER),CAST(round(json_extract(data,'$.PosZ')*10) AS INTEGER) FROM world_reference_rules WHERE table_name='K_OBJECTPOS' AND rule_id=?1",[u32::from(s.position.zone)*100000+u32::from(index)],|r|Ok((r.get(0)?,Position{zone:s.position.zone,x:r.get(1)?,z:r.get(2)?,y:0})))?)
 }
+#[derive(Clone)]
 struct Recipe {
     index: u32,
     origin: u32,
@@ -89,7 +90,7 @@ fn kind_matches(kind: i32, weapon: i32, id: u32) -> bool {
 type Outcome = ([starter::Item; 28], u32, Vec<u8>, u8);
 fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Result<Outcome> {
     anyhow::ensure!(
-        s.entered && s.skills.hp > 0 && p.get(1) == Some(&2),
+        s.entered && s.skills.hp > 0 && matches!(p.get(1), Some(2 | 7)),
         "upgrade unavailable"
     );
     let &(object_id, npc, position) = s
@@ -166,7 +167,34 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
         ingredients.remove(ingredients.iter().position(|i| *i == id).unwrap());
     }
     ingredients.sort_unstable();
-    let recipe = recipes(&tx)?
+    anyhow::ensure!(
+        p[1] != 7 || ingredients == [379256000] || ingredients == [379257000],
+        "invalid reverse materials"
+    );
+    let mut candidates = recipes(&tx)?;
+    // The owner also permits unenchanted weapons to convert. Derive the matching
+    // light reverse variant from the source poison conversion, retaining its cost.
+    let light: Vec<_> = candidates
+        .iter()
+        .filter(|r| {
+            (100000..200000).contains(&r.index)
+                && (47..=50).contains(&(r.origin % 1000))
+                && r.required
+                    .iter()
+                    .filter(|&&id| id != 0)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    == [379256000]
+        })
+        .map(|r| {
+            let mut r = r.clone();
+            r.origin -= 40;
+            r.delta += 10;
+            r
+        })
+        .collect();
+    candidates.extend(light);
+    let recipe = candidates
         .into_iter()
         .find(|r| {
             let mut required: Vec<_> = r.required.iter().copied().filter(|i| *i != 0).collect();
@@ -175,7 +203,7 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
                 1 => class <= 1,
                 2 => class <= 2,
                 3 => class <= 3,
-                4 => class == 4,
+                4 => class <= 4,
                 _ => false,
             };
             r.origin == origin % 100000
@@ -202,6 +230,21 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
         .item(upgraded)
         .ok_or_else(|| anyhow::anyhow!("result absent from client"))?;
     let newext = newext.ok_or_else(|| anyhow::anyhow!("result extension absent from client"))?;
+    if ingredients == [379256000] {
+        let result_class: Option<u8> = tx
+            .query_row(
+                "SELECT item_class FROM world_upgrade_item_types WHERE item_id=?1",
+                [upgraded / 1000 * 1000],
+                |r| r.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            bonus.is_none()
+                && result_class == Some(4)
+                && matches!(combat::integer(newext, 7), 11 | 12),
+            "item has no compatible reverse variant"
+        );
+    }
     let mut rng = crate::skills::now_ms();
     let upper = crate::loot::roll(&mut rng, 9000, 10000);
     let success = mode == 2
@@ -210,7 +253,7 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
                 .rate
                 .saturating_add(if bonus.is_some() { 1000 } else { 0 })
                 .min(10000);
-    let mut response = vec![0x5b, 2, mode, u8::from(success)];
+    let mut response = vec![0x5b, p[1], mode, u8::from(success)];
     if success {
         entries[0].0 = upgraded;
     }
@@ -305,12 +348,6 @@ pub(crate) async fn handle(
     }
     match attempt(lobby, account, s, p) {
         Ok((bag, coins, response, effect)) => {
-            let changed: Vec<_> = bag
-                .iter()
-                .enumerate()
-                .filter(|(p, i)| s.inventory[*p] != **i)
-                .map(|(p, i)| (p, *i))
-                .collect();
             let spent = s.coins.saturating_sub(coins);
             s.inventory = bag;
             s.coins = coins;
@@ -318,16 +355,6 @@ pub(crate) async fn handle(
             if spent > 0 {
                 let gold = crate::wallet::change(coins + spent, coins);
                 super::send_response(sock, peer, &None, &gold, "ANVIL_COINS").await;
-            }
-            if !changed.is_empty() {
-                super::send_response(
-                    sock,
-                    peer,
-                    &None,
-                    &inventory::count_packet(&changed),
-                    "ANVIL_ITEMS",
-                )
-                .await;
             }
             if p.len() != 55 || p[2] == 1 {
                 let mut event = vec![0x33, 8, effect];
@@ -341,7 +368,8 @@ pub(crate) async fn handle(
         }
         Err(e) => {
             tracing::info!(%peer,%e,"anvil request refused");
-            super::send_response(sock, peer, &None, &[0x5b, 2, 1, 4], "ANVIL_REFUSED").await;
+            let subtype = if p.get(1) == Some(&7) { 7 } else { 2 };
+            super::send_response(sock, peer, &None, &[0x5b, subtype, 1, 4], "ANVIL_REFUSED").await;
         }
     }
 }
@@ -349,6 +377,98 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reverse_conversion_accepts_source_poison_and_owner_light_but_preserves_invalid_inputs() {
+        for (origin, result) in [
+            (111210047, 111211031),
+            (111210007, 111211001),
+            (111310007, 111311001),
+        ] {
+            let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+                return;
+            };
+            s.anvil = Some((5001, 0, s.position));
+            {
+                let db = lobby.db.lock().unwrap();
+                db.execute(
+                    "INSERT INTO world_upgrade_item_types VALUES (?1,3,0),(?2,4,24)",
+                    params![origin / 1000 * 1000, result / 1000 * 1000],
+                )
+                .unwrap();
+                db.execute("INSERT INTO character_inventory VALUES('test',0,0,?1,100,1),('test',0,1,379256000,1,2)",[origin]).unwrap();
+                let mut row = serde_json::json!({"nIndex":101722,"nNPCNum":5001,"nOriginType":-1,"nOriginItem":10047,"nReqItem1":379256000,"nReqNoah":100,"bRateType":4,"nGenRate":10000,"nGiveItem":984});
+                for i in 2..=8 {
+                    row[format!("nReqItem{i}")] = 0.into();
+                }
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES('ITEM_UPGRADE',101722,?1)",
+                    [row.to_string()],
+                )
+                .unwrap();
+            }
+            let request = |mode, origin| {
+                let mut p = vec![0x5b, 7, mode, 0, 0];
+                for (id, pos) in [(origin, 0), (379256000, 1)]
+                    .into_iter()
+                    .chain(std::iter::repeat_n((0, 255), 8))
+                {
+                    p.extend(u32::to_le_bytes(id));
+                    p.push(pos);
+                }
+                p
+            };
+            let (preview, coins, reply, _) =
+                attempt(&lobby, "test", &s, &request(2, origin)).unwrap();
+            assert_eq!(
+                (preview[0].id, preview[1].count, coins),
+                (origin, 2, 1000000)
+            );
+            assert_eq!(u32::from_le_bytes(reply[4..8].try_into().unwrap()), result);
+            assert_eq!(&reply[..4], &[0x5b, 7, 2, 1]);
+            let (bag, coins, _, _) = attempt(&lobby, "test", &s, &request(1, origin)).unwrap();
+            assert_eq!((bag[0].id, bag[1].count, coins), (result, 1, 999900));
+            assert!(attempt(&lobby, "test", &s, &request(1, origin)).is_err());
+            assert_eq!(
+                starter::inventory(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+                bag
+            );
+        }
+        let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        s.anvil = Some((5001, 0, s.position));
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO world_upgrade_item_types VALUES(111010000,2,0)",
+                [],
+            )
+            .unwrap();
+            db.execute("INSERT INTO character_inventory VALUES('test',0,0,111010007,100,1),('test',0,1,379256000,1,1)",[]).unwrap();
+            let mut row = serde_json::json!({"nIndex":101722,"nNPCNum":5001,"nOriginType":-1,"nOriginItem":10047,"nReqItem1":379256000,"nReqNoah":0,"bRateType":4,"nGenRate":10000,"nGiveItem":984});
+            for i in 2..=8 {
+                row[format!("nReqItem{i}")] = 0.into();
+            }
+            db.execute(
+                "INSERT INTO world_reference_rules VALUES('ITEM_UPGRADE',101722,?1)",
+                [row.to_string()],
+            )
+            .unwrap();
+        }
+        let mut p = vec![0x5b, 2, 1, 0, 0];
+        for (id, pos) in [(111010007u32, 0), (379256000, 1)]
+            .into_iter()
+            .chain(std::iter::repeat_n((0, 255), 8))
+        {
+            p.extend(id.to_le_bytes());
+            p.push(pos);
+        }
+        assert!(attempt(&lobby, "test", &s, &p).is_err());
+        assert_eq!(
+            starter::inventory(&lobby.db.lock().unwrap(), "test", 0).unwrap()[1].count,
+            1
+        );
+    }
     #[tokio::test]
     async fn visible_anvil_opens_from_map_or_npc_and_resolves_real_instance_id() {
         let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {

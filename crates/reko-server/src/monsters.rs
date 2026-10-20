@@ -29,6 +29,107 @@ pub(crate) struct ExperienceCredit {
 mod tests {
     use super::*;
     #[test]
+    fn suppression_gate_removal_and_boss_countdown_work_for_direct_and_periodic_kills() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        for (zone, prototype, boss) in [
+            (82, 7033, false),
+            (83, 7034, false),
+            (82, 7008, true),
+            (83, 7013, true),
+        ] {
+            for periodic in [false, true] {
+                let lobby = crate::social::tests::lobby();
+                {
+                    let db = lobby.db.lock().unwrap();
+                    crate::population::tests::seed(&db);
+                    db.execute("UPDATE world_spawns SET zone=?1,prototype=?2,hp=50,regen_type=1,x0=2000,x1=2000,z0=2000,z1=2000",rusqlite::params![zone,prototype]).unwrap();
+                }
+                let world = World::load(&game).unwrap();
+                world
+                    .load_population(&lobby.db.lock().unwrap(), &game)
+                    .unwrap();
+                let mut events = world.events.subscribe();
+                let position = Position {
+                    zone,
+                    x: 2000,
+                    z: 2000,
+                    y: 0,
+                };
+                let now = skills::now_ms();
+                let hit = world
+                    .hit_owned(
+                        12000,
+                        Attack {
+                            position,
+                            range: 5.0,
+                            attack: 0,
+                            percent: 0,
+                            extra: if periodic { 0 } else { 100 },
+                            skill: true,
+                            drain_percent: 0,
+                            arrow: false,
+                            penetrate: false,
+                            magic: periodic.then_some(MagicDamage {
+                                element: 1,
+                                first: 0,
+                                over_time: 100,
+                                duration: 2,
+                                charisma: 0,
+                                bonus: 0,
+                                raw_over_time: true,
+                                raw_first: true,
+                            }),
+                        },
+                        Some("Test"),
+                        || Ok(()),
+                    )
+                    .unwrap();
+                let mut packets = Vec::new();
+                while let Ok(e) = events.try_recv() {
+                    packets.push(e.packet);
+                }
+                if periodic {
+                    assert!(!hit.dead);
+                    packets.extend(world.tick(now + 3000).into_iter().map(|e| e.packet));
+                } else {
+                    assert!(hit.dead);
+                }
+                let out = vec![0x0a, 2, 0xe0, 0x2e]; // source entity12000
+                assert_eq!(packets.contains(&out), !boss);
+                assert!(!world.visible_from(12000, position));
+                assert_eq!(world.suppression_deadline(zone).is_some(), boss);
+                let deadline = world.suppression_deadline(zone);
+                assert!(
+                    world
+                        .hit_owned(
+                            12000,
+                            Attack {
+                                position,
+                                range: 5.0,
+                                attack: 100,
+                                percent: 100,
+                                extra: 100,
+                                skill: true,
+                                drain_percent: 0,
+                                arrow: false,
+                                penetrate: false,
+                                magic: None
+                            },
+                            Some("Test"),
+                            || Ok(())
+                        )
+                        .is_err()
+                );
+                world.tick(now + 100000000);
+                assert_eq!(world.suppression_deadline(zone), deadline);
+                assert!(!world.visible_from(12000, position));
+            }
+        }
+    }
+    #[test]
     fn party_monster_death_queues_each_members_rewards_and_kill_once() {
         let game = reko_common::game_dir();
         if !game.join("Data/NPC_Looks.tbl").exists() {
@@ -395,6 +496,7 @@ mod tests {
             events: tokio::sync::broadcast::channel(16).0,
             loot: None,
             ai: Mutex::new(ai::Brain::default()),
+            suppression: Mutex::new(crate::suppression::Rooms::default()),
             quest_kills: Mutex::new(HashMap::new()),
             experience: Mutex::new(HashMap::new()),
         };
@@ -579,6 +681,15 @@ struct Modifier {
 }
 
 impl Mob {
+    fn gate_out(&self) -> Option<Vec<u8>> {
+        let s = self.definition.as_ref()?;
+        if !matches!((s.position.zone, s.prototype), (82, 7033) | (83, 7034)) {
+            return None;
+        }
+        let mut p = vec![0x0a, 2];
+        p.extend(self.id.to_le_bytes());
+        Some(p)
+    }
     fn maximum(&self) -> u32 {
         self.modifiers
             .get(&1)
@@ -659,6 +770,7 @@ pub(crate) struct World {
     bosses: Mutex<Option<crate::bosses::Scheduler>>,
     appearances: std::collections::HashSet<u32>,
     radii: crate::model_radius::Radii,
+    suppression: Mutex<crate::suppression::Rooms>,
     quest_kills: Mutex<HashMap<String, Vec<u16>>>,
     experience: Mutex<HashMap<String, Vec<ExperienceCredit>>>,
     ai: Mutex<ai::Brain>,
@@ -877,6 +989,7 @@ impl World {
                 .collect(),
             loot: None,
             ai: Mutex::new(ai::Brain::default()),
+            suppression: Mutex::new(crate::suppression::Rooms::default()),
             quest_kills: Mutex::new(HashMap::new()),
             experience: Mutex::new(HashMap::new()),
             inner: Mutex::new(Inner {
@@ -947,6 +1060,7 @@ impl World {
 
     pub fn load_population(&self, db: &rusqlite::Connection, game: &Path) -> anyhow::Result<()> {
         let definitions = crate::population::load(db, game)?;
+        *self.suppression.lock().unwrap() = crate::suppression::Rooms::load(&definitions);
         let bosses = crate::bosses::Scheduler::load(db, &definitions, skills::now_ms())?;
         let controlled = bosses.members();
         let active = bosses.active();
@@ -1063,8 +1177,9 @@ impl World {
         owner: Option<&str>,
         pay: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<Hit, &'static str> {
-        self.hit_with_body(id, attack, owner, pay, None)
+        self.hit_with_body(id, attack, owner, pay, None, None)
     }
+    #[cfg(test)]
     pub(crate) fn hit_basic_owned(
         &self,
         id: u16,
@@ -1073,7 +1188,24 @@ impl World {
         race: u8,
         pay: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<Hit, &'static str> {
-        self.hit_with_body(id, attack, owner, pay, Some(race))
+        self.hit_with_body(id, attack, owner, pay, Some(race), None)
+    }
+    pub(crate) fn hit_session_owned(
+        &self,
+        id: u16,
+        attack: Attack,
+        s: &crate::world_entry::Session,
+        basic: bool,
+        pay: impl FnOnce() -> Result<(), &'static str>,
+    ) -> Result<Hit, &'static str> {
+        self.hit_with_body(
+            id,
+            attack,
+            Some(&s.character.name),
+            pay,
+            if basic { Some(s.character.race) } else { None },
+            Some(&s.movement),
+        )
     }
     fn hit_with_body(
         &self,
@@ -1082,6 +1214,7 @@ impl World {
         owner: Option<&str>,
         pay: impl FnOnce() -> Result<(), &'static str>,
         race: Option<u8>,
+        motion: Option<&crate::movement::Validator>,
     ) -> Result<Hit, &'static str> {
         let Attack {
             position,
@@ -1104,6 +1237,9 @@ impl World {
         if mob.position.zone != position.zone || mob.hp == 0 {
             return Err("The target is unavailable.");
         }
+        let position = motion.map_or(position, |m| {
+            m.combat_position(position, mob.position, std::time::Instant::now())
+        });
         let dx = (f32::from(mob.position.x) - f32::from(position.x)) / 10.0;
         let dz = (f32::from(mob.position.z) - f32::from(position.z)) / 10.0;
         let body = race
@@ -1203,10 +1339,11 @@ impl World {
                 mob.respawn_at(skills::now_ms())
             };
             mob.dots.clear();
-            self.quest_death(mob);
+            self.quest_death(mob, skills::now_ms());
         }
         let health = mob.health(-(damage.min(32767) as i16), false);
         let zone = mob.position.zone;
+        let gate_out = dead.then(|| mob.gate_out()).flatten();
         let loot_packet = if dead { self.drop(mob) } else { None };
         drop(inner);
         let _ = self.events.send(Event {
@@ -1218,12 +1355,19 @@ impl World {
             packet.extend(id.to_le_bytes());
             let _ = self.events.send(Event { zone, packet });
         }
+        if let Some(packet) = gate_out {
+            let _ = self.events.send(Event { zone, packet });
+        }
         if let Some(packet) = loot_packet {
             let _ = self.events.send(Event { zone, packet });
         }
         Ok(Hit { damage, dead })
     }
-    fn quest_death(&self, mob: &Mob) {
+    pub(crate) fn suppression_deadline(&self, zone: u8) -> Option<u64> {
+        self.suppression.lock().unwrap().deadline(zone)
+    }
+    fn quest_death(&self, mob: &Mob, now: u64) {
+        self.suppression.lock().unwrap().death(mob.id, now);
         if let (Some(hub), Some(definition)) = (&self.social, &mob.definition) {
             let hub = hub.lock().unwrap();
             let (credits, kills) = hub.death(
@@ -1423,7 +1567,7 @@ impl World {
                         packet: mob.health(-(loss as i16), false),
                     });
                     if mob.hp == 0 {
-                        self.quest_death(mob);
+                        self.quest_death(mob, now);
                         mob.dots.clear();
                         mob.respawn = if natural_boss {
                             u64::MAX
@@ -1436,6 +1580,12 @@ impl World {
                             zone: mob.position.zone,
                             packet: death,
                         });
+                        if let Some(packet) = mob.gate_out() {
+                            events.push(Event {
+                                zone: mob.position.zone,
+                                packet,
+                            });
+                        }
                         if let Some(packet) = self.drop(mob) {
                             events.push(Event {
                                 zone: mob.position.zone,

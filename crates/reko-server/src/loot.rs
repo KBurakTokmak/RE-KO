@@ -7,6 +7,107 @@ use std::{collections::HashMap, net::SocketAddr, sync::Mutex};
 use tokio::net::TcpStream;
 
 const GOLD: u32 = 900000000;
+pub(crate) fn command(s: &mut Session, text: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(text)
+        .ok()?
+        .trim()
+        .trim_start_matches('/');
+    let mut words = text.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("autoloot") {
+        return None;
+    }
+    let argument = words.next();
+    let message = if words.next().is_some() {
+        "Usage: /autoloot [on|off]"
+    } else if argument.is_none() {
+        s.autoloot = if s.autoloot.is_some() { None } else { Some(0) };
+        if s.autoloot.is_some() {
+            "Autoloot enabled."
+        } else {
+            "Autoloot disabled."
+        }
+    } else if argument.is_some_and(|a| a.eq_ignore_ascii_case("on")) {
+        s.autoloot = Some(0);
+        "Autoloot enabled."
+    } else if argument.is_some_and(|a| a.eq_ignore_ascii_case("off")) {
+        s.autoloot = None;
+        "Autoloot disabled."
+    } else {
+        "Usage: /autoloot [on|off]"
+    };
+    Some(crate::chat::packet(
+        7,
+        s.character.nation(),
+        u16::MAX,
+        "",
+        message.as_bytes(),
+    ))
+}
+
+pub(crate) async fn auto_tick(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    lobby: &Lobby,
+    account: &str,
+    s: &mut Session,
+    now: u64,
+) {
+    let Some(next) = s.autoloot else {
+        return;
+    };
+    if now < next || !s.entered || s.skills.hp == 0 {
+        return;
+    }
+    s.autoloot = Some(now.saturating_add(1000));
+    // Native service windows temporarily own the bag icons.
+    if lobby.merchants.iter().any(|m| {
+        (s.merchant == Some(m.id) || s.anvil.is_some_and(|(_, id, _)| id == m.id)) && m.nearby(s)
+    }) {
+        return;
+    }
+    let Some(book) = lobby.monsters.as_ref().and_then(|w| w.loot.as_ref()) else {
+        return;
+    };
+    let candidates = {
+        let inner = book.inner.lock().unwrap();
+        let mut entries: Vec<_> = inner
+            .bundles
+            .iter()
+            .filter(|(_, b)| allowed(b, s))
+            .flat_map(|(&id, b)| {
+                b.items
+                    .iter()
+                    .filter(|(_, count)| *count > 0)
+                    .map(move |&(item, _)| (id, item))
+            })
+            .collect();
+        entries.sort_unstable();
+        entries.truncate(32);
+        entries
+    };
+    let mut collected = false;
+    for (id, item) in candidates {
+        if let Ok((response, changed)) = pickup_routed(book, lobby, account, s, peer, id, item) {
+            super::send_response(sock, peer, &None, &response, "AUTOLOOT_GET").await;
+            if !changed.is_empty() {
+                super::send_response(
+                    sock,
+                    peer,
+                    &None,
+                    &inventory::count_packet(&changed),
+                    "AUTOLOOT_ITEMS",
+                )
+                .await;
+            }
+            collected = true;
+        }
+    }
+    s.autoloot = Some(now.saturating_add(1000));
+    if collected && let Some(catalog) = &lobby.combat {
+        crate::durability::refresh(s, catalog, lobby.skills.as_ref());
+        crate::durability::attributes(sock, peer, s).await;
+    }
+}
 pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(include_str!("world_services.sql"))
 }
@@ -550,6 +651,79 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn autoloot_toggles_and_keeps_ownership_range_capacity_and_single_pickup() {
+        let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let book = std::sync::Arc::new(
+            Book::load(&lobby.db.lock().unwrap(), lobby.combat.as_ref().unwrap()).unwrap(),
+        );
+        let mut world = crate::monsters::World::load(&reko_common::game_dir()).unwrap();
+        world.loot = Some(book.clone());
+        lobby.monsters = Some(std::sync::Arc::new(world));
+        {
+            let mut inner = book.inner.lock().unwrap();
+            for (id, owner, offset, item) in [
+                (1, s.character.name.as_str(), 0, 389014000),
+                (2, "SomeoneElse", 0, 389014000),
+                (3, s.character.name.as_str(), 1000, 389014000),
+            ] {
+                let mut position = s.position;
+                position.x += offset;
+                inner.bundles.insert(
+                    id,
+                    Bundle {
+                        owners: vec![owner.into()],
+                        position,
+                        items: vec![(item, 1)],
+                    },
+                );
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        auto_tick(&mut socket, peer, &lobby, "test", &mut s, 1000).await;
+        assert!(s.inventory.iter().all(|i| i.id == 0));
+        assert!(command(&mut s, b"/autoloot").is_some());
+        auto_tick(&mut socket, peer, &lobby, "test", &mut s, 1000).await;
+        assert_eq!(s.inventory[0].id, 389014000);
+        auto_tick(&mut socket, peer, &lobby, "test", &mut s, 2000).await;
+        assert_eq!(s.inventory[0].count, 1);
+        assert_eq!(book.inner.lock().unwrap().bundles[&2].items[0].1, 1);
+        assert_eq!(book.inner.lock().unwrap().bundles[&3].items[0].1, 1);
+        command(&mut s, b"autoloot off");
+        assert!(s.autoloot.is_none());
+        command(&mut s, b"autoloot on extra");
+        assert!(s.autoloot.is_none());
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute("DELETE FROM character_inventory", []).unwrap();
+            for pos in 0..28 {
+                db.execute(
+                    "INSERT INTO character_inventory VALUES('test',0,?1,110110001,4000,1)",
+                    [pos],
+                )
+                .unwrap();
+            }
+            s.inventory = starter::inventory(&db, "test", 0).unwrap();
+            book.inner.lock().unwrap().bundles.insert(
+                4,
+                Bundle {
+                    owners: vec![s.character.name.clone()],
+                    position: s.position,
+                    items: vec![(389014000, 1)],
+                },
+            );
+        }
+        command(&mut s, b"/autoloot on");
+        auto_tick(&mut socket, peer, &lobby, "test", &mut s, 3000).await;
+        assert_eq!(book.inner.lock().unwrap().bundles[&4].items[0].1, 1);
+        assert!(s.inventory.iter().all(|i| i.id == 110110001));
+    }
     #[test]
     fn suppression_repair_preserves_other_loot_and_delivers_original_certificates_and_defense_armor()
      {

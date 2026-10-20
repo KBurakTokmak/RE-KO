@@ -39,6 +39,22 @@ Act types1/2 remain passive until attacked. Damage contributors can trigger
 retaliation beyond the smaller proximity-search radius, subject to the source
 reaction guard. Fresh damage renews pursuit; escaping without attacking permits
 return. Threat reset is separate from XP/loot damage contribution history.
+Native1453 NPC_MOVE dispatch006A7DD0 calls MoveTo00477F10. That method sets
+rendered speed to the distance to its destination times0.85/1.5, corroborating
+Open-KO PlayerNPC::MoveTo/Tick. Sending only each250ms simulated step as the
+client destination caused accumulating visual lag and false melee range failures.
+Movement now sends a destination ahead by speed*1.5/0.85 along the current
+heading while keeping authority at the simulated position. Arrival sends the
+actual stop immediately; entering attack range, losing pursuit and finishing
+return also cancel the previous destination. A future destination may extend
+past a planned stop; it is replaced by that stop on arrival, before the client
+continues past it. Coordinates remain within protocol bounds. This is a local
+synchronization adaptation to the existing250ms simulation, not recovered retail
+AIServer scheduling. Native-interpolation regression covers walk/run speeds,
+arrival, basic-melee visual distance and no overshoot beyond packet rounding.
+Player observations use the validated forecast's elapsed current point rather
+than making monsters chase a position up to1.5seconds in the future.
+
 Movement1/2 performs bounded idle roaming;0/4 do not. Terrain pathfinding,
 movement3 patrol, family assistance and monster spells remain incomplete.
 
@@ -92,10 +108,25 @@ K_OBJECTPOS agree. Its special-object spawn must include status1 to reveal the
 native shape. Resolve an object-click ID0 only to the matching nearby anvil;
 reject forged nonzero IDs. Normal/preview upgrades match source recipes,
 reagent multisets, item classes and valid original-client result items. Preview
-consumes nothing; failure burns the origin. Accessory/rebirth/sealing are separate
-unsupported branches. See [rates](upgrade-rates.md).
+consumes nothing; failure burns the origin. Reverse Scroll conversion uses source
+recipes plus the owner-requested plain-weapon compatibility rule. Accessories,
+sealing and remaining specialist branches are separate. See [rates](upgrade-rates.md).
 
 ## Loot
+
+`/autoloot` toggles automatic pickup for the current login; `/autoloot on` and
+`/autoloot off` set it explicitly. It starts off on reconnect. Plain `autoloot`
+also works if a client intercepts unknown slash commands. The isolated verified
+client profile forwards this exact slash command through ordinary chat; other
+native slash commands retain their original dispatch.
+
+Once per second, up to32 nearby owned bundle entries pass through the same
+transactional pickup/party-routing path as manual loot. Existing life, zone,
+approximately15.56m distance, ownership, coin cap, capacity, weight and stack
+checks remain authoritative. Failed/full-bag pickups leave the drop available;
+there is no direct grant or repeated payout. Pickup pauses while near an active
+NPC service/anvil context to avoid changing icons owned by that window; moving
+away resumes it. The command and its status reply are private.
 
 Supplied AIServer/Npc.cpp GiveNpcHaveItem/ItemProdution and GameServer delivery
 handlers are the reference. Each death generates once; the largest credited

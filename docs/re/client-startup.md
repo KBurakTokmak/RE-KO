@@ -10,8 +10,9 @@ timed-exit cause, not the cause of every future crash.
 `scripts/Start-LocalClient.cmd` invokes the supported standalone startup profile.
 `local_client.py` checks the exact executable SHA256 and unpacked watchdog
 signature, duplicates the event handle and signals the watchdog's own shutdown
-path. It verifies cleanup without modifying original files or writing process
-memory. The server watcher can apply the same profile to an exact newly created
+path. The watchdog step itself does not write process memory. The optional local
+UI fixes below use verified temporary hooks; original files remain unchanged.
+The server watcher can apply the same profile to an exact newly created
 process within30seconds; late attachment is refused and a mutex prevents races.
 
 The verified EXE SHA256 is
@@ -55,3 +56,65 @@ Sessions beyond the former exit window were validated, including a21-minute
 idle run closed intentionally by the tester. A later run exceeded an hour.
 Future exits still need their own process/packet evidence. Keep raw dumps,
 debugger traces, protected binaries and generated decompilation outside Git.
+
+## Local inventory UI fixes
+
+The isolated profile enables `client_tooltip_cache.py` after unpacking and the
+watchdog shutdown. Native inventory rendering calls00506CD0 at004BCA69. The
+tooltip compares raw mouse coordinates with its cache, but00500C19 stores the
+coordinates after00506D20/00506D24 add two pixels. Thus unchanged hover repeatedly
+rebuilds the text/layout, particularly expensive for wearable equipment. The
+content cache at this inventory-only call site retains native drawing and
+placement. Inventory Render004BC68A calls DisplayTooltipsDisable each frame;
+00500876 also clears the native previous-item pointer. Hidden state therefore
+cannot invalidate content. The hook restores native visibility on a hit.
+
+An earlier sixteen-frame refresh still caused expensive text/layout rebuilds,
+and treating mouse coordinates as content keys rebuilt again on every cursor
+movement. Live timing of that version recorded117builds for1864draws, with
+about23.37billion CPU timestamp cycles in native preparation/render on misses
+versus1.56billion in cached rendering. These are CPU-cycle totals, not FPS.
+Version3 replaces periodic refresh with exact snapshots of the native player's
+class/race/level fields004E0..004F7 and extended stats00848..00927, relative to
+`[009DD3AC]`. Those ranges cover the builder's equipment requirement/stat reads,
+including00922. Item pointer, table pointers, count, durability and display flags
+also invalidate immediately. A missing player/item uses the native path.
+
+Cursor movement now calls native SetPos (virtual+24), moving existing children
+without regenerating their strings/fonts. Screen-edge anchoring follows
+005008A0 with its two-pixel input adjustment and26-pixel horizontal offset;
+viewport dimensions are at008A4944/008A4948. Native item tables remain immutable.
+Unrelated tooltip windows are outside this inventory-only hook. Writable data
+contains cumulative draw/build counts and timestamp-cycle totals for native
+preparation and cached rendering, allowing local performance diagnosis without
+per-frame logging. The owner reported the hover slowdown resolved after live
+application; this does not establish performance on every item or machine.
+
+The same helper separately routes only `/autoloot` (with a word boundary) from
+native command handling: the verified UI chat slash branch is005762F5. It
+continues at0057630B to send the unchanged text as ordinary chat instead of
+discarding an unknown local command. All other slash commands retain the native
+branch to005762FA. This is required for the owner-requested slash syntax.
+
+Both hooks require the exact original EXE hash, isolated profile path and expected
+unpacked instruction bytes. Code runs in a separate executable page, cache data
+in a writable page. Target threads pause only during the five-byte replacement;
+original page protection and instruction cache are restored. Startup failures
+leave the normal client usable and are logged. Neither EXE on disk is changed.
+Set `tooltip_cache` or `autoloot_command` to false in the local profile JSON to
+disable the corresponding hook on future starts. For a running client:
+
+```powershell
+python scripts/client_tooltip_cache.py --pid <client-pid> --remove
+python scripts/client_tooltip_cache.py --pid <client-pid> --command --remove
+```
+
+Version3 receipts remain in ignored logs; installing over an older recognized
+receipt first removes its hook. Removal restores the original bytes, leaving
+the tiny allocation until process exit to protect in-flight calls. The standalone
+Win32 harness verifies stack/register conventions, content/stat invalidation, cursor movement, screen edges and command boundaries without game assets. Build it with Win32 MSVC
+(`/EHsc /W4 /WX`, output `logs/tooltip_cache_harness.exe`), then run
+`python scripts/test_tooltip_cache.py`. In that harness100identical draws require
+one text build while all100render calls execute; hundreds of cursor movements
+retain the text while item/stat changes rebuild immediately. This is not a measured game
+FPS claim; native-client tooltip performance still needs owner verification.

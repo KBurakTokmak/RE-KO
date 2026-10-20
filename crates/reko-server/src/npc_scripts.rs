@@ -621,6 +621,9 @@ fn execute(
                 return Err(mlua::Error::runtime("suppression entry unavailable"));
             }
             let zone = if helper.flag == 603 {82} else {83};
+            if lobby.monsters.as_ref().and_then(|w|w.suppression_deadline(zone)).is_some_and(|end|crate::skills::now_ms()>=end) {
+                return Err(mlua::Error::runtime("This shared suppression run has ended."));
+            }
             let (x,z):(u16,u16) = tx.query_row(
                 "SELECT karus_x,karus_z FROM world_town_starts WHERE zone=?1", [zone], |r| Ok((r.get(0)?,r.get(1)?)))
                 .map_err(mlua::Error::external)?;
@@ -1197,13 +1200,7 @@ pub(crate) async fn handle(
     })();
     match result {
         Ok(result) => {
-            let changed: Vec<_> = result
-                .bag
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|(i, item)| s.inventory[*i] != *item)
-                .collect();
+            let item_update = inventory::reward_packet(&s.inventory, &result.bag);
             tracing::info!(%peer,helper=result.context.helper,npc=result.context.npc,"NPC script committed");
             let old = s.coins;
             let old_rewards = s.rewards;
@@ -1303,15 +1300,8 @@ pub(crate) async fn handle(
                 let p = crate::wallet::change(old, s.coins);
                 super::send_response(sock, peer, &None, &p, "NPC_SCRIPT_COINS").await;
             }
-            if !changed.is_empty() {
-                super::send_response(
-                    sock,
-                    peer,
-                    &None,
-                    &inventory::count_packet(&changed),
-                    "NPC_SCRIPT_ITEMS",
-                )
-                .await;
+            if let Some(item_update) = item_update {
+                super::send_response(sock, peer, &None, &item_update, "NPC_SCRIPT_ITEMS").await;
                 if let Some(catalog) = lobby.combat.as_ref() {
                     crate::durability::refresh(s, catalog, lobby.skills.as_ref());
                     let mut weight = vec![0x54];
@@ -1343,6 +1333,93 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn suppression_turn_in_rebuilds_reused_icons_and_reports_both_source_rewards_once() {
+        let Some((mut lobby, mut s)) = setup() else {
+            return;
+        };
+        s.position.zone = 1;
+        lobby.merchants[0].prototype = 21510;
+        lobby.merchants[0].position = s.position;
+        {
+            let db = lobby.db.lock().unwrap();
+            for (id, status) in [(9011, 1), (9012, 2), (9013, 3)] {
+                let row = serde_json::json!({"sNpcId":21510,"sEventDataIndex":603,"bEventStatus":status,"bLevel":46,"bClass":2,"bNation":1,"bQuestType":1,"nExchangeIndex":95,"nEventTalkIndex":6071,"nEventTriggerIndex":6099,"strLuaFilename":"21510_Hwargo.lua"});
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES('QUEST_HELPER',?1,?2)",
+                    params![id, row.to_string()],
+                )
+                .unwrap();
+            }
+            let row = serde_json::json!({"bRandomFlag":11,"nOriginItemNum1":910138000,"nOriginItemCount1":3,"nOriginItemNum2":910135000,"nOriginItemCount2":1,"nExchangeItemNum1":168110045,"nExchangeItemCount1":1,"nExchangeItemNum2":111010045,"nExchangeItemCount2":1});
+            db.execute(
+                "INSERT INTO world_reference_rules VALUES('ITEM_EXCHANGE',95,?1)",
+                [row.to_string()],
+            )
+            .unwrap();
+            db.execute("INSERT INTO character_quests VALUES('test',0,603,1)", [])
+                .unwrap();
+            for (slot, id, count) in [(0, 910138000, 3), (1, 910135000, 1), (2, 391010000, 99)] {
+                db.execute(
+                    "INSERT INTO character_inventory VALUES('test',0,?1,?2,1,?3)",
+                    params![slot, id, count],
+                )
+                .unwrap();
+            }
+            s.inventory = starter::inventory(&db, "test", 0).unwrap();
+        }
+        let original = s.inventory;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        let mut request = vec![0x64, 7];
+        request.extend(9013u32.to_le_bytes());
+        handle(&mut socket, peer, &lobby, "test", &mut s, &request).await;
+        receive_until(&mut client, 0x55).await;
+        handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 0, 0]).await;
+        let replies = receive_until(&mut client, 0x54).await;
+        let update = replies.iter().find(|p| p[0] == 0x3d).unwrap();
+        assert_eq!(u16::from_le_bytes(update[1..3].try_into().unwrap()), 4);
+        // Model the native replacement branch: replacing a nonempty slot leaves
+        // its new icon null, which crashes the next merchant inventory transfer.
+        let mut icons = original.map(|item| (item.id, item.id != 0));
+        let mut notices = Vec::new();
+        let (entries, remainder) = update[3..].as_chunks::<21>();
+        assert!(remainder.is_empty());
+        for entry in entries {
+            let index = usize::from(entry[1]);
+            let id = u32::from_le_bytes(entry[2..6].try_into().unwrap());
+            let count = u32::from_le_bytes(entry[6..10].try_into().unwrap());
+            assert_eq!(entry[0], 1);
+            if count == 0 {
+                icons[index] = (0, false);
+            } else if icons[index].0 == 0 {
+                icons[index] = (id, true);
+            } else if icons[index].0 != id {
+                icons[index] = (id, false);
+            }
+            if entry[10] == 100 {
+                notices.push(id);
+            }
+        }
+        assert_eq!(notices, [168110045, 111010045]);
+        assert_eq!(
+            &icons[..3],
+            &[(168110045, true), (111010045, true), (391010000, true)]
+        );
+        assert_eq!(s.inventory[2], original[2]);
+        let saved = s.inventory;
+        {
+            let db = lobby.db.lock().unwrap();
+            assert_eq!(starter::inventory(&db, "test", 0).unwrap(), saved);
+            assert_eq!(db.query_row("SELECT state FROM character_quests WHERE account='test' AND slot=0 AND quest=603",[],|row|row.get::<_,u8>(0)).unwrap(),2);
+        }
+        handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 0, 0]).await;
+        assert_eq!(s.inventory, saved);
+        assert_eq!(s.coins, 1000000);
+    }
     #[tokio::test]
     async fn suppression_solo_entry_commits_quest_and_position_together() {
         for (flag, zone, level) in [(603u16, 82u8, 46u8), (605, 83, 64)] {

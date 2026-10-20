@@ -25,6 +25,8 @@ mod gm_spawn;
 mod gm_teleport;
 mod hotkeys;
 mod inventory;
+#[cfg(test)]
+mod inventory_service_tests;
 mod lobby;
 mod loot;
 mod loot_generation;
@@ -54,6 +56,7 @@ mod social;
 mod starter;
 mod stat_points;
 mod storage;
+mod suppression;
 mod town;
 mod travel;
 mod upgrading;
@@ -811,13 +814,7 @@ async fn handle_game_payload_inner(
                     penetrate: false,
                     magic: None,
                 };
-                match monsters.hit_basic_owned(
-                    target,
-                    attack,
-                    Some(&session.character.name),
-                    session.character.race,
-                    || Ok(()),
-                ) {
+                match monsters.hit_session_owned(target, attack, session, true, || Ok(())) {
                     Ok(hit) => {
                         result = if hit.dead { 2 } else { 1 };
                         session.next_attack = now + session.combat.delay_ms;
@@ -1076,6 +1073,12 @@ async fn handle_game_payload_inner(
                 return;
             };
             if channel == 1
+                && let Some(packet) = loot::command(session, text)
+            {
+                send_response(sock, peer, &None, &packet, "AUTOLOOT_COMMAND").await;
+                return;
+            }
+            if channel == 1
                 && let Some(account) = account.as_deref()
                 && quest_journal::handle(sock, peer, lobby, account, session, text).await
             {
@@ -1263,6 +1266,18 @@ async fn tick_character(
     session: &mut world_entry::Session,
     now: u64,
 ) {
+    match suppression::tick(lobby, account, session, now) {
+        Ok(packets) => {
+            for p in packets {
+                send_response(sock, peer, &None, &p, "SUPPRESSION_COMPLETION").await;
+            }
+        }
+        Err(error) => tracing::error!(%error,"suppression return could not be saved"),
+    }
+    if !session.entered {
+        return;
+    }
+    loot::auto_tick(sock, peer, lobby, account, session, now).await;
     utility::npc_strikes(sock, peer, lobby, account, session, now).await;
     if let Some(world) = &lobby.monsters {
         for credit in world.take_experience(&session.character.name) {

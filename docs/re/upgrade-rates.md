@@ -20,7 +20,36 @@ The common generic weapon recipe using scroll379021000 has these chances:
 Other scrolls and item classes have different recipes. Generate a local report
 with `python scripts/Export-UpgradeRates.py`. Its output
 `docs/re/upgrade-rates.csv` is ignored by Git. A recipe appearing in the report
-does not mean accessory/rebirth/special upgrade modes are implemented.
+does not mean accessory or every special upgrade mode is implemented.
+
+## Reverse conversion
+
+The anvil accepts original Reverse Scroll379256000 with eligible normal items.
+The actual1453 client sends this conversion as5B/7, not5B/2. Source shared/packets.h
+defines ITEM_UPGRADE_REBIRTH=7 and UpgradeHandler::ItemUpgradeRebirth delegates
+to ItemUpgrade with that subtype. The server accepts both bounded upgrade paths
+and echoes7 for native reverse replies, including failures. Native dispatcher
+0069CE3D/table0069D61C maps result subtypes2 and7 to the same004B01F0 parser.
+The observed55-byte request contained Shard111210047 and379256000; the former
+normal-only dispatch refused it before checking the correct recipe. Regression
+now uses that native7 subtype for source poison and plain/Exceptional conversion.
+Primary ITEM_UPGRADE conversion recipes retain their costs, result deltas and
+10000 rates. Source UpgradeHandler permits ItemClass<=4 for bRateType4; requiring
+exactly class4 incorrectly rejected normal high-class weapons/armor before they
+could become reverse items. Required materials remain an exact multiset and
+ownership, duplicate-slot, range, original-client result and persistence checks
+still apply. Conversion does not accept a Trina/booster. Preview consumes nothing.
+
+Source poison weapon recipes map +7/+8/+9/+10 to reverse +1/+5/+11/+21. The owner
+also requests plain unenchanted +7 conversion. For original client weapons with
+a compatible light reverse variant, the equivalent light recipe is derived from
+the source poison recipe (origin suffix minus40, result delta plus10), retaining
+the source cost/rate. This extension is an explicit local rule, not a recovered
+retail recipe. Both source and derived results must exist as reverse class4
+items in the imported metadata and original client; low-class weapons without a
+reverse model are refused without consuming anything. No database rows are added.
+Accessory upgrades and full reverse-upgrade recipes outside existing supported
+item kinds remain separate from this conversion fix.
 
 Evidence: primary `GameServer/UpgradeHandler.cpp::ItemUpgrade` uses
 `myrand(0,myrand(9000,10000))`, succeeds when the roll is at most sGenRate,

@@ -198,6 +198,35 @@ pub(crate) fn count_packet(changed: &[(usize, starter::Item)]) -> Vec<u8> {
     packet
 }
 
+pub(crate) fn reward_packet(
+    before: &[starter::Item; 28],
+    after: &[starter::Item; 28],
+) -> Option<Vec<u8>> {
+    let mut changes = Vec::new();
+    let mut received = Vec::new();
+    for (index, (&old, &item)) in before.iter().zip(after).enumerate() {
+        if old == item {
+            continue;
+        }
+        // Native replacement leaves a new item without its icon. Remove the old
+        // item first so the following entry takes the complete creation path.
+        if old.id != 0 && item.id != 0 && old.id != item.id {
+            changes.push((index, starter::Item { count: 0, ..old }));
+            received.push(false);
+        }
+        changes.push((index, item));
+        received.push(item.id != 0 && (old.id != item.id || item.count > old.count));
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    let mut packet = count_packet(&changes);
+    for (entry, new) in received.into_iter().enumerate() {
+        packet[3 + entry * 21 + 10] = if new { 100 } else { 0 };
+    }
+    Some(packet)
+}
+
 pub(crate) fn handle(
     lobby: &Lobby,
     account: Option<&str>,

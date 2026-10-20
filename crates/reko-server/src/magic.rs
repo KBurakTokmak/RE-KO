@@ -457,7 +457,7 @@ pub(crate) async fn handle(
         },
     };
     let mut paid = None;
-    let result = monsters.hit_owned(target, attack, Some(&session.character.name), || {
+    let result = monsters.hit_session_owned(target, attack, session, false, || {
         paid = Some(resources::commit(
             lobby,
             account,

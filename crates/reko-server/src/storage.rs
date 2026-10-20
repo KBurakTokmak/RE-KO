@@ -1,5 +1,5 @@
 //! Account-shared inn inventory and coin transfers.
-use crate::{combat, inventory, lobby::Lobby, starter, world_entry::Session};
+use crate::{combat, lobby::Lobby, starter, world_entry::Session};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -232,25 +232,9 @@ pub(crate) async fn handle(
     }
     match transfer(lobby, account, s, p) {
         Ok((bag, coins)) => {
-            let changed: Vec<_> = bag
-                .iter()
-                .enumerate()
-                .filter(|(p, i)| s.inventory[*p] != **i)
-                .map(|(p, i)| (p, *i))
-                .collect();
             s.inventory = bag;
             s.coins = coins;
             super::send_response(sock, peer, &None, &[0x45, p[1], 1], "WAREHOUSE_TRANSFER").await;
-            if !changed.is_empty() {
-                super::send_response(
-                    sock,
-                    peer,
-                    &None,
-                    &inventory::count_packet(&changed),
-                    "WAREHOUSE_ITEMS",
-                )
-                .await;
-            }
             if let Some(c) = lobby.combat.as_ref() {
                 crate::durability::refresh(s, c, lobby.skills.as_ref());
                 crate::durability::attributes(sock, peer, s).await;

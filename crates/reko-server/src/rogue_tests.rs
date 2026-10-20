@@ -142,6 +142,80 @@ fn hp(lobby: &Lobby) -> u32 {
 }
 
 #[tokio::test]
+async fn spike_and_basic_melee_follow_recent_movement_without_extending_sideways_or_stopped_reach()
+{
+    for (moving, target, accepted) in [
+        (true, 10000, true),
+        (false, 10000, false),
+        (true, 10002, false),
+    ] {
+        let Some((lobby, mut s, mut socket, _client, peer)) = setup().await else {
+            return;
+        };
+        s.combat.range = 1.0;
+        s.combat.weapon_kind = 11;
+        s.base_combat = s.combat;
+        let mut packet = vec![6];
+        packet.extend(3385u16.to_le_bytes());
+        packet.extend(4000u16.to_le_bytes());
+        packet.extend(0i16.to_le_bytes());
+        packet.extend(90i16.to_le_bytes());
+        packet.push(1);
+        s.position = s
+            .movement
+            .validate(&packet, s.position, std::time::Instant::now(), 90)
+            .unwrap();
+        if !moving {
+            packet[7..9].copy_from_slice(&0i16.to_le_bytes());
+            packet[9] = 0;
+            s.position = s
+                .movement
+                .validate(
+                    &packet,
+                    s.position,
+                    std::time::Instant::now() + std::time::Duration::from_millis(1500),
+                    90,
+                )
+                .unwrap();
+        }
+        let world = lobby.monsters.as_ref().unwrap();
+        let basic = monsters::Attack {
+            position: s.position,
+            range: 1.0,
+            attack: 131,
+            percent: 100,
+            extra: 0,
+            skill: false,
+            drain_percent: 0,
+            arrow: false,
+            penetrate: false,
+            magic: None,
+        };
+        let mut charged = false;
+        let result = world.hit_session_owned(target, basic, &s, true, || {
+            charged = true;
+            Ok(())
+        });
+        assert_eq!(result.is_ok(), accepted);
+        assert_eq!(charged, accepted);
+        let health = || {
+            let p = world.health(target, 21).unwrap();
+            u32::from_le_bytes(p[8..12].try_into().unwrap())
+        };
+        let before = health();
+        let mana = s.skills.mana;
+        cast(&lobby, &mut s, &mut socket, peer, 108655, target, 3).await;
+        if accepted {
+            assert!(health() < before);
+            assert!(s.skills.mana < mana);
+        } else {
+            assert_eq!(health(), before);
+            assert_eq!(s.skills.mana, mana);
+        }
+    }
+}
+
+#[tokio::test]
 async fn cures_preserve_buffs_and_healing_and_rollback_without_reagents() {
     let Some((lobby, mut s, mut socket, _client, peer)) = setup().await else {
         return;

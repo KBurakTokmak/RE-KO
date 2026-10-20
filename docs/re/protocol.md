@@ -66,10 +66,25 @@ Shop21 replies acknowledge the shop's own icon transfers. Normal moves use1F;
 do not also send3D deltas for those same moves. Parallel updates can orphan
 icons until another NPC rebuilds the inventory. Open-KO UITransactionDlg and
 native006B12B0/004E97A0 corroborate this ownership distinction.
+Warehouse45 transfer acknowledgements and anvil5B results likewise own their
+window's inventory icons. Do not follow them with3D for the same slots: the
+warehouse temporarily owns those icons and the upgrade result already consumes
+each material, including Trina. Duplicate updates caused invisible/ghost items
+after a Trina upgrade followed by a bank deposit. Socket/SQLite regression now
+covers that sequence, complete nonstackable transfers and partial stacks.
 
 Native3D/006AA7A0: entry count:u16, then21-byte entries containing district:u8,
 slot:u8,item:u32,quantity:u32,new:u8,durability:u16,two trailingu32 fields.
 Keep the trailers even though older source omits them. Weight54 carriesu16.
+For quest exchanges reusing consumed-item slots, send a zero-count entry for
+the old ID before the new item entry. Native004C2816's different-ID branch
+replaces the item record without constructing its icon; the next merchant
+inventory transfer dereferences that null icon at004E7681. The empty-slot path
+constructs the complete icon. Open-KO UIInventory::ItemCountChange corroborates
+the distinction. Quest additions/count increases use new=100 for the native
+received-item message; removals/decreases use0. Shop/move acknowledgements keep
+their separate ownership rules above. This fix is packet/state regression tested;
+native-client visual verification remains necessary.
 Durability38 carries slot:u8,durability:i16 (006B7950). Item deletion uses the
 native reply required to release its inventory recovery/wait state.
 
