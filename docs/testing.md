@@ -129,7 +129,11 @@ moving Assassin skills after relogin. The deterministic interpolation regression
 models1453 MoveTo at2/4/8m/s and checks arrival cancellation and visual melee
 distance; it does not simulate packet loss or stalled rendering. The Win32 tooltip
 harness covers hundreds of cursor moves, screen-edge anchoring, per-frame hiding
-and immediate item/stat invalidation. Native-client testing still reports failed
-R hits against walking and sometimes stationary monsters; moving Assassin skills
-appear improved. Keep R marked unresolved despite the automated checks passing.
-Additional item combinations and broader combat feel still need verification.
+and immediate item/stat invalidation. The additional Win32 melee harness checks
+movement-before-R ordering, preserved attack arguments/stack, moving forecasts,
+changed stationary positions and no extra movement for unchanged positions.
+The socket/SQLite stale-stop regression rejects repeated out-of-range R despite
+a claimed short packet distance, rejects a forged position, persists a valid
+final stop before allowing damage, and retains attack cooldown enforcement.
+Native owner testing reports R appears repaired with the isolated profile.
+Additional item combinations, LAN latency and broader combat feel remain checks.

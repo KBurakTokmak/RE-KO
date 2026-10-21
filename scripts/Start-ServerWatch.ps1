@@ -22,13 +22,17 @@ try {
     $serverProcess = Start-Process -FilePath (Join-Path $projectRoot 'target/debug/reko-serverd.exe') -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir "$captureName.stdout.log") -RedirectStandardError (Join-Path $logDir "$captureName.stderr.log") -PassThru
     $serverProcess.Id | Set-Content (Join-Path $logDir 'server.pid')
     $env:REKO_LOG_FILE | Set-Content (Join-Path $logDir 'latest-capture.txt')
-    Start-Sleep -Seconds 2
-    $serverProcess.Refresh()
-    if ($serverProcess.HasExited) {
-        Get-Content (Join-Path $logDir "$captureName.stderr.log")
-        throw "Server exited with code $($serverProcess.ExitCode)."
-    }
-    $ready = @(Get-NetTCPConnection -State Listen -LocalPort 15001,15100 -ErrorAction SilentlyContinue | Where-Object OwningProcess -eq $serverProcess.Id)
+    $readyDeadline = (Get-Date).AddSeconds(30)
+    do {
+        $serverProcess.Refresh()
+        if ($serverProcess.HasExited) {
+            Get-Content (Join-Path $logDir "$captureName.stderr.log")
+            throw "Server exited with code $($serverProcess.ExitCode)."
+        }
+        $ready = @(Get-NetTCPConnection -State Listen -LocalPort 15001,15100 -ErrorAction SilentlyContinue | Where-Object OwningProcess -eq $serverProcess.Id)
+        if ($ready.Count -eq 2) { break }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $readyDeadline)
     if ($ready.Count -ne 2) { throw 'Server is running but both listeners are not ready. Inspect the capture log.' }
     Write-Output "Server PID: $($serverProcess.Id)"
     Write-Output "Capture: $env:REKO_LOG_FILE"

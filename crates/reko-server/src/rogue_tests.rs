@@ -71,6 +71,85 @@ async fn setup() -> Option<(Lobby, Session, TcpStream, TcpStream, SocketAddr)> {
 }
 
 #[tokio::test]
+async fn basic_r_uses_validated_final_stop_before_damage_without_trusting_reported_distance() {
+    let Some((lobby, mut s, mut socket, _client, peer)) = setup().await else {
+        return;
+    };
+    s.combat.weapon_kind = 11;
+    s.combat.range = 1.0;
+    s.position.x = 3262;
+    s.position.z = 4034;
+    let health = || {
+        let p = lobby.monsters.as_ref().unwrap().health(10000, 21).unwrap();
+        u32::from_le_bytes(p[8..12].try_into().unwrap())
+    };
+    let before = health();
+    let mut session = Some(s);
+    let mut account = Some("admin".into());
+    let attack = [0x08, 1, 1, 0x10, 0x27, 0x77, 0, 9, 0];
+    for _ in 0..3 {
+        crate::handle_game_payload_inner(
+            &mut socket,
+            peer,
+            &attack,
+            &lobby,
+            &mut account,
+            &mut session,
+        )
+        .await;
+        assert_eq!(
+            health(),
+            before,
+            "a short client-reported distance cannot bypass authoritative reach"
+        );
+    }
+    let mut stop = vec![6];
+    stop.extend(6000u16.to_le_bytes());
+    stop.extend(4022u16.to_le_bytes());
+    stop.extend([0; 5]);
+    crate::handle_game_payload_inner(&mut socket, peer, &stop, &lobby, &mut account, &mut session)
+        .await;
+    assert_eq!(
+        session.as_ref().unwrap().position.x,
+        3262,
+        "forged final positions still fail movement validation"
+    );
+    stop[1..3].copy_from_slice(&3259u16.to_le_bytes());
+    crate::handle_game_payload_inner(&mut socket, peer, &stop, &lobby, &mut account, &mut session)
+        .await;
+    let saved = crate::movement::load(&lobby.db.lock().unwrap(), "admin", 0).unwrap();
+    assert_eq!((saved.x, saved.z), (3259, 4022));
+    crate::handle_game_payload_inner(
+        &mut socket,
+        peer,
+        &attack,
+        &lobby,
+        &mut account,
+        &mut session,
+    )
+    .await;
+    assert!(
+        health() < before,
+        "native movement-before-R ordering must resolve the stale-stop miss"
+    );
+    let hit = health();
+    crate::handle_game_payload_inner(
+        &mut socket,
+        peer,
+        &attack,
+        &lobby,
+        &mut account,
+        &mut session,
+    )
+    .await;
+    assert_eq!(
+        health(),
+        hit,
+        "position correction cannot bypass attack cooldown"
+    );
+}
+
+#[tokio::test]
 async fn recovery_items_pay_once_clamp_and_reject_missing_or_forged_use() {
     let Some((mut lobby, mut s, mut socket, _client, peer)) = setup().await else {
         return;

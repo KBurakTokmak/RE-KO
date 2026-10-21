@@ -96,17 +96,18 @@ continues at0057630B to send the unchanged text as ordinary chat instead of
 discarding an unknown local command. All other slash commands retain the native
 branch to005762FA. This is required for the owner-requested slash syntax.
 
-Both hooks require the exact original EXE hash, isolated profile path and expected
+All hooks require the exact original EXE hash, isolated profile path and expected
 unpacked instruction bytes. Code runs in a separate executable page, cache data
 in a writable page. Target threads pause only during the five-byte replacement;
 original page protection and instruction cache are restored. Startup failures
 leave the normal client usable and are logged. Neither EXE on disk is changed.
-Set `tooltip_cache` or `autoloot_command` to false in the local profile JSON to
+Set `tooltip_cache`, `autoloot_command` or `melee_sync` to false in the local profile JSON to
 disable the corresponding hook on future starts. For a running client:
 
 ```powershell
 python scripts/client_tooltip_cache.py --pid <client-pid> --remove
 python scripts/client_tooltip_cache.py --pid <client-pid> --command --remove
+python scripts/client_tooltip_cache.py --pid <client-pid> --melee-sync --remove
 ```
 
 Version3 receipts remain in ignored logs; installing over an older recognized
@@ -118,3 +119,32 @@ Win32 harness verifies stack/register conventions, content/stat invalidation, cu
 one text build while all100render calls execute; hundreds of cursor movements
 retain the text while item/stat changes rebuild immediately. This is not a measured game
 FPS claim; native-client tooltip performance still needs owner verification.
+
+## Basic melee final-position synchronization
+
+The isolated profile enables `melee_sync` by default. A live Orc Watcher capture
+showed repeated R refusals because a final1.28m player displacement was absent
+from the last native stop packet; the target position/radii matched. R's client
+surface-distance field cannot repair authoritative coordinates safely by itself.
+
+At the exact native R send call00479CA0 (original call0069E550), compare the
+player's current horizontal position (`[009DD3AC]+98/A0`) with GameProcMain's
+last movement-send position(+28C/294). If it changed, call native MsgSend_Move
+0069E5F0 first: moving state(+31C) uses(true,true) for the usual forecast, while
+stopped state uses(false,false) for the actual position. Only a changed stop
+clears native duplicate-stop suppression byte009DC960 before sending. Unchanged
+positions do not produce additional movement. Then call the original R function
+with its target, interval and distance arguments preserved. Native packet order
+places the normal validated movement before attack; no new opcode, damage rule
+or server range exemption is introduced. The server still rejects forged movement.
+
+This hook has a separate `melee-position-<pid>.json` version1 receipt and the same
+isolated-path/hash/signature checks and reversible process-memory installer.
+Original client/reference files remain unchanged. Build
+`scripts/tests/melee_sync_harness.cpp` with Win32 MSVC(`/EHsc /W4 /WX`, output
+`logs/melee_sync_harness.exe`), then run `python scripts/test_tooltip_cache.py`.
+The existing tooltip and autoloot harness still runs separately in that suite.
+
+The server starter waits up to30seconds for its own two listeners before
+launching the client-startup observer; slow cold asset loads must not skip the
+observer because of the previous fixed two-second readiness check.

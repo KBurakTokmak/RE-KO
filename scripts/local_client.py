@@ -137,6 +137,12 @@ try:
             print(install(process.pid, command=True), flush=True)
         except (OSError, RuntimeError, AssertionError) as error:
             print(f'AUTOLOOT_COMMAND_UNAVAILABLE: {error}', flush=True)
+    if GAME == LOCAL_GAME.resolve() and profile.get('melee_sync', True):
+        try:
+            from client_tooltip_cache import install
+            print(install(process.pid, melee=True), flush=True)
+        except (OSError, RuntimeError, AssertionError) as error:
+            print(f'MELEE_SYNC_UNAVAILABLE: {error}', flush=True)
     print("LOCAL_PROFILE_READY: legacy heartbeat watchdog exited through its shutdown event; original files unchanged", flush=True)
     while k.WaitForSingleObject(process.process, 1000) != 0:
         pass

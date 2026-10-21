@@ -70,11 +70,20 @@ beyond their respective reach, plus animation keys and malformed skeletons.
 
 ### Moving melee and false misses
 
-Basic R remains unreliable against walking and sometimes stationary monsters
-in native-client testing. Moving Assassin skills appear improved according to
-the owner, but broader gameplay verification remains open. The forecast and NPC
-synchronization changes below are partial compatibility improvements, not a
-complete fix for R attacks; automated coverage does not reproduce every failure.
+Native-client testing exposed a separate stale final-stop failure after the
+forecast changes. On an Orc Watcher, authoritative player coordinates were
+(80.0,389.2)m while live client memory stayed at(79.6715,387.9647)m. Both sides
+agreed on the target at(78.8,385.8)m. The server consequently checked3.61m while
+the client checked2.33m; repeated stationary R packets were rejected. This was
+an unreported final player displacement, not a target-radius mismatch. Its exact
+client frame-order cause is unconfirmed.
+
+The isolated client now synchronizes a changed position through native MOVE
+before sending R; see client-startup. Server movement validation, model reach,
+attack cooldown, damage and resource rules remain unchanged. The owner reports
+R appears repaired, corroborated by successful post-fix Orc Watcher and other
+NPC hits. Broader LAN/latency coverage remains open; unpatched original clients
+do not receive this isolated-profile correction.
 
 Native moving06 packets describe NextPos(PACKET_INTERVAL_MOVE), while stop
 packets report the current position. Open-KO GameProcMain::MsgSend_Move and
@@ -98,8 +107,10 @@ moving hits, stopped/sideways refusal and no resource charge on refusal.
 
 Current basic NPC attacks do not roll a random hit/evasion miss: result0 also
 represents range/target/cooldown refusal. The reported R capture shows repeated range
-refusals on the same target, including native-reported0.9m versus authoritative
-6.83m. Both player forecasts and NPC visual synchronization matter; see the NPC
+refusals on the same target. Native00479BD7..00479CA0 subtracts half the sum
+of radii before serializing distance at0069E550, so its reported0.9m is a surface
+distance and cannot be directly compared with a6.83m center distance. Do not
+trust that client-provided distance to bypass server reach. See the NPC
 movement notes in world-services. No new accuracy multiplier is applied. Supplied1453
 Unit::GetHitRate has probabilistic tiers; complete retail accuracy sampling
 remains separate from the current physical damage path.

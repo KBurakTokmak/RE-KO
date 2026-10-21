@@ -1,4 +1,4 @@
-"""Reversible inventory-tooltip cache for the verified isolated 1453 client.
+"""Reversible UI, command and melee-position fixes for the isolated 1453 client.
 
 Only process memory changes. The original installation and both EXEs stay intact.
 """
@@ -15,6 +15,46 @@ ORIGINAL = bytes.fromhex('e862a20400')
 CLIENT_HASH = '9513ecdf29e99bfee307fa8dc93ef64bf616d77d475d57fde906107f32169bb0'
 COMMAND_SITE = 0x5762F5
 COMMAND_ORIGINAL = bytes.fromhex('80382f7511')
+MELEE_SITE = 0x479CA0
+MELEE_ORIGINAL = bytes.fromhex('e8ab482200')
+
+
+def build_melee_stub(address, attack=0x69E550, move=0x69E5F0,
+                     player_pointer=0x9DD3AC, stopped_flag=0x9DC960):
+    """Synchronize changed native positions before R, preserving its three arguments."""
+    code, labels, fixups = bytearray(), {}, []
+
+    def emit(value):
+        code.extend(bytes.fromhex(value))
+
+    def branch(opcode, label):
+        emit(opcode); fixups.append((len(code), label)); code.extend(bytes(4))
+
+    def call(target):
+        emit('e8'); code.extend(struct.pack('<i', target - address - len(code) - 4))
+
+    emit('55 8bec 53 56 57 8bf1 a1')
+    code.extend(struct.pack('<I', player_pointer))
+    emit('85c0'); branch('0f84', 'attack')
+    for source, saved in [(0x98, 0x28c), (0xa0, 0x294)]:
+        emit('8b90'); code.extend(struct.pack('<I', source))
+        emit('3b96'); code.extend(struct.pack('<I', saved))
+        branch('0f85', 'sync')
+    branch('e9', 'attack')
+    labels['sync'] = len(code)
+    emit('83b81c03000000'); branch('0f84', 'stop')
+    emit('6a01 6a01 8bce'); call(move)
+    branch('e9', 'attack')
+    labels['stop'] = len(code)
+    # Native MsgSend_Move suppresses duplicate stops, even if the final position changed.
+    emit('c605'); code.extend(struct.pack('<I', stopped_flag)); emit('00')
+    emit('6a00 6a00 8bce'); call(move)
+    labels['attack'] = len(code)
+    emit('ff7510 ff750c ff7508 8bce'); call(attack)
+    emit('5f 5e 5b 5d c20c00')
+    for offset, label in fixups:
+        struct.pack_into('<i', code, offset, labels[label] - offset - 4)
+    return bytes(code)
 
 
 def build_command_stub(address, slash=0x5762FA, ordinary=0x57630B):
@@ -140,10 +180,14 @@ def build_stub(address, data, original=0x506CD0, player_pointer=0x9DD3AC, viewpo
     return bytes(code)
 
 
-def install(pid, remove=False, command=False):
-    site = COMMAND_SITE if command else SITE
-    expected_code = COMMAND_ORIGINAL if command else ORIGINAL
-    label = 'Autoloot command forwarding' if command else 'Inventory tooltip cache'
+def install(pid, remove=False, command=False, melee=False):
+    if command and melee:
+        raise ValueError('Select one local client hook per installation.')
+    site = MELEE_SITE if melee else COMMAND_SITE if command else SITE
+    expected_code = MELEE_ORIGINAL if melee else COMMAND_ORIGINAL if command else ORIGINAL
+    label = 'Basic melee position synchronization' if melee else 'Autoloot command forwarding' if command else 'Inventory tooltip cache'
+    receipt_name = 'melee-position' if melee else 'autoloot-command' if command else 'tooltip-cache'
+    version = 1 if melee else 3
     if c.sizeof(c.c_void_p) != 8:
         raise RuntimeError('Use the 64-bit Windows Python runtime.')
     k = c.WinDLL('kernel32', use_last_error=True)
@@ -194,7 +238,7 @@ def install(pid, remove=False, command=False):
             raise RuntimeError('Tooltip cache is restricted to the isolated local client.')
         if hashlib.sha256(expected.read_bytes()).hexdigest() != CLIENT_HASH:
             raise RuntimeError('Unknown client build.')
-        manifest = ROOT / 'logs' / f'{"autoloot-command" if command else "tooltip-cache"}-{pid}.json'
+        manifest = ROOT / 'logs' / f'{receipt_name}-{pid}.json'
         current = read(site, 5)
         if remove:
             receipt = json.loads(manifest.read_text())
@@ -204,9 +248,9 @@ def install(pid, remove=False, command=False):
         else:
             if current != expected_code:
                 if manifest.exists() and current.hex() == json.loads(manifest.read_text())['replacement']:
-                    if json.loads(manifest.read_text()).get('version') == 3:
+                    if json.loads(manifest.read_text()).get('version') == version:
                         return label + ' already installed.'
-                    install(pid, remove=True, command=command)
+                    install(pid, remove=True, command=command, melee=melee)
                     current = read(site, 5)
                 if current != expected_code:
                     raise RuntimeError('Unknown inventory tooltip call site.')
@@ -214,7 +258,7 @@ def install(pid, remove=False, command=False):
             if not allocation or allocation + 8192 > 0xFFFFFFFF:
                 raise RuntimeError('Cannot allocate x86 tooltip cache.')
             entry = allocation + 4096
-            code = build_command_stub(entry) if command else build_stub(entry, allocation)
+            code = build_melee_stub(entry) if melee else build_command_stub(entry) if command else build_stub(entry, allocation)
             if len(code) > 4096:
                 raise RuntimeError('Local client hook exceeds its executable page.')
             write(entry, code)
@@ -224,7 +268,7 @@ def install(pid, remove=False, command=False):
             if not k.FlushInstructionCache(process, entry, len(code)):
                 raise c.WinError(c.get_last_error())
             replacement = (b'\xe9' if command else b'\xe8') + struct.pack('<i', entry - site - 5)
-            manifest.write_text(json.dumps({'version': 3, 'pid': pid, 'site': site, 'allocation': allocation,
+            manifest.write_text(json.dumps({'version': version, 'pid': pid, 'site': site, 'allocation': allocation,
                                            'original': expected_code.hex(), 'replacement': replacement.hex()}, indent=2))
         # Pause target threads only while replacing the five-byte call. A removed
         # hook's tiny allocation remains until process exit for in-flight callers.
@@ -285,5 +329,6 @@ if __name__ == '__main__':
     parser.add_argument('--pid', required=True, type=int)
     parser.add_argument('--remove', action='store_true')
     parser.add_argument('--command', action='store_true')
+    parser.add_argument('--melee-sync', action='store_true')
     args = parser.parse_args()
-    print(install(args.pid, args.remove, args.command))
+    print(install(args.pid, args.remove, args.command, args.melee_sync))
