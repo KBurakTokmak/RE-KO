@@ -221,7 +221,7 @@ impl Hub {
                 1
             },
         ]);
-        p.extend(1u32.to_le_bytes());
+        p.extend(crate::transformation::appearance(s).to_le_bytes());
         p.extend([
             1,
             u8::from(!s.is_admin),

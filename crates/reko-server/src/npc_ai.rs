@@ -25,9 +25,54 @@ struct Player {
     position: Position,
     hp: u16,
     invisible: bool,
+    disguised: bool,
     is_admin: bool,
     stats: combat::Stats,
     at: u64,
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn monster_disguise_blocks_proximity_aggro_but_keeps_damage_retaliation() {
+    let game = reko_common::game_dir();
+    if !game.join("Data/NPC_Looks.tbl").exists() {
+        return;
+    }
+    let db = Connection::open_in_memory().unwrap();
+    crate::population::tests::seed(&db);
+    db.execute_batch(include_str!("npc_ai.sql")).unwrap();
+    db.execute(
+        "INSERT INTO world_monster_ai VALUES(100,5,100,100,1500,3,4,5,5,35,100,0,0,0,0,1,1500)",
+        [],
+    )
+    .unwrap();
+    let world = super::World::load(&game).unwrap();
+    world.load_population(&db, &game).unwrap();
+    let mut brain = Brain::default();
+    brain.load(&db).unwrap();
+    let mut inner = world.inner.lock().unwrap();
+    let home = inner.mobs[&12000].position;
+    let player = Player {
+        name: "Disguised".into(),
+        position: home,
+        hp: 100,
+        invisible: false,
+        disguised: true,
+        is_admin: false,
+        stats: combat::Stats::default(),
+        at: 1000,
+    };
+    brain.players.insert(1, player);
+    brain.tick(&mut inner.mobs, 1000);
+    assert_eq!(brain.agents[&12000].target, None);
+    inner
+        .mobs
+        .get_mut(&12000)
+        .unwrap()
+        .damage_by
+        .insert("Disguised".into(), 1);
+    brain.tick(&mut inner.mobs, 1250);
+    assert_eq!(brain.agents[&12000].target, Some(1));
 }
 struct Agent {
     target: Option<u16>,
@@ -218,6 +263,7 @@ impl Brain {
                     .current_position(s.position, std::time::Instant::now()),
                 hp: s.skills.hp,
                 invisible: s.skills.buffs.get(&91).is_some_and(|b| now < b.until),
+                disguised: crate::transformation::appearance(s) != 1,
                 stats: s.combat,
                 at: now,
             },
@@ -313,6 +359,7 @@ impl Brain {
                         rule.search + 2.0
                     };
                     valid(p)
+                        && (!p.disguised || attacked(p))
                         && distance(agent.chase_start, mob.position) <= range
                         && distance(mob.position, p.position)
                             < if attacked(p) {
@@ -342,7 +389,7 @@ impl Brain {
                         valid(p)
                             && distance(mob.position, p.position)
                                 < if attacked(p) { 100.0 } else { rule.search }
-                            && (aggressive || attacked(p))
+                            && ((aggressive && !p.disguised) || attacked(p))
                     })
                     .min_by(|(ia, a), (ib, b)| {
                         attacked(b).cmp(&attacked(a)).then_with(|| {
@@ -518,6 +565,7 @@ mod tests {
                 position: home,
                 hp: 100,
                 invisible: false,
+                disguised: false,
                 is_admin: true,
                 stats: combat::Stats::default(),
                 at: 1000,
@@ -586,6 +634,7 @@ mod tests {
             },
             hp: 100,
             invisible: false,
+            disguised: false,
             is_admin: false,
             stats: combat::Stats::default(),
             at: 1000,
@@ -709,6 +758,7 @@ mod tests {
             },
             hp: 100,
             invisible: false,
+            disguised: false,
             is_admin: false,
             stats: combat::Stats::default(),
             at: 1000,
@@ -789,6 +839,7 @@ mod tests {
                 },
                 hp: 100,
                 invisible: false,
+                disguised: false,
                 is_admin: false,
                 stats: combat::Stats::default(),
                 at: now,
@@ -1050,6 +1101,7 @@ mod tests {
                 ..Default::default()
             },
             invisible: false,
+            disguised: false,
             is_admin: false,
             at: 1000,
         };
@@ -1129,6 +1181,7 @@ mod tests {
             position: Position::default(),
             hp: 100,
             invisible: false,
+            disguised: false,
             is_admin: false,
             stats: combat::Stats {
                 evasion: 100.0,

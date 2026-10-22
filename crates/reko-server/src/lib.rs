@@ -9,15 +9,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
+mod abyss;
 mod admin;
 mod archery;
 mod auth;
+mod bifrost;
 mod bosses;
 mod characters;
 mod chat;
 mod clan_promotion;
 mod clans;
 mod combat;
+#[cfg(test)]
+mod combat_zone_tests;
 pub mod crypto;
 mod durability;
 mod framing;
@@ -59,6 +63,7 @@ mod stat_points;
 mod storage;
 mod suppression;
 mod town;
+mod transformation;
 mod travel;
 mod upgrading;
 mod utility;
@@ -1315,6 +1320,7 @@ async fn tick_character(
         return;
     }
     loot::auto_tick(sock, peer, lobby, account, session, now).await;
+    transformation::refresh(sock, peer, lobby, account, session).await;
     utility::npc_strikes(sock, peer, lobby, account, session, now).await;
     if let Some(world) = &lobby.monsters {
         for credit in world.take_experience(&session.character.name) {
@@ -1431,6 +1437,9 @@ async fn tick_character(
                 send_response(sock, peer, &None, &session.skills.mana_packet(), "MP_REGEN").await;
             }
             for category in expired {
+                if category == transformation::CATEGORY {
+                    continue;
+                }
                 if category == 91 {
                     magic::visibility(lobby, session, false);
                 }

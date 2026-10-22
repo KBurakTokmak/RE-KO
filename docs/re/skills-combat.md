@@ -20,6 +20,52 @@ but complete group-target buff/heal delivery remains separate. Unsupported effec
 fail without charging resources. See the
 [backlog](../design/1453-feature-backlog.md) for individual dependencies.
 
+### Transformation Scroll
+
+Original item381001000 invokes list skill472001 (main types0/1). It is not a
+recovery spell and now takes a scoped path before the generic item-skill check.
+An owned scroll opens native `31 09 <472001:u32>` without consuming an item.
+The server remembers a self-bound list request for60seconds. A selected original
+472xxx/type6 form must satisfy level, primary class mask, nation, living/self
+target and zone/buff restrictions. A selection without that menu, a stale menu,
+forged target, duplicate transformation or unavailable scroll cannot charge.
+
+`Import-1453Transformations.py` imports only the46 supplied1453 MAGIC_TYPE6 rows
+for the original scroll family, verifying model, one-hour duration and class mask
+against original Skill_Magic_6.tbl. Primary Nation0 allows both nations; the
+original client column25 is1 for all these rows and must not be misread as a
+Karus-only server restriction. Sheriff472160 uses primary mask0010 (Mage only).
+The primary fallback in MagicInstance::CheckType6Prerequisites/CheckSkillPrerequisites
+allows a single Transformation Scroll instead of requiring a Transformation Gem;
+selection atomically consumes one scroll and persists the timed disguise. Failed
+payment/state saves roll back inventory. Original combat/stat modifiers are all
+zero; no new combat bonuses are introduced. Totems and other scroll families
+remain separate, unsupported paths.
+
+Local persisted category96 stores the selected skill and expiry, not a type4 buff.
+The actor and nearby players receive state29/type3 with the skill ID, followed
+by type6 success with the remaining duration. GM actors first receive the source
+visibility reset (state29/type5/normal). Other-player entry packets include the
+same abnormal appearance. Manual cancellation sends `31 07` then normal appearance;
+expiry, death and entry into restricted zones clear the visual state. Relog and
+allowed cross-zone travel replay the remaining duration without another charge.
+The current restricted-zone set is31/48/51..69/71..75 (Bifrost, arena, war and
+combat zones); home/Eslant remain usable as the primary source permits. Full
+war-time map flag changes remain outside this bounded implementation.
+
+Active positive type4 buffs and stealth must be removed before transforming.
+The original MonsterFriendly1 behavior suppresses automatic proximity aggression
+while retaining retaliation against a transformed attacker; disguise never grants
+damage immunity. Player model radius/weapon timing still uses the existing combat
+model, so exact form-dependent retail reach/animation timing is not claimed.
+
+Sources: original item/skill/type6 tables; supplied1453 MagicInstance::SendTransformationList,
+CheckType6Prerequisites, ExecuteType6, Type6Cancel and User::StateChangeServerDirect.
+Open-KO GameDef::__TABLE_UPC_SKILL_TYPE_6 corroborates client fields with an explicit
+warning about later column naming. Socket/SQLite tests exercise all46 forms in both
+nations, single scroll payment, GM visibility, class/buff/zone guards, rollback,
+replay, cancellation, relog and expiry. AI regression checks disguise versus retaliation.
+
 ### Mage integration and original1453 constraints
 
 The original1453 main table has332 Mage records across classes103/109/110 and

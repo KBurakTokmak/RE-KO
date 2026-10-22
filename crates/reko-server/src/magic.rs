@@ -99,6 +99,9 @@ pub(crate) async fn handle(
     if payload.len() != 22 {
         return false;
     }
+    if crate::transformation::handle(sock, peer, lobby, account, session, payload).await {
+        return true;
+    }
     let id = u32::from_le_bytes(payload[2..6].try_into().unwrap());
     let Some(spell) = catalog.spells.get(&id) else {
         return false;

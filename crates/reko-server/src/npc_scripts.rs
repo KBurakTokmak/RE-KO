@@ -531,6 +531,18 @@ fn execute(
     let db = lobby.db.lock().unwrap();
     let tx = db.unchecked_transaction()?;
     let all = helpers(&tx)?;
+    let abyss_trigger = crate::abyss::trigger(&tx, merchant, s, &context.file)?;
+    let bifrost_script = crate::bifrost::script(merchant, s, &context.file)?;
+    let mut abyss_hub = abyss_trigger.map(|_| lobby.social.lock().unwrap());
+    let party = abyss_hub.as_ref().map_or_else(Vec::new, |hub| {
+        hub.group(s.player_id)
+            .into_iter()
+            .filter(|id| *id != s.player_id)
+            .filter_map(|id| hub.players.get(&id).cloned())
+            .collect::<Vec<_>>()
+    });
+    let party_items = RefCell::new(Vec::<(u16, Vec<(usize, starter::Item)>)>::new());
+    let party_travel = RefCell::new(None::<crate::movement::Position>);
     let mut context = context;
     let menu_reply = context.choices.iter().any(|e| *e >= 0);
     context.choices = [-1; 10];
@@ -581,6 +593,31 @@ fn execute(
     lua.globals().set("UID", s.player_id)?;
     lua.globals().set("EVENT", action.0)?;
     lua.globals().set("STEP", action.1)?;
+    let ready = || -> mlua::Result<()> {
+        for player in &party {
+            if !player.s.entered
+                || player.s.zone_loading
+                || player.s.skills.hp == 0
+                || !crate::social::near(s.position, player.s.position, 50)
+                || player
+                    .s
+                    .skills
+                    .buffs
+                    .get(&22)
+                    .is_some_and(|b| crate::skills::now_ms() < b.until)
+                || abyss_hub
+                    .as_ref()
+                    .unwrap()
+                    .transfers
+                    .contains_key(&player.s.player_id)
+            {
+                return Err(mlua::Error::runtime(
+                    "All party members must be alive, nearby and available for Abyss travel.",
+                ));
+            }
+        }
+        Ok(())
+    };
     lua.scope(|scope| {
         macro_rules! function {
             ($name:literal,$f:expr) => {
@@ -610,6 +647,49 @@ fn execute(
             .character
             .nation()));
         function!("GetZoneID", |_, _: Variadic<i64>| Ok(s.position.zone));
+        if let Some(trigger)=abyss_trigger {
+            function!("GetEventTrigger",move |_,_:Variadic<i64>|Ok(trigger));
+            function!("ZoneChangeParty",|_,a:Variadic<i64>| {
+                ready()?;
+                let destination=crate::abyss::destination(&tx,s,&a).map_err(mlua::Error::external)?;
+                let mut st=state.borrow_mut();
+                if st.travel.is_some() {return Err(mlua::Error::runtime("Abyss travel already selected"));}
+                for player in &party {
+                    crate::movement::save(&tx,&player.account,player.s.character.slot,destination).map_err(mlua::Error::external)?;
+                }
+                st.travel=Some(destination);
+                *party_travel.borrow_mut()=Some(destination);
+                Ok(())
+            });
+            function!("RobAllItemParty",|_,a:Variadic<i64>| {
+                ready()?;
+                if a.len()!=2 || a[0]!=i64::from(s.player_id) || a[1]!=379080000 || !party_items.borrow().is_empty() {
+                    return Err(mlua::Error::runtime("Invalid Abyss party key request"));
+                }
+                state.borrow_mut().take(379080000,1).map_err(mlua::Error::external)?;
+                for player in &party {
+                    let changed=inventory::consume(&tx,&player.account,player.s.character.slot,379080000,1).map_err(mlua::Error::external)?;
+                    party_items.borrow_mut().push((player.s.player_id,changed));
+                }
+                Ok(true)
+            });
+        }
+        if abyss_trigger.is_some() || bifrost_script {
+            function!("ZoneChange",|_,a:Variadic<i64>| {
+                let destination=if bifrost_script {crate::bifrost::destination(&tx,s,&a)}
+                    else {crate::abyss::destination(&tx,s,&a)}.map_err(mlua::Error::external)?;
+                let mut st=state.borrow_mut();
+                if st.travel.is_some() {return Err(mlua::Error::runtime("Travel already selected"));}
+                st.travel=Some(destination);
+                Ok(())
+            });
+        }
+        if bifrost_script {
+            function!("CheckBeefRoastVictory",|_,a:Variadic<i64>| {
+                if a.as_slice()!=[i64::from(s.player_id)] {return Err(mlua::Error::runtime("Invalid Bifrost owner"));}
+                crate::bifrost::victory(&tx).map_err(mlua::Error::external)
+            });
+        }
         function!("EnterSuppression", |_, _: Variadic<i64>| {
             let mut st = state.borrow_mut();
             let helper = all.iter().find(|h| h.id == st.context.helper)
@@ -683,7 +763,9 @@ fn execute(
             p.push(a[1] as u8);
             let flag=all.iter().find(|h|h.id==st.context.helper).map_or(0,|h|h.flag);
             p.extend((if a[2]>=0 && flag>0 {i32::from(flag)} else {a[2] as i32}).to_le_bytes());
-            p.extend((a[3] as i32).to_le_bytes());
+            // Asan's later dialog959 is absent from the original1453 table.
+            let talk=if bifrost_script && st.context.file=="16094_Asan.lua" && a[3]==959 {4071} else {a[3] as i32};
+            p.extend(talk.to_le_bytes());
             for i in 0..10 {
                 p.extend((*a.get(5 + i * 2).unwrap_or(&-1) as i32).to_le_bytes());
                 st.context.choices[i] = *a.get(6 + i * 2).unwrap_or(&-1) as i32;
@@ -928,6 +1010,17 @@ fn execute(
         result.level_state = Some((next.base_combat, next.combat, next.skills));
     }
     tx.commit()?;
+    if let Some(hub) = abyss_hub.as_mut() {
+        for (id, changed) in party_items.into_inner() {
+            hub.refresh.insert(id);
+            hub.send(id, inventory::count_packet(&changed));
+        }
+        if let Some(destination) = party_travel.into_inner() {
+            for player in party {
+                hub.transfers.insert(player.s.player_id, destination);
+            }
+        }
+    }
     Ok(result)
 }
 
@@ -1315,6 +1408,9 @@ pub(crate) async fn handle(
             if let Some(position) = result.travel {
                 let packet = crate::travel::begin(lobby, s, position);
                 super::send_response(sock, peer, &None, &packet, "SUPPRESSION_ZONE_CHANGE").await;
+                if s.entered {
+                    crate::population::refresh(sock, peer, lobby, s).await;
+                }
             }
         }
         Err(error) => {
@@ -1329,6 +1425,14 @@ pub(crate) async fn handle(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "abyss_tests.rs"]
+mod abyss_tests;
+
+#[cfg(test)]
+#[path = "bifrost_tests.rs"]
+mod bifrost_tests;
 
 #[cfg(test)]
 mod tests {

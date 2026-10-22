@@ -14,8 +14,8 @@ schedules. Dungeon-family metadata alone does not suppress initial spawns.
 
 Rare bosses use `world_boss_pools` and `world_boss_members` over the existing
 source spawn rectangles: one living boss per name/zone, choosing a random source
-location. Current imports define23pools/122candidate entities in home castles,
-Eslant and old Moradon: Talos, Harpy Queen, Deruvish founder, Snake Queen, attila,
+location. Current imports define37pools/185candidate entities in home castles,
+Eslant, old Moradon and Colony Zone: Talos, Harpy Queen, Deruvish founder, Snake Queen, attila,
 Kekurikekukaka, Hyde, Antares, Shaula, Samma, Troll King and Dragon tooth where
 source rows exist. Faction zones have independent pools. No missing locations
 are invented. Death by direct damage or DoT starts a six-hour timer; ordinary
@@ -27,6 +27,15 @@ and assigns `sRegTime * SECOND`; its `Npc.cpp` regen fallback is overwritten.
 The supplied data has multiple candidates alive independently and mixed four-hour/
 32000-second timers. Grouping, six hours after death and restart resets are
 explicit owner requirements overriding those customizations.
+
+Colony Zone71 adds14 pools over63 existing candidate instances: Lobo, Lupus,
+Lycaon, Barrkk, Barkirra, Lesath, Shaula, bone collecter, Duke, Bishop, Bach,
+Javana, Samma and Orc bandit leader. Both leader prototypes share one name pool.
+The imported primary timer is16000seconds (4h26m40s); the existing owner policy
+uses21600seconds after death instead. The source candidates remain in place,
+with only one selected per pool. Riote, Atross, Blood Don, Undying, bandit
+officers and other ordinary groups are not deduplicated or retimed. Existing
+Ghost of Manes/Odin event conditions are unchanged.
 
 Visibility uses48m regions and a3x3 view, native1C lists and1D requested details.
 Requests are bounded, deduplicated and restricted to nearby living entities.
@@ -212,8 +221,30 @@ gate geometry. Supplementary `freezone_a.smd` supplies exit groups721/722; its
 Moradon coordinates are replaced by the compatible historical Delos exits.
 The explicit town fallback uses the incoming nation destinations(843,140) and
 (190,897), with provenance distinguishing this adaptation from primary1453 data.
-Original GTD extents validate outdoor endpoints. This enables travel, not a
-claim of a complete Ardream NPC/monster roster; missing spawns are not invented.
+Original GTD extents validate outdoor endpoints.
+
+`Repair-1453CombatZones.py` separately repairs the absent Ardream population:
+379 monsters and63 NPCs/towers. Its supplementary2086 K_NPCPOS centers, counts,
+directions and timers are adapted to original1453 FreeZone_a terrain, not claimed
+as a recovered retail1453 spawn layout. Monster spawn ranges use the supplied
+iRange as a square around each center; stationary NPCs keep exact centers.
+All bounds and appearances are checked against the original client. Every
+monster uses an existing primary1453 MONSTER_TEMPLATE, AI and loot rule rather
+than importing newer combat/reward statistics. Treant8851/Ancient8854 map by
+matching name to primary5401/5301; towers31403..31406 map to primary5300/5310/
+5400/5410 with the same model, nation and level. The absent Zamed24425 static
+NPC template comes from the supplementary package and uses its original-client
+appearance; its quest implementation remains separate. Later Chaos Stones,
+rental booths and the Ardream event monument (seven instances) are excluded.
+Potion, sundries, storage and tower visibility at both towns and live monster
+streaming are covered by socket tests. This is bounded population restoration,
+not a claim of complete tower combat, PvP or all Ardream quest/event controllers.
+
+The repair is offline, checks collisions/customizations, is idempotent, backs up
+the save and verifies hashes for all unrelated tables. It changes only population,
+population conditions, boss pools/members and the Bifrost policy rule. Run
+`python scripts/Test-1453CombatZones.py` to verify a disposable copy and provision
+`logs/combat-zones-test.db` for the Rust population/scheduler/socket regression.
 
 Gate menus show both combat zones; selection requires level35+, positive NP,
 and a maximum of59 for Ardream. Administrative characters bypass those entry
@@ -230,3 +261,95 @@ supported queries/actions, with4MiB and200000-instruction limits. Unsupported
 actions roll back all item/coin/quest changes. Ordinary quests use1453 database
 requirements/rewards; supplementary Lua is not authority for newer rewards.
 Opening dialogs does not establish every specialist NPC service is implemented.
+
+### Bifrost gate and return
+
+Colony Zone's imported NPC602/type150 uses QUEST_HELPER4260 and the supplied
+`602_Bifmove.lua` menu. Its CheckBeefRoastVictory and ZoneChange bindings are
+enabled only for that validated nearby gate. `16094_Asan.lua`/helper4243 gets
+the same bounded travel binding for the two imported Bifrost return gatekeepers.
+NPC identity, zone, life, proximity, script filename and offered choice are
+revalidated on every reply; travel commits before the zone-change packet and
+clears the dialog, preventing replay. Frozen characters cannot travel.
+
+The explicit current owner requirement is **always open to both nations**.
+`world_reference_rules/BIFROST_ACCESS/31` stores `mode=always_open`; the scoped
+victory query returns3 only in that mode. Missing/unknown policy fails closed.
+Entry coordinates(78,730)/(245,950) match the primary START_POSITION row and
+supplementary Lua. Asan retains the source's level30 branch: lower levels return
+to their home castle, otherwise to nation-specific Colony Zone center positions.
+No items, coins or quest state are charged. Cross-zone population waits for
+the existing client loading handshake. Original models, spawn data and loot
+inside Bifrost are unchanged.
+The supplementary Asan dialog959 is absent from the original1453 talk table;
+only that scoped prompt maps to original English4071, "Do you want to leave?".
+Entry talk4470/4471 and menu4200/4199, and exit menu4071/4072 exist in the
+original tables. No original client text or assets are modified.
+
+The always-open policy is a local override, not an implemented scheduled event.
+**When the owner asks to switch to monument/event operation, implement and test
+the event controller before changing this rule.** Setting `mode=event` today
+closes entry; it does not activate an event scheduler. Keep Asan exit available
+when entry closes. The supplied1453 GameServer EventHandler::BifrostProcess and
+GameServerDlg::Timer_BifrostTime describe monument victory, the two-hour winning
+nation window and the other nation's final hour, but that timer thread is
+commented out in the supplied package. Exact retail1453 schedule remains
+unverified. The owner's future chat instruction authorizes a subsequent change;
+no new in-game event administration command is currently claimed.
+
+### Abyss Dungeon teleporters
+
+The37 imported NPC7001/type28 instances in zones32/33/34 use the shared
+`7001_dungeun.lua` script through QUEST_HELPER4056. They are not object warp
+gates, so adding HISTORICAL_WARP rows does not repair them. The script requires
+GetEventTrigger, ZoneChange, ZoneChangeParty and RobAllItemParty; these bindings
+are now enabled only for that Abyss script and matching living, nearby NPCs.
+Other NPC scripts retain their existing restricted action set.
+
+`abyss.rs` resolves the clicked instance's persisted TrapNumber through the
+primary1453 EVENT_TRIGGER table. The source ranges are40001..40020 for
+Desperation Abyss32,42001..42016 for Hell Abyss33, and43601 for Dragon Cave34.
+Missing, ambiguous, disabled or wrong-zone trigger records fail before script
+execution. No runtime data import, quest rewrite or spawn relocation is needed.
+The existing100 trigger rules were compared to the supplied1453 backup and match.
+
+Same-zone script and queued party transfers send destination NPC/monster details
+and the region ID list immediately after the warp, without waiting for movement.
+Cross-zone population still waits for the existing zone-load handshake. This
+matches the primary1453 Warp's NpcInOutForMe and older Open-KO Warp's
+RegionNpcInfoForMe ordering; socket regression checks both arrival paths.
+
+The supplied supplementary Lua defines forward/back floor coordinates, Delos
+exit, Hell entry, four shortcut keys and the Marble of the Dragon connection.
+These destinations align with imported primary1453 teleporter positions, and
+the corresponding menu/talk IDs exist in the original1453 English client tables.
+Travel is limited to zones30/32/33/34 and requires a configured destination
+within30m of its source floor teleporter (or the Delos start). No client-supplied
+coordinates or direct event IDs are accepted. Menu choices, NPC proximity and
+filename are revalidated on every reply; travel clears the dialog context.
+
+Required keys are retained:379080000 for the script's locked floor transitions,
+379081000..379084000 for shortcuts,379111000 for Hell entry and389200000 for
+Dragon Cave. The script's distinction between caller-only and per-party-member
+key charges is preserved. Party inventory removals and all destination saves
+commit in the same SQLite transaction; a missing key rolls back everyone.
+This also fixes the supplied Lua's unchecked false return from RobAllItemParty:
+failed party payment must not permit a free transfer. Remote inventory counts
+and transfers are queued only after commit, using existing social delivery.
+
+Local party safety requires every online party member to be alive, unfrozen,
+in the same zone and within50m of the caller, without a pending transfer.
+The primary C++ ZoneChangeParty instead iterates all online members regardless
+of location; the local guard prevents pulling distant players or charging their
+keys across unrelated zones. Solo travel remains available. Source shortcut
+labels and coordinates are retained rather than inventing additional floors;
+exact retail reconciliation of the18th-floor label in the16-floor Hell layout
+is unresolved.
+
+References: supplied1453 GameServer/User.cpp::GetEventTrigger,
+ItemHandler.cpp::RobAllItemParty, CharacterMovementHandler.cpp::ZoneChangeParty,
+QUEST_HELPER/EVENT_TRIGGER/K_NPCPOS; original Quest_Menu_us/Quest_Talk_us tables;
+supplementary Quests/7001_dungeun.lua. Older Open-KO User::ClientEvent corroborates
+type28 plus TrapNumber event dispatch. Socket/SQLite regressions exercise all37
+menus,34 forward transitions, missing keys, shortcuts, back/exit, Hell/Dragon
+connections, wrong-zone trigger rejection, party rollback and replay refusal.

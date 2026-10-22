@@ -207,6 +207,14 @@ fn select(
 pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position) -> Vec<u8> {
     s.suppression_notice = None;
     let same_zone = s.position.zone == position.zone;
+    if !same_zone
+        && (s.transformation_visual != 1
+            || s.skills
+                .buffs
+                .contains_key(&crate::transformation::CATEGORY))
+    {
+        s.transformation_visual = 0;
+    }
     s.position = position;
     s.zone_loading = !same_zone;
     s.entered = same_zone;

@@ -136,6 +136,9 @@ pub(crate) async fn transfer(
     if let Some(destination) = destination {
         let p = crate::travel::begin(lobby, s, destination);
         crate::send_response(sock, peer, &None, &p, "CLAN_TRIAL_TRANSFER").await;
+        if s.entered {
+            crate::population::refresh(sock, peer, lobby, s).await;
+        }
     }
 }
 fn home(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8>> {
