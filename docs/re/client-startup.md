@@ -59,6 +59,18 @@ debugger traces, protected binaries and generated decompilation outside Git.
 
 ## Local inventory UI fixes
 
+The isolated profile also runs `local_client_tables.py` before launching.
+Original Skill_Magic_6.tbl has English names in column1 and legacy non-English
+display strings in column2. For the46 Transformation Scroll472xxx forms, the
+local copy uses the existing English bytes in column2. Every other raw cell,
+row/header and numeric gameplay field is preserved and checked. The source
+installation is read-only; an unknown local customization is refused. A local
+backup/receipt stays under ignored logs. Preparation and the launcher both apply
+this idempotently; replacing the copied table is atomic. Fully restart the game
+through Start-LocalClient.cmd to load these names. Relogging does not reload TBLs.
+`python scripts/Test-LocalClientTables.py` checks the byte-preserving repair,
+cipher round trip, idempotence and truncated input without changing a game file.
+
 The isolated profile enables `client_tooltip_cache.py` after unpacking and the
 watchdog shutdown. Native inventory rendering calls00506CD0 at004BCA69. The
 tooltip compares raw mouse coordinates with its cache, but00500C19 stores the

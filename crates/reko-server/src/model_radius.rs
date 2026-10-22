@@ -189,12 +189,27 @@ fn skeleton_radius(bytes: &[u8]) -> anyhow::Result<f32> {
 pub(super) struct Radii {
     pub monsters: HashMap<u16, f32>,
     pub players: HashMap<u8, f32>,
+    forms: HashMap<u32, (u16, u16)>,
 }
 impl Radii {
     pub fn load(game: &Path, looks: &Table) -> anyhow::Result<Self> {
         let players =
             Table::from_encrypted_bytes(&std::fs::read(game.join("Data/UPC_DefaultLooks.tbl"))?)?;
         let mut result = Self::default();
+        let forms =
+            Table::from_encrypted_bytes(&std::fs::read(game.join("Data/Skill_Magic_6.tbl"))?)?;
+        for row in forms.rows {
+            let id = crate::combat::integer(&row, 0) as u32;
+            if id / 1000 == 472 {
+                result.forms.insert(
+                    id,
+                    (
+                        crate::combat::integer(&row, 4).try_into()?,
+                        crate::combat::integer(&row, 3).try_into()?,
+                    ),
+                );
+            }
+        }
         let mut cache = HashMap::new();
         for (rows, player) in [(&looks.rows, false), (&players.rows, true)] {
             for row in rows {
@@ -236,6 +251,15 @@ impl Radii {
             "original model radii loaded"
         );
         Ok(result)
+    }
+    pub fn player(&self, race: u8, form: Option<u32>) -> Option<f32> {
+        form.and_then(|id| self.forms.get(&id))
+            .and_then(|(model, size)| {
+                self.monsters
+                    .get(model)
+                    .map(|r| r * f32::from(*size) / 100.0)
+            })
+            .or_else(|| self.players.get(&race).copied())
     }
 }
 

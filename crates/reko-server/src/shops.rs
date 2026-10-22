@@ -87,10 +87,18 @@ pub(crate) fn load_population(db: &Connection, game: &Path) -> anyhow::Result<Ve
             prototype: s.prototype,
             appearance: s.appearance,
             name: s.name,
-            group: s.group,
+            group: if s.prototype == 27011 && s.position.zone == 21 {
+                255000
+            } else {
+                s.group
+            },
             nation: s.nation,
             level: s.level,
-            kind: s.kind,
+            kind: if s.prototype == 27011 && s.position.zone == 21 {
+                22
+            } else {
+                s.kind
+            },
             position: s.position,
             size: s.size,
             weapons: s.weapons,
@@ -265,7 +273,10 @@ fn trade(
     payload: &[u8],
 ) -> anyhow::Result<TradeResult> {
     anyhow::ensure!(
-        session.entered && session.skills.hp > 0 && merchant.nearby(session),
+        session.entered
+            && session.skills.hp > 0
+            && matches!(merchant.kind, 21 | 22)
+            && merchant.nearby(session),
         "merchant unavailable"
     );
     let kind = *payload
@@ -424,6 +435,15 @@ pub(crate) async fn handle(
                     request.extend(merchant.prototype.to_le_bytes());
                     request.extend(merchant.id.to_le_bytes());
                     crate::upgrading::handle(sock, peer, lobby, account, session, &request).await;
+                    return;
+                }
+                if merchant.kind == 162 && merchant.prototype == 603 {
+                    session.merchant = Some(id);
+                    session.anvil = None;
+                    session.npc_dialog = None;
+                    let mut reply = vec![0x5b, 4];
+                    reply.extend(id.to_le_bytes());
+                    super::send_response(sock, peer, &None, &reply, "CHAOTIC_GENERATOR_OPEN").await;
                     return;
                 }
                 if merchant.kind == 31 {

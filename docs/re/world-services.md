@@ -199,6 +199,52 @@ explicit review rather than silently replacing customized data.
 
 ## Travel and scripts
 
+### Chaotic Generator and Hemes
+
+The imported Moradon603/type162 Chaotic Generator opens native5B/4 with its
+instance ID;5B/5 exchanges one owned fragment389160000..389166000. Opening a
+nearby generator, living/entered state, exact packet length, supported item,
+inventory capacity and weight are validated. Payment and one original-table
+reward commit together. Missing inputs, a foreign/distant NPC, full inventory,
+invalid reward data or SQLite failure leave all items unchanged. A final fragment
+may free its own slot; inventory replacement uses the existing remove/create
+icon update before the native result/effect. Repeated requests each require a
+remaining fragment. Anvil/reverse-upgrade paths remain separate.
+
+The primary ITEM_EXCHANGE101 rows contain one weighted reward each; all rows
+for each of the seven fragments sum to10000. These complete per-fragment weights
+are sampled directly, preserving every imported item and count-as-weight. Counts
+are not quantities: success gives one item. The supplied1453 BifrostPieceProcess
+instead selects a row uniformly before an underfilled per-row weight array,
+which effectively flattens different row weights. The direct10000-weight draw
+corrects that inconsistency rather than claiming the custom C++ RNG is retail.
+Native open/result/object9 effect layouts follow NPCHandler::NpcEvent,
+User::SendAnvilRequest and UpgradeHandler::BifrostPieceProcess. Socket/SQLite
+tests cover every fragment pool, native frames, slot reuse, replay after the
+last fragment, distance, capacity and forced transaction failure.
+
+Peddler16085/type132 now uses a bounded1453-compatible menu in hemes.rs.
+The supplementary16085_Hamus.lua root menu references later labels2013/2014/
+2022/2015/40645/4130/4404/8656, all absent from original Quest_Menu_us.tbl.
+The replacement exposes the verified Valkyrie Armor/Helmet labels4286/4287,
+four bonus choices each, original English confirmation dialogs, Back and Close.
+One owned armor800180000 or helmet800170000 certificate is exchanged for the
+source variants508011441..444 or508013318..321. Existing Lua transaction,
+proximity/offered-choice/replay, weight/capacity and icon updates are retained.
+All eight output item/extension rows exist in the original client. The later
+Lua's timed30-day grants are not claimed: current inventory has no rental/expiry
+metadata. Costume equipment slots/bonus expiration and other later Peddler
+services remain separate; this repair implements certificate redemption.
+
+KC Hemes27011 references27011_KC.lua, which is absent from the supplied packages.
+The owner prefers existing Power-Up Store access over adding a KC economy.
+Its local service therefore opens the already supported Sundries255000 catalog,
+with existing coin prices and atomic shop transactions. No cash balance, unlimited
+item grant, new price list or external purchase flow is added. The NPC's imported
+appearance/location remain intact; only its runtime service kind/group is adapted.
+
+### Town and zone gates
+
 Town via menu and `/town` share source eligibility and persisted travel.
 Clickable nation gates use historical SMD warp data; Eslant walkthrough triggers
 combine source EVENT actions with terrain tiles. Test movement crossing a trigger

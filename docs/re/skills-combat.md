@@ -56,8 +56,11 @@ war-time map flag changes remain outside this bounded implementation.
 Active positive type4 buffs and stealth must be removed before transforming.
 The original MonsterFriendly1 behavior suppresses automatic proximity aggression
 while retaining retaliation against a transformed attacker; disguise never grants
-damage immunity. Player model radius/weapon timing still uses the existing combat
-model, so exact form-dependent retail reach/animation timing is not claimed.
+damage immunity. Basic R now uses the selected type6 model's skeleton radius
+scaled by its original size, replacing the human race radius while transformed.
+Target scaling, weapon reach, the owner multiplier/minimum and ordinary skill
+range rules remain intact. Expired/cancelled/PvP-refused forms use the human
+radius again. Form-dependent weapon/animation timing remains a separate limit.
 
 Sources: original item/skill/type6 tables; supplied1453 MagicInstance::SendTransformationList,
 CheckType6Prerequisites, ExecuteType6, Type6Cancel and User::StateChangeServerDirect.
@@ -182,7 +185,8 @@ names, key counts and hierarchy depth; invalid/unavailable radii are logged and
 retain the previous2m body fallback. No reference assets are modified or stored
 in Git. A0.15m tolerance covers the two positions' decimetre packet rounding.
 The server keeps its horizontal distance check with the bounded moving-melee
-forecast handling below; transformed-player model scales remain a limit. This change
+forecast handling below. Type6 player forms use their original model and size
+in place of the human race radius. This change
 applies equally to ordinary/admin basic attacks, not to skill-range formulas.
 Troll King appearance1701/scale240 has about6.41m reach with a1m dagger on race2,
 before rounding tolerance. Small targets still allow at least3.15m.

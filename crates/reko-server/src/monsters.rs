@@ -547,6 +547,106 @@ mod tests {
         );
     }
     #[test]
+    fn transformed_basic_melee_uses_form_radius_and_scale_without_extending_skills_or_expired_forms()
+     {
+        let Some((_lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let game = reko_common::game_dir();
+        let world = World::load(&game).unwrap();
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        let mut definition = crate::population::load(&db, &game).unwrap().remove(0);
+        definition.appearance = 1701;
+        definition.size = 100;
+        definition.hp = 25000;
+        definition.position = Position {
+            zone: 21,
+            x: 3250,
+            z: 4000,
+            y: 0,
+        };
+        let target_position = definition.position;
+        let target = world.summon(definition, &Default::default()).unwrap();
+        let normal = world.radii.player(s.character.race, None).unwrap();
+        let transformed = world.radii.player(s.character.race, Some(472350)).unwrap();
+        assert!((transformed - world.radii.monsters[&1701] * 2.4).abs() < 0.0001);
+        assert!(transformed > normal);
+        let target_radius = world.radii.monsters[&1701];
+        let human_reach = basic_reach(1.0, (normal + target_radius) / 2.0);
+        let form_reach = basic_reach(1.0, (transformed + target_radius) / 2.0);
+        let gap = (human_reach + form_reach) / 2.0;
+        s.position = Position {
+            x: target_position.x - (gap * 10.0).round() as u16,
+            ..target_position
+        };
+        let attack = |position| Attack {
+            position,
+            range: 1.0,
+            attack: 0,
+            percent: 100,
+            extra: 10000,
+            skill: false,
+            drain_percent: 0,
+            arrow: false,
+            penetrate: false,
+            magic: None,
+        };
+        assert!(
+            world
+                .hit_session_owned(target, attack(s.position), &s, true, || panic!(
+                    "Rejected human reach must not charge"
+                ))
+                .is_err()
+        );
+        s.skills.buffs.insert(
+            crate::transformation::CATEGORY,
+            crate::skills::Buff {
+                skill: 472350,
+                until: crate::skills::now_ms() + 60000,
+            },
+        );
+        assert_eq!(
+            world
+                .hit_session_owned(target, attack(s.position), &s, true, || Ok(()))
+                .unwrap()
+                .damage,
+            10000
+        );
+        assert!(
+            world
+                .hit_session_owned(target, attack(s.position), &s, false, || panic!(
+                    "Transformation must not extend spell reach"
+                ))
+                .is_err()
+        );
+        s.skills
+            .buffs
+            .get_mut(&crate::transformation::CATEGORY)
+            .unwrap()
+            .until = 0;
+        assert!(
+            world
+                .hit_session_owned(target, attack(s.position), &s, true, || panic!(
+                    "Expired form must not retain reach"
+                ))
+                .is_err()
+        );
+        s.skills
+            .buffs
+            .get_mut(&crate::transformation::CATEGORY)
+            .unwrap()
+            .until = crate::skills::now_ms() + 60000;
+        s.position.x = target_position.x - ((form_reach + 1.0) * 10.0).round() as u16;
+        assert!(
+            world
+                .hit_session_owned(target, attack(s.position), &s, true, || panic!(
+                    "Distant form attack must not charge"
+                ))
+                .is_err()
+        );
+    }
+    #[test]
     fn basic_reach_uses_original_joint_radii_and_spawn_scale() {
         let game = reko_common::game_dir();
         if !game.join("Data/NPC_Looks.tbl").exists() {
@@ -1246,7 +1346,7 @@ impl World {
         race: u8,
         pay: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<Hit, &'static str> {
-        self.hit_with_body(id, attack, owner, pay, Some(race), None)
+        self.hit_with_body(id, attack, owner, pay, Some((race, None)), None)
     }
     pub(crate) fn hit_session_owned(
         &self,
@@ -1261,7 +1361,11 @@ impl World {
             attack,
             Some(&s.character.name),
             pay,
-            if basic { Some(s.character.race) } else { None },
+            if basic {
+                Some((s.character.race, Some(crate::transformation::appearance(s))))
+            } else {
+                None
+            },
             Some(&s.movement),
         )
     }
@@ -1271,7 +1375,7 @@ impl World {
         attack: Attack,
         owner: Option<&str>,
         pay: impl FnOnce() -> Result<(), &'static str>,
-        race: Option<u8>,
+        race: Option<(u8, Option<u32>)>,
         motion: Option<&crate::movement::Validator>,
     ) -> Result<Hit, &'static str> {
         let Attack {
@@ -1301,8 +1405,8 @@ impl World {
         let dx = (f32::from(mob.position.x) - f32::from(position.x)) / 10.0;
         let dz = (f32::from(mob.position.z) - f32::from(position.z)) / 10.0;
         let body = race
-            .and_then(|race| {
-                let player = self.radii.players.get(&race)?;
+            .and_then(|(race, form)| {
+                let player = self.radii.player(race, form)?;
                 let target = self.radii.monsters.get(&mob.resource)?;
                 let scale = mob
                     .definition

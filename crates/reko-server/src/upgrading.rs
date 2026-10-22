@@ -315,6 +315,10 @@ pub(crate) async fn handle(
     s: &mut Session,
     p: &[u8],
 ) {
+    if p.starts_with(&[0x5b, 5]) {
+        crate::chaotic::handle(sock, peer, lobby, account, s, p).await;
+        return;
+    }
     if p.first() == Some(&0x33) {
         if p.len() != 5 || !s.entered || s.skills.hp == 0 {
             return;

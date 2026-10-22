@@ -30,6 +30,8 @@ try {
     } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination '.reko-local-client.json') -Encoding ASCII
     Write-Output "Local client prepared: $destination"
+    python (Join-Path $PSScriptRoot 'local_client_tables.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Local English transformation table preparation failed.' }
     Write-Output 'Start it with scripts/Start-LocalClient.cmd. Original source files were preserved.'
 }
 finally { Pop-Location }

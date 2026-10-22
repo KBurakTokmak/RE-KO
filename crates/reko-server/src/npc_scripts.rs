@@ -1284,7 +1284,13 @@ pub(crate) async fn handle(
             .ok_or_else(|| anyhow::anyhow!("game directory unavailable"))?
             .join("kn_2086_patch_private_server/lCAFILES/Quests")
             .join(&context.file);
-        let script = if let Some(script) = database_quest_script(&all, &context) {
+        let script = if let Some(script) = crate::hemes::script(&context.file) {
+            anyhow::ensure!(
+                merchant.prototype == 16085 && merchant.kind == 132 && s.position.zone == 21,
+                "Peddler service unavailable"
+            );
+            script
+        } else if let Some(script) = database_quest_script(&all, &context) {
             script
         } else {
             std::fs::read(path)?

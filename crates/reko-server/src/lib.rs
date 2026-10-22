@@ -15,6 +15,7 @@ mod archery;
 mod auth;
 mod bifrost;
 mod bosses;
+mod chaotic;
 mod characters;
 mod chat;
 mod clan_promotion;
@@ -27,6 +28,7 @@ mod durability;
 mod framing;
 mod gm_spawn;
 mod gm_teleport;
+mod hemes;
 mod hotkeys;
 mod inventory;
 #[cfg(test)]

@@ -23,6 +23,8 @@ WATCHDOG_CODE = bytes.fromhex("a1f4029e0081ecf40100005668c0d4010050")
 EVENT_ADDRESS = 0x9E02F4
 assert hashlib.sha256(EXE.read_bytes()).hexdigest() == EXPECTED_HASH, "Unknown client build"
 if GAME == LOCAL_GAME.resolve():
+    from local_client_tables import prepare
+    prepare()
     profile = json.loads((GAME / '.reko-local-client.json').read_text(encoding='utf-8-sig'))
     assert profile['profile'] == 'local-1453-inert-guard-v1', 'Unknown local client profile'
     assert profile['client_sha256'] == EXPECTED_HASH, 'Unexpected profile client build'
