@@ -78,6 +78,25 @@ combat from an empty database.
 
 ## Start and stop
 
+For the bounded Mage transport and Delos/Colony Zone/Ardream repair, export
+`SELECT * FROM MAGIC_TYPE8` from the supplied1453 reference backup as an array
+of JSON objects into local `logs/reference1453/MAGIC_TYPE8.json`. This input is
+not included in Git. Use the primary1453 export, not the legacy2086 CSV. The
+repair also reads original Zones.tbl/GTD assets, Open-KO historical maps and
+the supplied supplementary2004 maps; see [travel provenance](re/world-services.md#travel-and-scripts).
+
+```powershell
+python scripts/Repair-1453MageTravel.py       # Validate in a disposable copy
+# Stop the daemon before applying the reviewed plan.
+python scripts/Repair-1453MageTravel.py --apply
+```
+
+Paths can be selected with --db, --reference, --historical, --supplementary and
+--game-dir (or REKO_GAME_DIR). The script uses SQLite backup, checks all table
+hashes and permits changes only to world_reference_rules/world_town_starts.
+No character grants or startup data resets are performed. Mage transport needs
+the imported rules; Blink also needs supported original outdoor map bounds.
+
 Double-click `server_starter.bat` in the repository root to build and start
 the background server and its client-startup watcher. Double-click
 `server_stopper.bat` to stop this checkout's server/watcher and checkpoint

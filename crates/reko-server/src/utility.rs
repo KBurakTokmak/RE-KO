@@ -159,6 +159,17 @@ pub(crate) fn effective(
             }
         }
     }
+    if let Some(row) = state
+        .buffs
+        .get(&24)
+        .filter(|b| skills::now_ms() < b.until)
+        .and_then(|b| catalog.and_then(|c| c.effects.get(&(4, b.skill))))
+    {
+        for (value, column) in result.resistance.iter_mut().zip(19..25) {
+            *value = (u32::from(*value) * (100 - combat::integer(row, column).clamp(0, 100)) as u32
+                / 100) as u16;
+        }
+    }
     result
 }
 
@@ -194,7 +205,7 @@ pub(crate) async fn npc_strikes(
         if strike.zone != s.position.zone || s.skills.hp == 0 {
             continue;
         }
-        let result = (|| -> rusqlite::Result<(skills::State, u16)> {
+        let result = (|| -> rusqlite::Result<(skills::State, u16, Option<u8>)> {
             let db = lobby.db.lock().unwrap();
             let tx = db.unchecked_transaction()?;
             let mut next = skills::load(&tx, account, s.character.slot)?;
@@ -204,16 +215,36 @@ pub(crate) async fn npc_strikes(
             )
             .min(next.hp);
             next.hp -= amount;
+            let reflected = if amount > 0 {
+                next.buffs
+                    .get(&25)
+                    .filter(|b| now < b.until)
+                    .and_then(|b| lobby.skills.as_ref().and_then(|c| c.spells.get(&b.skill)))
+                    .and_then(|spell| {
+                        (5..=7)
+                            .contains(&(spell.skill_group % 10))
+                            .then_some((spell.skill_group % 10 - 4) as u8)
+                    })
+            } else {
+                None
+            };
+            if reflected.is_some() {
+                next.buffs.remove(&25);
+            }
             skills::save_in(&tx, account, s.character.slot, &next)?;
             tx.commit()?;
-            Ok((next, amount))
+            Ok((next, amount, reflected))
         })();
-        let Ok((next, amount)) = result else {
+        let Ok((next, amount, reflected)) = result else {
             tracing::error!(%peer,"NPC damage persistence failed");
             continue;
         };
         let old_mana = s.skills.mana;
         s.skills = next;
+        if let Some(element) = reflected {
+            let _ = world.reflect(strike.npc, s.position, amount, element, &s.character.name);
+            super::send_response(sock, peer, &None, &[0x31, 5, 25], "MAGE_ARMOR_CONSUMED").await;
+        }
         let mut attack = vec![
             0x08,
             1,
@@ -274,8 +305,9 @@ fn absorb_damage(state: &mut skills::State, amount: u16, catalog: Option<&skills
         return amount;
     };
     let percent = combat::integer(row, 25).clamp(0, 100) as u32;
-    let absorbed = u32::from(amount) * percent / 100;
-    let mana = absorbed * if percent == 15 { 4 } else { 1 };
+    let cost = if percent == 15 { 4 } else { 1 };
+    let absorbed = (u32::from(amount) * percent / 100).min(u32::from(state.mana) / cost);
+    let mana = absorbed * cost;
     state.mana = state.mana.saturating_sub(mana.min(65535) as u16);
     amount.saturating_sub(absorbed as u16)
 }
@@ -394,6 +426,9 @@ pub(crate) async fn handle(
         || cure.is_some()
         || category.is_some_and(|kind| {
             matches!(kind, 1 | 2 | 4 | 5 | 7 | 8 | 10 | 18 | 19 | 23 | 28 | 31)
+                || kind == 25
+                    && matches!(session.character.class % 100, 3 | 9 | 10)
+                    && (5..=7).contains(&(spell.skill_group % 10))
         });
     if !supported {
         return None;
@@ -518,5 +553,43 @@ fn recover(state: &mut skills::State, kind: i32, amount: u16) {
         1 => state.hp = state.hp.saturating_add(amount).min(state.max_hp),
         2 => state.mana = state.mana.saturating_add(amount).min(state.max_mana),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mana_shield_never_absorbs_more_than_the_available_mp_can_pay() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/Skill_Magic_4.tbl").exists() {
+            return;
+        }
+        let catalog = skills::Catalog::load(&game).unwrap();
+        for skill in [110815, 210815] {
+            for (mana, damage, remaining_mana) in [
+                (1000, 850, 400),
+                (603, 850, 3),
+                (12, 997, 0),
+                (3, 1000, 3),
+                (0, 1000, 0),
+            ] {
+                let mut state = skills::State {
+                    mana,
+                    ..Default::default()
+                };
+                state.buffs.insert(
+                    31,
+                    skills::Buff {
+                        skill,
+                        until: skills::now_ms() + 40000,
+                    },
+                );
+                assert_eq!(absorb_damage(&mut state, 1000, Some(&catalog)), damage);
+                assert_eq!(state.mana, remaining_mana);
+                state.buffs.get_mut(&31).unwrap().until = 0;
+                assert_eq!(absorb_damage(&mut state, 1000, Some(&catalog)), 1000);
+            }
+        }
     }
 }

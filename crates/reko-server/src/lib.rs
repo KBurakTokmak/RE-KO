@@ -31,6 +31,7 @@ mod lobby;
 mod loot;
 mod loot_generation;
 mod mage;
+mod mage_special;
 #[cfg(test)]
 mod mage_tests;
 mod magic;
@@ -357,6 +358,41 @@ async fn handle_game_payload_inner(
         return;
     }
     let opcode = payload[0];
+    if let Some(s) = world.as_ref().filter(|s| s.entered) {
+        let frozen = s
+            .skills
+            .buffs
+            .get(&22)
+            .is_some_and(|b| skills::now_ms() < b.until);
+        let blinded = s
+            .skills
+            .buffs
+            .get(&20)
+            .is_some_and(|b| skills::now_ms() < b.until);
+        if frozen && opcode == 6 {
+            let mut correction = vec![0x1e];
+            correction.extend(s.position.x.to_le_bytes());
+            correction.extend(s.position.z.to_le_bytes());
+            send_response(sock, peer, &None, &correction, "FROZEN_POSITION").await;
+            return;
+        }
+        if blinded
+            && opcode == 0x31
+            && payload.len() == 22
+            && payload[1] != 4
+            && ![s.player_id, u16::MAX].contains(&u16::from_le_bytes([payload[8], payload[9]]))
+        {
+            magic::refused(
+                sock,
+                peer,
+                s,
+                u32::from_le_bytes(payload[2..6].try_into().unwrap()),
+                "You cannot select an attack target while blinded.",
+            )
+            .await;
+            return;
+        }
+    }
     match opcode {
         0x16 => {
             if let Some(s) = world.as_ref().filter(|s| s.entered)
@@ -795,6 +831,7 @@ async fn handle_game_payload_inner(
             });
             let mut result = 0;
             if now >= session.next_attack
+                && !session.skills.buffs.get(&20).is_some_and(|b| now < b.until)
                 && (session.is_admin || !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10))
                 && let Some(monsters) = lobby.monsters.as_ref()
             {

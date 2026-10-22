@@ -284,6 +284,13 @@ impl Brain {
                 agent.next_roam = now.saturating_add(rule.stand);
                 agent.moving = false;
             }
+            if now < mob.stunned_until {
+                if agent.moving {
+                    events.push(movement_event(mob, 0.0, mob.position));
+                    agent.moving = false;
+                }
+                continue;
+            }
             let damage = mob.damage_by.values().map(|v| u64::from(*v)).sum();
             if damage > agent.damage_seen {
                 agent.returning = false;
@@ -752,6 +759,165 @@ mod tests {
             assert_eq!(mobs[&12000].position, here);
         }
     }
+    #[test]
+    fn lightning_stun_stops_npc_movement_and_attacks_then_expires_without_extending() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let db = Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        db.execute_batch(include_str!("npc_ai.sql")).unwrap();
+        db.execute(
+            "INSERT INTO world_monster_ai VALUES(100,3,100,100,1500,3,4,5,35,35,100,0,0,0,0,1,1500)",
+            [],
+        )
+        .unwrap();
+        let world = super::super::World::load(&game).unwrap();
+        world.load_population(&db, &game).unwrap();
+        let mut brain = Brain::default();
+        brain.load(&db).unwrap();
+        let now = skills::now_ms();
+        let home = world.inner.lock().unwrap().mobs[&12000].position;
+        brain.players.insert(
+            1,
+            Player {
+                name: "StunTest".into(),
+                position: Position {
+                    x: home.x + 100,
+                    ..home
+                },
+                hp: 100,
+                invisible: false,
+                is_admin: false,
+                stats: combat::Stats::default(),
+                at: now,
+            },
+        );
+        {
+            let mut inner = world.inner.lock().unwrap();
+            inner
+                .mobs
+                .get_mut(&12000)
+                .unwrap()
+                .definition
+                .as_mut()
+                .unwrap()
+                .resistance[2] = 0;
+            brain.tick(&mut inner.mobs, now);
+            brain.tick(&mut inner.mobs, now + 250);
+            assert!(brain.agents[&12000].moving);
+            inner.rng = 0;
+        }
+        let attack = || super::super::Attack {
+            position: home,
+            range: 50.0,
+            attack: 0,
+            percent: 0,
+            extra: 0,
+            skill: true,
+            drain_percent: 0,
+            arrow: false,
+            penetrate: false,
+            magic: Some(super::super::MagicDamage {
+                element: 3,
+                first: 20,
+                over_time: 0,
+                duration: 0,
+                charisma: 86,
+                bonus: 0,
+                raw_first: false,
+                raw_over_time: false,
+            }),
+        };
+        world
+            .hit_owned(12000, attack(), Some("StunTest"), || Ok(()))
+            .unwrap();
+        let until = world.inner.lock().unwrap().mobs[&12000].stunned_until;
+        assert!(until >= now + 2000);
+        world
+            .hit_owned(12000, attack(), Some("StunTest"), || Ok(()))
+            .unwrap();
+        let mut inner = world.inner.lock().unwrap();
+        assert_eq!(inner.mobs[&12000].stunned_until, until);
+        let position = inner.mobs[&12000].position;
+        brain.players.get_mut(&1).unwrap().at = until - 1;
+        let events = brain.tick(&mut inner.mobs, until - 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.packet[0] == 0x0b && e.packet[9..11] == [0, 0])
+        );
+        assert_eq!(inner.mobs[&12000].position, position);
+        assert!(brain.take(1).is_empty());
+        brain.players.get_mut(&1).unwrap().at = until + 250;
+        brain.tick(&mut inner.mobs, until + 250);
+        assert!(inner.mobs[&12000].position.x > position.x);
+    }
+
+    #[tokio::test]
+    async fn mage_armor_reflects_once_and_mana_shield_commits_with_incoming_damage() {
+        let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        lobby.skills = Some(crate::skills::Catalog::load(&reko_common::game_dir()).unwrap());
+        let world =
+            std::sync::Arc::new(super::super::World::load(&reko_common::game_dir()).unwrap());
+        s.character.class = 110;
+        s.progress.points[8] = 0;
+        s.position = Position {
+            zone: 21,
+            x: 3250,
+            z: 4000,
+            y: 0,
+        };
+        s.skills.set_limits(5000, 5000);
+        s.skills.hp = 5000;
+        s.skills.mana = 1000;
+        for (category, skill) in [(25, 110573), (31, 110815)] {
+            s.skills.buffs.insert(
+                category,
+                skills::Buff {
+                    skill,
+                    until: skills::now_ms() + 120000,
+                },
+            );
+        }
+        skills::save(&lobby.db.lock().unwrap(), "test", 0, &s.skills).unwrap();
+        world.ai.lock().unwrap().strikes.insert(
+            s.player_id,
+            VecDeque::from([Strike {
+                npc: 10000,
+                zone: 21,
+                amount: 1000,
+            }]),
+        );
+        lobby.monsters = Some(world.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        crate::utility::npc_strikes(&mut socket, peer, &lobby, "test", &mut s, skills::now_ms())
+            .await;
+        let persisted = skills::load(&lobby.db.lock().unwrap(), "test", 0).unwrap();
+        assert_eq!((persisted.hp, persisted.mana), (4150, 400));
+        assert!(!persisted.buffs.contains_key(&25));
+        assert_eq!(world.inner.lock().unwrap().mobs[&10000].hp, 24825);
+        world.ai.lock().unwrap().strikes.insert(
+            s.player_id,
+            VecDeque::from([Strike {
+                npc: 10000,
+                zone: 21,
+                amount: 1000,
+            }]),
+        );
+        crate::utility::npc_strikes(&mut socket, peer, &lobby, "test", &mut s, skills::now_ms())
+            .await;
+        assert_eq!((s.skills.hp, s.skills.mana), (3250, 0));
+        assert_eq!(world.inner.lock().unwrap().mobs[&10000].hp, 24825);
+    }
+
     #[tokio::test]
     async fn incoming_damage_packet_names_the_attacker_instead_of_encoding_a_delta() {
         let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {

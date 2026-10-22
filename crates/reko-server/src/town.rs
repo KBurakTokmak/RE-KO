@@ -19,8 +19,22 @@ fn destination(
     if session.position.zone / 10 == 5 || matches!(session.position.zone, 84 | 85) {
         return Err("Town teleport is unavailable in this event zone.");
     }
-    // TODO(re): Apply Kaul/freeze restrictions when those player states exist.
-    let row: Option<(u16,u16,u16,u16,u16,u16)> = lobby.db.lock().unwrap().query_row(
+    if session
+        .skills
+        .buffs
+        .get(&22)
+        .is_some_and(|b| skills::now_ms() < b.until)
+    {
+        return Err("You cannot teleport while frozen.");
+    }
+    start_position(&lobby.db.lock().unwrap(), session)
+}
+
+pub(crate) fn start_position(
+    db: &rusqlite::Connection,
+    session: &Session,
+) -> Result<movement::Position, &'static str> {
+    let row: Option<(u16,u16,u16,u16,u16,u16)> = db.query_row(
         "SELECT karus_x,karus_z,elmo_x,elmo_z,range_x,range_z FROM world_town_starts WHERE zone=?1",[session.position.zone],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))
     ).optional().map_err(|_| "Town destination could not be loaded.")?;

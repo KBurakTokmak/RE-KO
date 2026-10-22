@@ -475,6 +475,7 @@ mod tests {
             dots: Vec::new(),
             speed_percent: 100,
             slow_until: 0,
+            stunned_until: 0,
             modifiers: HashMap::new(),
             definition: None,
             damage_by: HashMap::new(),
@@ -654,6 +655,10 @@ mod tests {
     }
 }
 
+fn lightning_stun_chance(resistance: u16) -> u16 {
+    (50.0 - f32::from(resistance) / 2.0).clamp(0.0, 100.0) as u16
+}
+
 #[derive(Debug, Clone)]
 struct Mob {
     id: u16,
@@ -669,6 +674,7 @@ struct Mob {
     dots: Vec<Dot>,
     speed_percent: u16,
     slow_until: u64,
+    stunned_until: u64,
     modifiers: HashMap<u8, Modifier>,
     definition: Option<crate::population::Spawn>,
     damage_by: HashMap<String, u32>,
@@ -969,6 +975,7 @@ impl World {
                     dots: Vec::new(),
                     speed_percent: 100,
                     slow_until: 0,
+                    stunned_until: 0,
                     modifiers: HashMap::new(),
                     definition: None,
                     damage_by: HashMap::new(),
@@ -1044,6 +1051,7 @@ impl World {
             dots: Vec::new(),
             speed_percent: 100,
             slow_until: 0,
+            stunned_until: 0,
             modifiers: HashMap::new(),
             definition: Some(s),
             damage_by: HashMap::new(),
@@ -1087,6 +1095,7 @@ impl World {
                     dots: Vec::new(),
                     speed_percent: 100,
                     slow_until: 0,
+                    stunned_until: 0,
                     modifiers: HashMap::new(),
                     definition: Some(s),
                     damage_by: HashMap::new(),
@@ -1150,6 +1159,55 @@ impl World {
             mob.speed_percent = percent;
             mob.slow_until = skills::now_ms() + duration;
         }
+    }
+
+    pub(crate) fn reflect(
+        &self,
+        id: u16,
+        position: Position,
+        amount: u16,
+        element: u8,
+        owner: &str,
+    ) -> Result<Hit, &'static str> {
+        let resistance = {
+            let inner = self.inner.lock().unwrap();
+            let mob = inner
+                .mobs
+                .get(&id)
+                .ok_or("Reflection target unavailable.")?;
+            if mob.hp == 0 || mob.position.zone != position.zone {
+                return Err("Reflection target unavailable.");
+            }
+            mob.resistance(element)
+        };
+        let reflected = ((230 * u32::from(amount) / (u32::from(resistance) + 250)) / 100 * 25)
+            .min(32767) as u16;
+        self.hit_owned(
+            id,
+            Attack {
+                position,
+                range: 100.0,
+                attack: 0,
+                percent: 0,
+                extra: 0,
+                skill: true,
+                drain_percent: 0,
+                arrow: false,
+                penetrate: false,
+                magic: Some(MagicDamage {
+                    element: 0,
+                    first: reflected,
+                    over_time: 0,
+                    duration: 0,
+                    charisma: 0,
+                    bonus: 0,
+                    raw_over_time: false,
+                    raw_first: true,
+                }),
+            },
+            Some(owner),
+            || Ok(()),
+        )
     }
 
     pub fn health(&self, id: u16, zone: u8) -> Option<Vec<u8>> {
@@ -1328,6 +1386,14 @@ impl World {
             false
         };
         mob.hp -= damage;
+        if damage > 0
+            && mob.hp > 0
+            && magic.is_some_and(|m| m.element == 3 && !m.raw_first)
+            && skills::now_ms() >= mob.stunned_until
+            && (random >> 48) % 100 < u64::from(lightning_stun_chance(mob.resistance(3)))
+        {
+            mob.stunned_until = skills::now_ms() + 2000;
+        }
         if let Some(owner) = owner {
             *mob.damage_by.entry(owner.to_owned()).or_default() += damage;
         }
@@ -1482,6 +1548,7 @@ impl World {
             mob.dots.clear();
             mob.speed_percent = 100;
             mob.slow_until = 0;
+            mob.stunned_until = 0;
             mob.next_regen = now + 10000;
             let mut out = vec![0x0a, 2];
             out.extend(mob.id.to_le_bytes());
@@ -1525,6 +1592,7 @@ impl World {
                 mob.respawn = 0;
                 mob.speed_percent = 100;
                 mob.slow_until = 0;
+                mob.stunned_until = 0;
                 mob.dots.clear();
                 mob.next_regen = now + 10000;
                 let mut out = vec![0x0a, 2];

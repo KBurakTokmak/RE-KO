@@ -29,6 +29,8 @@ renderer/client and an in-process game host have not been implemented.
   change, and up to **40 concurrent accepted quests** with separate kill counters.
 - Combat and many Rogue, Warrior, Mage and Priest skills, including timed buffs,
   healing, drains, multi-arrow attacks, area spells and supported NPC debuffs.
+- Mage party transport/Blink, NPC lightning stun/reactive armor, and bounded
+  player resource/control effects in combat zones; full PvP remains incomplete.
 - HP/MP potions, natural regeneration, weapon durability and recovery updates.
 - Eight-member parties with invitations, chat, shared XP/quest kills and loot routing.
 - Persistent nation-specific clans: creation, invitations, member roles and clan chat.

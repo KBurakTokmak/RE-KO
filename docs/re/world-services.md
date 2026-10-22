@@ -196,6 +196,34 @@ combine source EVENT actions with terrain tiles. Test movement crossing a trigge
 as well as stationary endpoints. Death returns to the source town and clears
 relevant effects; spell resurrection and death XP penalties are separate work.
 
+`Repair-1453MageTravel.py` repairs bounded missing travel rules offline. Legacy
+Colony Zone destination201 is normalized to original1453 zone71 while keeping
+the historical name, fee and coordinates. Missing Delos30 groups301..305 come
+from Open-KO `siege_0722.smd`, including nation-specific old Moradon exits and
+the Abyss32 entrance. Colony Zone's711/712 return groups reuse historical
+`freezone_1217.smd`, with IDs adapted from2011/2012 groups. Newer Moradon return
+coordinates are not copied into the old client layout.
+
+Ardream72 exists in original Zones.tbl as FreeZone_a and has nation gate objects,
+but the supplied1453 backup omits its START_POSITION, population and warp routes.
+Incoming routes/fees use supplementary `karus2004.smd`, `elmo2004.smd` and
+`moradon_0826.smd` records whose Ardream destinations match the original nation
+gate geometry. Supplementary `freezone_a.smd` supplies exit groups721/722; its
+Moradon coordinates are replaced by the compatible historical Delos exits.
+The explicit town fallback uses the incoming nation destinations(843,140) and
+(190,897), with provenance distinguishing this adaptation from primary1453 data.
+Original GTD extents validate outdoor endpoints. This enables travel, not a
+claim of a complete Ardream NPC/monster roster; missing spawns are not invented.
+
+Gate menus show both combat zones; selection requires level35+, positive NP,
+and a maximum of59 for Ardream. Administrative characters bypass those entry
+limits, matching supplied1453 CharacterMovementHandler::CanChangeZone. Fees and
+position changes commit atomically after proximity/nation/offered-ID checks;
+replayed selections cannot charge again. Full PvP, war closures and siege
+controllers remain separate. The repair preserves all unrelated rule records,
+character tables, loot, items and quest data and refuses occupied destination
+slots instead of silently overwriting custom routes. It is idempotent.
+
 NPC script execution validates identity, proximity, life, nation, class, helper,
 quest state and server-offered choices. The restricted Lua bridge exposes only
 supported queries/actions, with4MiB and200000-instruction limits. Unsupported

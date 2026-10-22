@@ -111,6 +111,14 @@ pub(crate) async fn handle(
     {
         return None;
     }
+    if lobby
+        .skills
+        .as_ref()
+        .and_then(|c| c.effects.get(&(3, spell.id)))
+        .is_some_and(|row| combat::integer(row, 2) == 16)
+    {
+        return None;
+    }
     Some(execute(sock, peer, lobby, account, session, spell, payload).await)
 }
 

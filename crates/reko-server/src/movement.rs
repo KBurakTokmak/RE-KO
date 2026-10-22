@@ -68,6 +68,7 @@ pub(crate) fn save(
 
 #[derive(Clone)]
 pub(crate) struct Validator {
+    heading: Option<(f32, f32)>,
     forecast: Option<Forecast>,
     last: Instant,
     distance_budget: f32,
@@ -79,6 +80,7 @@ pub(crate) struct Validator {
 impl Default for Validator {
     fn default() -> Self {
         Self {
+            heading: None,
             forecast: None,
             last: Instant::now(),
             distance_budget: 8.25,
@@ -90,6 +92,16 @@ impl Default for Validator {
     }
 }
 impl Validator {
+    pub(crate) fn forward(&self, position: Position, meters: u16) -> Option<Position> {
+        let (dx, dz) = self.heading?;
+        let x = f32::from(position.x) + dx * f32::from(meters) * 10.0;
+        let z = f32::from(position.z) + dz * f32::from(meters) * 10.0;
+        (x >= 0.0 && z >= 0.0 && x <= 65535.0 && z <= 65535.0).then_some(Position {
+            x: x.round() as u16,
+            z: z.round() as u16,
+            ..position
+        })
+    }
     pub(crate) fn current_position(&self, reported: Position, now: Instant) -> Position {
         self.forecast
             .as_ref()
@@ -175,6 +187,12 @@ impl Validator {
             if (nx - x).hypot(nz - z) > prediction + total - at + lead + 0.3 {
                 return None;
             }
+        }
+        let dx = f32::from(next.x) - f32::from(previous.x);
+        let dz = f32::from(next.z) - f32::from(previous.z);
+        let length = dx.hypot(dz);
+        if speed != 0 && length >= 1.0 {
+            self.heading = Some((dx / length, dz / length));
         }
         self.forecast = if payload[9] & 1 != 0 && speed != 0 {
             let anchor = self

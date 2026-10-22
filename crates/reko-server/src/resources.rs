@@ -21,12 +21,27 @@ pub(crate) fn commit(
     let tx = db
         .unchecked_transaction()
         .map_err(|_| "Unable to start skill transaction.")?;
+    let paid = commit_in(&tx, account, slot, spell, quantity, apply)?;
+    tx.commit()
+        .map_err(|_| "Unable to commit skill resources.")?;
+    Ok(paid)
+}
+
+/// The caller commits payment and all affected players/positions together.
+pub(crate) fn commit_in(
+    tx: &rusqlite::Transaction<'_>,
+    account: &str,
+    slot: u8,
+    spell: &skills::Spell,
+    quantity: u16,
+    apply: impl FnOnce(&mut skills::State) -> Result<(), &'static str>,
+) -> Result<Paid, &'static str> {
     let mut state =
-        skills::load(&tx, account, slot).map_err(|_| "Unable to load skill resources.")?;
+        skills::load(tx, account, slot).map_err(|_| "Unable to load skill resources.")?;
     state.spend(spell, skills::now_ms())?;
     let consumed = spell.consumed_item();
     if consumed != spell.use_item {
-        let bag = starter::inventory(&tx, account, slot)
+        let bag = starter::inventory(tx, account, slot)
             .map_err(|_| "Unable to check required scroll.")?;
         if !bag
             .iter()
@@ -35,15 +50,13 @@ pub(crate) fn commit(
             return Err("You do not have the required scroll.");
         }
     }
-    let changed = inventory::consume(&tx, account, slot, consumed, quantity)
+    let changed = inventory::consume(tx, account, slot, consumed, quantity)
         .map_err(|_| "You do not have the required consumable items.")?;
     apply(&mut state)?;
     if spell.cast_ms > 0 {
         state.buffs.remove(&23);
     }
-    skills::save_in(&tx, account, slot, &state).map_err(|_| "Unable to save skill resources.")?;
-    tx.commit()
-        .map_err(|_| "Unable to commit skill resources.")?;
+    skills::save_in(tx, account, slot, &state).map_err(|_| "Unable to save skill resources.")?;
     Ok(Paid { state, changed })
 }
 

@@ -328,6 +328,12 @@ impl State {
     }
 
     pub fn speed(&self, catalog: Option<&Catalog>, now: u64) -> u16 {
+        if let Some(buff) = self.buffs.get(&22).filter(|b| now < b.until)
+            && let Some(row) = catalog.and_then(|c| c.effects.get(&(4, buff.skill)))
+        {
+            return (45u32 * crate::combat::integer(row, 5).clamp(0, 100) as u32).div_ceil(100)
+                as u16;
+        }
         if let Some(buff) = self.buffs.get(&28).filter(|b| now < b.until)
             && let Some(row) = catalog.and_then(|c| c.effects.get(&(4, buff.skill)))
         {

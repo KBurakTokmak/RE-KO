@@ -11,13 +11,88 @@ are `magic.rs`, `archery.rs`, `mage.rs`, `priest.rs`, `utility.rs` and `skills.r
 | --- | --- | --- |
 | Rogue | Melee damage, percentage drains, Sprint/Swift/Light Feet, stealth, multi-arrow volleys, poison/elemental arrows, self healing/armor/AP/resistance/cures | Other-player buffs, full detection/PvP effects, Illusion/Concentration and displacement effects |
 | Warrior | Physical skills, Blooding/periodic recovery, HP Booster, stat/AC/speed buffs, MP absorption, supported defense/master passives | Party movement/sacrifice, provoke/binding, full stun/AI effects |
-| Mage | Direct/periodic elemental damage, ground AoE, staff attacks, resistance buffs, Absolute Power, Instantly Magic | Summoning/teleports, reflection, several player-only drains/control effects |
+| Mage | Elemental/AoE/staff damage, NPC lightning stun, self/friendly buffs, transport, bounded player drains/control and NPC reactive armor | Full player damage, exact retail freeze/slow chances, bind points and terrain collision |
 | Priest | Instant/periodic self healing, HP/AC/stat/resistance buffs, cures, physical/offensive skills, NPC AC/max-HP curses | Other-player/party heals, resurrection and several control/counter-curse effects |
 
-Group skill effects currently support the caster where implemented. Party
-membership and rewards now exist, but complete group-target skill delivery
-remains separate. Unsupported effects fail without charging resources. See the
+Most group buffs/heals currently support the caster where implemented; Mage
+Escape also transfers eligible party members. Party membership and rewards exist,
+but complete group-target buff/heal delivery remains separate. Unsupported effects
+fail without charging resources. See the
 [backlog](../design/1453-feature-backlog.md) for individual dependencies.
+
+### Mage integration and original1453 constraints
+
+The original1453 main table has332 Mage records across classes103/109/110 and
+203/209/210:6 base,68 advanced and92 master records per nation. Costs,
+requirements, timing, types, range and available type1/3/4 effect parameters match
+between nation counterparts. Owner reports concern execution, not visibility.
+Existing direct/periodic elemental, ground AoE and staff paths remain intact.
+The socket regression now verifies level80 Igzination110575/210575, including
+single payment and rejection of repeated projectile completion.
+
+| Skills | Current execution and limits |
+| --- | --- |
+| Summon Friend, Gate, Escape, Blink | `mage_special.rs` reads imported supplied1453 MAGIC_TYPE8 rules. Same-zone living party summon, self town return, eligible same-zone party town return and20m forward Blink save resources/positions in one transaction. |
+| Fire/Ice/Lightning Armor75 | Category25 self buffs consume the original stone and last the original duration. The first damaging incoming NPC physical hit consumes the armor and reflects elemental damage through ordinary NPC health/death/loot credit. |
+| Vampiric Fire80 | Original type3/direct16 drains enemy player MP and restores half the configured drain to caster HP, capped by maximum HP. Supplied1453 computes the HP return from configured damage even if the target has less MP. NPC targets are refused before payment. |
+| Freezing Distance80 | Category22 player freeze uses the original duration, rejects movement and teleports, and expires normally. The original row has speed1. The supplied implementation has no recovered HP-dependent success roll despite the original description; that exact retail probability remains unresolved. |
+| Light Shock62 | Category20 ground-area targeting disruption reaches eligible enemy players, blocks R/selected-target attacks and expires normally; self/ground casts and cancellation remain available. |
+| Minor Resist Master20 | Category24 ground-area enemy-player debuff applies the original six20percent resistance reductions after flat bonuses, independent of buff iteration order. |
+| Lightning damage | Successful direct lightning NPC hits can stun for two seconds. Chance is truncate(50 - lightningResistance/2), bounded0..100percent. Active stun is not extended by another hit; AI stops its visible destination and pauses movement/attacks until expiry. |
+| Mana Shield | Existing incoming-NPC absorption now caps absorbed HP by available MP divided by MP cost;15percent absorption costs4MP per absorbed HP. Zero MP cannot provide free absorption. |
+| Friendly buffs | Original Mage resistance and Frozen Armor/Shell/Barrier categories8/2 support a living same-nation player within original range as well as the existing self path. Full party-wide buff distribution remains separate. |
+
+Player resource/control effects operate only on eligible living enemy players
+in Colony Zone71, Ardream72 or arena48. Party members and protected admin targets
+are excluded. Freezing Distance, Light Shock and Minor Resist retain their
+original descriptions' explicit exclusion of monsters. These bounded effects do
+not enable ordinary player weapon/spell damage, full PvP or war controllers.
+Other sessions reload committed state before handling subsequent requests;
+resource/attribute notifications use the current session rather than queued
+older HP/MP snapshots. Invalid targets, duplicate categories, cooldowns, missing
+reagents and persistence failures roll back payment and all target changes.
+
+Transport uses supplied1453 WarpType1/12/20 and original range fields rather
+than later hardcoded replacements. Blink derives heading from accepted movement,
+never client destination coordinates, and starts at the forecast's elapsed
+current position. Missing heading fails before payment, matching the supplied
+source's old-position orientation limitation. Imported original GTD extents
+reject out-of-map endpoints; unsupported/missing terrain headers fail closed.
+World collision/pathfinding and indoor Blink bounds remain incomplete. Gate and
+Escape use the zone's configured start fallback: persistent selected bind points
+are not implemented. Escape above zone31 and transport in Forgotten Temple55
+are refused following the supplied source; frozen members are excluded.
+
+Primary evidence: original `Skill_Magic_Main_us.tbl`, type1/3/4 tables, Zones.tbl
+and GTD headers; supplied1453 `GameServer/MagicInstance.cpp` type3/direct16,
+type8 and ReflectDamage, `GameServer/MagicProcess.cpp` categories20/22/24/25,
+and `AIServer/Npc.cpp::RecvAttackReq`/FAINTING_TIME. Open-KO1298/9
+`src/Server/AIServer/Npc.cpp` corroborates the same two-second resistance formula
+specifically for lightning; the primary customization applies it more broadly.
+Only lightning is added here; Fire damage is not turned into a stun.
+
+Reflection intentionally uses the computed expression
+`((230 * damage / (resistance + 250)) / 100) * 25`, retaining integer rounding.
+The supplied source computes that value but erroneously applies full `damage`;
+it also derives the element from a group modulo inconsistent with original
+Mage groups. The local implementation uses branches5/6/7 for fire/ice/lightning
+and the computed reflection value. This is a documented source correction,
+not proof of untouched retail reflection balance. Reflection currently uses
+actual incoming HP damage; player and monster-spell reflection remain separate.
+
+Absolute Power, Instantly Magic, Bright Dew regeneration and
+Absoluteness/Matchless damage reduction already work and are retained. Ice
+category6 NPC slow continues to use original duration/speed; full retail slow
+success/resistance fidelity is unresolved. Internal branch9 `whipping` remains
+unsupported and is not treated as a missing visible skill-tree button.
+
+The extended socket/SQLite regressions cover both nations' level80 fire,
+three armor casts/stone use, Blink direction/boundary validation, player-only
+resource/control targets and expiry. Other behavioral regressions cover party
+transport persistence/refusal, NPC stun/expiry, one-shot reflection and Mana
+Shield resource bounds. These do not establish complete live QA of all332
+records. Generated per-record reports/raw inputs remain local under ignored
+`logs/`, outside Git.
 
 Costs, cooldowns, reagents and persistent effects commit atomically. Cast and
 projectile stages cannot charge twice; bounded paid tickets limit impacts and

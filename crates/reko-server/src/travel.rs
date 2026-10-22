@@ -152,6 +152,20 @@ fn select(
         .into_iter()
         .find(|w| w.id == id)
         .ok_or_else(|| anyhow::anyhow!("destination not offered"))?;
+    if !s.is_admin && matches!(w.zone, 71 | 72) {
+        anyhow::ensure!(
+            s.progress.level >= 35,
+            "You must be level 35 or higher to enter this zone."
+        );
+        anyhow::ensure!(
+            w.zone != 72 || s.progress.level <= 59,
+            "Ardream is restricted to levels 35-59."
+        );
+        anyhow::ensure!(
+            s.rewards.loyalty > 0,
+            "You need National Points to enter this zone."
+        );
+    }
     let mut seed = crate::skills::now_ms()
         .wrapping_mul(6364136223846793005)
         .wrapping_add(u64::from(s.player_id));
@@ -440,6 +454,98 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn combat_zone_gate_lists_validate_levels_nation_payment_and_replays() {
+        for nation in [1, 2] {
+            let lobby = crate::social::tests::lobby();
+            let mut s = crate::social::tests::player(&lobby, "GateFixture", nation, 80);
+            s.position = movement::Position {
+                zone: nation,
+                x: 1000,
+                z: 1000,
+                y: 0,
+            };
+            s.rewards.loyalty = 300;
+            let object = 4000u16;
+            let group = if nation == 1 { 11u16 } else { 21 };
+            let cz = group * 10 + 7;
+            let ardream = group * 10 + 6;
+            {
+                let db = lobby.db.lock().unwrap();
+                for zone in [71, 72] {
+                    db.execute(
+                        "INSERT INTO world_town_starts VALUES(?1,843,140,190,897,0,0,'fixture')",
+                        [zone],
+                    )
+                    .unwrap();
+                }
+                let gate = serde_json::json!({"Type":5,"Belong":nation,"ControlNpcID":group,"PosX":100,"PosZ":100,"PosY":0});
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES('K_OBJECTPOS',?1,?2)",
+                    params![
+                        u32::from(nation) * 100000 + u32::from(object),
+                        gate.to_string()
+                    ],
+                )
+                .unwrap();
+                for (id, zone) in [(cz, 71), (ardream, 72)] {
+                    let warp = serde_json::json!({"id":id,"name":if zone==71 {"Colony Zone"}else{"Ardream"},"text":"Source gate fixture","coins":3000,"zone":zone,"x":843,"z":140,"y":0,"radius":0,"nation":nation});
+                    db.execute(
+                        "INSERT INTO world_reference_rules VALUES('HISTORICAL_WARP',?1,?2)",
+                        params![u32::from(nation) * 100000 + u32::from(id), warp.to_string()],
+                    )
+                    .unwrap();
+                }
+            }
+            let mut request = vec![0x33];
+            request.extend(object.to_le_bytes());
+            request.extend([0, 0]);
+            let (gate, packet) = open(&lobby, &s, &request).unwrap();
+            assert_eq!(&packet[..4], &[0x4b, 1, 2, 0]);
+            s.gate = Some(gate);
+            let mut choose = vec![0x4b];
+            choose.extend(ardream.to_le_bytes());
+            assert!(select(&lobby, "GateFixture", &mut s, &choose).is_err());
+            assert_eq!(
+                crate::starter::coins(&lobby.db.lock().unwrap(), "GateFixture", 0).unwrap(),
+                1000000
+            );
+            s.progress.level = 59;
+            s.rewards.loyalty = 0;
+            assert!(select(&lobby, "GateFixture", &mut s, &choose).is_err());
+            s.rewards.loyalty = 300;
+            s.progress.level = 34;
+            assert!(select(&lobby, "GateFixture", &mut s, &choose).is_err());
+            s.progress.level = 35;
+            let (packet, fee) = select(&lobby, "GateFixture", &mut s, &choose).unwrap();
+            assert_eq!(fee, 3000);
+            assert_eq!(&packet[..4], &[0x27, 3, 72, 0]);
+            assert_eq!(
+                crate::starter::coins(&lobby.db.lock().unwrap(), "GateFixture", 0).unwrap(),
+                997000
+            );
+            assert_eq!(
+                movement::load(&lobby.db.lock().unwrap(), "GateFixture", 0)
+                    .unwrap()
+                    .zone,
+                72
+            );
+            assert!(select(&lobby, "GateFixture", &mut s, &choose).is_err());
+            s.zone_loading = false;
+            s.entered = true;
+            s.position = movement::Position {
+                zone: nation,
+                x: 1000,
+                z: 1000,
+                y: 0,
+            };
+            s.progress.level = 80;
+            s.rewards.loyalty = 0;
+            s.is_admin = true;
+            s.gate = Some(open(&lobby, &s, &request).unwrap().0);
+            assert!(select(&lobby, "GateFixture", &mut s, &choose).is_ok());
+        }
+    }
     use tokio::{io::AsyncReadExt, net::TcpListener};
     #[test]
     fn suppression_portals_offer_only_the_own_nation_home_and_preserve_the_quest() {

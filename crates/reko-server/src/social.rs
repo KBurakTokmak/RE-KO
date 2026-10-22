@@ -19,6 +19,8 @@ pub(crate) struct Hub {
     pub clan_invites: HashMap<u16, (u16, u16, u64)>,
     queues: HashMap<u16, Vec<Vec<u8>>>,
     pub refresh: HashSet<u16>,
+    pub skill_refresh: HashSet<u16>,
+    skill_notice: HashSet<u16>,
     pub transfers: HashMap<u16, Position>,
     pub loot_rotation: HashMap<u16, usize>,
     visible: HashMap<u16, HashSet<u16>>,
@@ -26,7 +28,7 @@ pub(crate) struct Hub {
 pub(crate) fn near(a: Position, b: Position, meters: u16) -> bool {
     let dx = i64::from(a.x) - i64::from(b.x);
     let dz = i64::from(a.z) - i64::from(b.z);
-    a.zone == b.zone && dx * dx + dz * dz <= i64::from(meters * 10).pow(2)
+    a.zone == b.zone && dx * dx + dz * dz <= (i64::from(meters) * 10).pow(2)
 }
 pub(crate) fn string(p: &mut Vec<u8>, value: &str) {
     p.extend((value.len() as u16).to_le_bytes());
@@ -71,6 +73,8 @@ impl Hub {
             .unwrap_or_else(|| vec![id])
     }
     pub fn disconnect(&mut self, id: u16) {
+        self.skill_refresh.remove(&id);
+        self.skill_notice.remove(&id);
         self.transfers.remove(&id);
         party::leave(self, id, id);
         self.party_invites
@@ -259,6 +263,35 @@ impl Hub {
 }
 pub(crate) fn synchronize(lobby: &Lobby, account: &str, s: &mut Session) {
     if s.entered {
+        if lobby
+            .social
+            .lock()
+            .unwrap()
+            .skill_refresh
+            .remove(&s.player_id)
+        {
+            match crate::skills::load(&lobby.db.lock().unwrap(), account, s.character.slot) {
+                Ok(state) => {
+                    s.skills = state;
+                    crate::utility::refresh(s, lobby.skills.as_ref(), lobby.combat.as_ref());
+                    lobby
+                        .social
+                        .lock()
+                        .unwrap()
+                        .skill_notice
+                        .insert(s.player_id);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "remote skill state refresh failed");
+                    lobby
+                        .social
+                        .lock()
+                        .unwrap()
+                        .skill_refresh
+                        .insert(s.player_id);
+                }
+            }
+        }
         if lobby.social.lock().unwrap().refresh.remove(&s.player_id) {
             let db = lobby.db.lock().unwrap();
             match (
@@ -306,6 +339,21 @@ pub(crate) async fn flush(sock: &mut TcpStream, peer: SocketAddr, lobby: &Lobby,
         .unwrap_or_default();
     for p in packets {
         crate::send_response(sock, peer, &None, &p, "SOCIAL_UPDATE").await;
+    }
+    let changed = lobby
+        .social
+        .lock()
+        .unwrap()
+        .skill_notice
+        .remove(&s.player_id);
+    if changed {
+        for packet in [
+            s.skills.hp_packet(0),
+            s.skills.mana_packet(),
+            crate::inventory::attributes(&s.combat, 2),
+        ] {
+            crate::send_response(sock, peer, &None, &packet, "REMOTE_SKILL_STATE").await;
+        }
     }
 }
 pub(crate) struct Guard {

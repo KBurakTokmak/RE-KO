@@ -59,7 +59,13 @@ pub(crate) fn remove_stealth(
     Ok(true)
 }
 
-async fn refused(sock: &mut TcpStream, peer: SocketAddr, session: &Session, id: u32, reason: &str) {
+pub(crate) async fn refused(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    session: &Session,
+    id: u32,
+    reason: &str,
+) {
     let mut failure = skills::effect(id, session.player_id);
     failure[1] = 4;
     failure[10..].fill(0);
@@ -141,6 +147,17 @@ pub(crate) async fn handle(
         return true;
     }
     if payload[1] == 6 && target == caster {
+        if spell.types[0] == 4 && matches!(spell.moral, 7 | 10 | 12) {
+            refused(
+                sock,
+                peer,
+                session,
+                id,
+                "Hostile effects require a cure or must expire; they cannot be cancelled.",
+            )
+            .await;
+            return true;
+        }
         let category = session
             .skills
             .buffs
@@ -275,6 +292,14 @@ pub(crate) async fn handle(
     }
     // TODO(re): Validate animation completion against original class/weapon clips.
     session.pending_cast = None;
+    if let Some(result) =
+        crate::mage_special::handle(sock, peer, lobby, account, session, spell, payload).await
+    {
+        if let Err(reason) = result {
+            refused(sock, peer, session, id, reason).await;
+        }
+        return true;
+    }
     if let Some(result) =
         crate::priest::handle(sock, peer, lobby, account, session, spell, payload).await
     {
