@@ -309,7 +309,9 @@ impl Catalog {
         };
         let race = integer(base, 13);
         anyhow::ensure!(
-            race == 0 || race == i32::from(character.race),
+            race == 0
+                || race == i32::from(character.race)
+                || (matches!(integer(base, 12), 105 | 107) && matches!(race, 20 | 30)),
             "equipment race requirement"
         );
         let required = integer(base, 14);

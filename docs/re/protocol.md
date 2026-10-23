@@ -59,6 +59,11 @@ Ordinary item entry: item:u32,durability:i16,count:i16,flag:u8,rental:u16,
 nested count:u32, optional nested metadata, remaining time:u32. Auxiliary slots
 omit the remaining-time field. Current code emits zero nested metadata.
 Anchors006A0CE5/006A0E49/006A1230 cover skills/equipment/inventory.
+The auxiliary records are costume helmet then armour (native slots1/4), with
+zero flags/rental/nested metadata for permanent equipment. Ordinary equipment
+records remain fourteen entries. Other-player07/1 appends costume armour then
+helmet as two(item:u32,durability:u16,flag:u8) records after the eight visible
+ordinary pieces, then zone:u8 (native006A443D..006A44B4).
 
 ## Inventory, resources and objects
 
@@ -66,6 +71,13 @@ Shop21 replies acknowledge the shop's own icon transfers. Normal moves use1F;
 do not also send3D deltas for those same moves. Parallel updates can orphan
 icons until another NPC rebuilds the inventory. Open-KO UITransactionDlg and
 native006B12B0/004E97A0 corroborate this ownership distinction.
+Costume moves use the same8-byte1F request: direction7 bag-to-costume or8
+costume-to-bag, item:u32, source:u8,destination:u8. Costume positions are1 for
+helmet and4 for armour, not compact0/1 storage indices. Success owns the native
+icon recovery through the ordinary1F attribute acknowledgement; subsequent54/17/18
+updates refresh weight/vitals without duplicate3D inventory deltas. Native004C3C60 has no valid costume3F encoder (only ordinary equipment/bag
+districts); unequip into inventory before deleting. Malformed direct deletion
+requests fail safely through the existing acknowledgement.
 Warehouse45 transfer acknowledgements and anvil5B results likewise own their
 window's inventory icons. Do not follow them with3D for the same slots: the
 warehouse temporarily owns those icons and the upgrade result already consumes

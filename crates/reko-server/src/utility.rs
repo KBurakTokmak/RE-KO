@@ -43,6 +43,7 @@ pub(crate) fn effective(
             result = stats;
         }
     }
+    crate::costumes::apply(&mut result, &session.costumes);
     if session.character.class % 100 == 8
         && u32::from(state.hp) * 100 <= u32::from(state.max_hp) * 30
     {

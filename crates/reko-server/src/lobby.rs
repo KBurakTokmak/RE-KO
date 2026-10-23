@@ -34,6 +34,7 @@ impl Lobby {
         bootstrap: super::world_entry::Bootstrap,
     ) -> rusqlite::Result<Self> {
         super::characters::initialize(&db)?;
+        super::costumes::initialize(&db)?;
         super::auth::initialize(&db)?;
         super::hotkeys::initialize(&db)?;
         super::admin::initialize(&db)?;

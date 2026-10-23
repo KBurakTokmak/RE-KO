@@ -15,6 +15,9 @@ bounded coverage and missing systems; a handler's existence is not full fidelity
 - Never commit original game files, binaries, assets, decrypted/decompiled
   dumps, reference packages, save databases, secrets, captures or build outputs.
 - Never modify the original client installation or reference checkouts.
+- Keep existing approved local client remedies. Before any new client file or
+  process-memory change, explain the need and affected files/areas to the owner
+  and wait for explicit approval. Prefer server-side fixes where feasible.
 - Original 1453 client tables/native behavior and owner requirements take
   priority over supplied 1453 customizations, Open-KO 1298/9 and 2086 references.
   Consult the matching primary and Open-KO subsystem sources when available.

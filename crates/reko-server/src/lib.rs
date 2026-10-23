@@ -23,6 +23,7 @@ mod clans;
 mod combat;
 #[cfg(test)]
 mod combat_zone_tests;
+mod costumes;
 pub mod crypto;
 mod durability;
 mod framing;
@@ -627,12 +628,15 @@ async fn handle_game_payload_inner(
                 let items = {
                     let db = lobby.db.lock().unwrap();
                     starter::equipment(&db, account, session.character.slot).and_then(|equipment| {
-                        starter::coins(&db, account, session.character.slot)
-                            .map(|coins| (equipment, coins))
+                        starter::coins(&db, account, session.character.slot).and_then(|coins| {
+                            costumes::load(&db, account, session.character.slot)
+                                .map(|costumes| (equipment, coins, costumes))
+                        })
                     })
                 };
                 match items {
-                    Ok((equipment, coins)) => {
+                    Ok((equipment, coins, costumes)) => {
+                        session.costumes = costumes;
                         session.equipment = equipment;
                         match starter::inventory(
                             &lobby.db.lock().unwrap(),
@@ -664,7 +668,6 @@ async fn handle_game_payload_inner(
                         tracing::info!(%peer,attack=stats.attack,defence=stats.defence,hp=stats.hp,mp=stats.mp,hit_rate=stats.hit_rate,evasion=stats.evasion,"combat attributes calculated");
                         session.combat = stats;
                         session.base_combat = stats;
-                        session.skills.set_limits(stats.hp, stats.mp);
                         utility::refresh(session, lobby.skills.as_ref(), lobby.combat.as_ref());
                         session
                             .skills
@@ -1261,7 +1264,20 @@ async fn handle_game_payload_inner(
         }
         0x1F => {
             let response = inventory::handle(lobby, account.as_deref(), world.as_mut(), payload);
+            let costume_changed =
+                response.get(1) == Some(&1) && payload.get(1).is_some_and(|d| matches!(d, 7 | 8));
             send_response(sock, peer, &None, &response, "ITEM_MOVE").await;
+            if costume_changed && let Some(s) = world.as_ref() {
+                let mut weight = vec![0x54];
+                weight.extend(s.combat.weight.to_le_bytes());
+                for packet in [
+                    weight,
+                    s.skills.hp_packet_from(0xffff),
+                    s.skills.mana_packet(),
+                ] {
+                    send_response(sock, peer, &None, &packet, "COSTUME_ATTRIBUTES").await;
+                }
+            }
         }
         0x3F => {
             for response in inventory::remove(lobby, account.as_deref(), world.as_mut(), payload) {

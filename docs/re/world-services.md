@@ -232,9 +232,47 @@ One owned armor800180000 or helmet800170000 certificate is exchanged for the
 source variants508011441..444 or508013318..321. Existing Lua transaction,
 proximity/offered-choice/replay, weight/capacity and icon updates are retained.
 All eight output item/extension rows exist in the original client. The later
-Lua's timed30-day grants are not claimed: current inventory has no rental/expiry
-metadata. Costume equipment slots/bonus expiration and other later Peddler
-services remain separate; this repair implements certificate redemption.
+Lua's timed30-day grants are deliberately not used: the owner requires permanent
+costumes. The eight redeemed Valkyrie variants now equip in the native auxiliary
+helmet/armour slots, persist per character in character_costumes and reload on
+login. Ordinary equipment remains separate. Owned single items can swap with a
+matching costume or return to inventory; unequip into the bag before deleting.
+Bag changes, costume changes and clamped vitals commit together before success;
+failed ownership/slot/eligibility checks or SQLite errors leave them unchanged.
+
+| Choice | Armour508011441..444 | Helmet508013318..321 |
+| --- | --- | --- |
+| HP | +200 | +100 |
+| Defence | +30 | +20 |
+| Monster EXP | +4% | +2% |
+| Monster Noah | +6% | +3% |
+
+One choice applies per piece; the two pieces stack additively. Only equipped
+costumes contribute. HP/defence enter effective attributes before percentage
+buffs/passives; equipping does not heal and removing HP equipment clamps current
+HP. Costume durability does not wear through ordinary armour/weapon combat.
+EXP applies to positive monster credit after damage/party/level sharing; quest
+bonus rewards and NP remain unchanged. Noah applies once to monster coin pickup,
+per recipient after party splitting, with existing ownership and wallet caps.
+Bank transfers, sales and quest coins do not acquire this bonus.
+
+Evidence: original English Quest_Talk4903..4910 provides the exact bonus values,
+and ItemOrg/Item_Ext13/15 supplies the eight IDs and attachment105/107. Native
+004BE6FF..004BE89D emits1F directions7/8;004C1540 accepts slots1/4 and original
+004C0727 accepts universal costume race20. Native006A0F43..006A1042 loads the two
+auxiliary login records. Other-player appearance006A443D..006A44B4 reads upper/
+hair costume records after ordinary equipment, followed by zone. Open-KO1298
+ordinary inventory has no matching costume lifecycle; supplied1453 ItemHandler
+corroborates directions/slots and User::ApplySetItemBonuses corroborates additive
+HP/AC/XP/coin handling. Its later extra costume/bag slots are not imported.
+
+Future owner-controlled change: timed costumes are deferred. Keep existing items
+permanent unless the owner explicitly requests conversion. A timed implementation
+must define activation versus acquisition time, add per-instance expiry metadata
+that survives inventory/bank moves, verify native timer fields, expire bonuses/
+appearance atomically online and on login, and migrate existing permanent items
+under an explicit policy. No hidden30-day timer or inactive timed-mode switch is
+present. Other later Peddler services remain outside this bounded implementation.
 
 KC Hemes27011 references27011_KC.lua, which is absent from the supplied packages.
 The owner prefers existing Power-Up Store access over adding a KC economy.

@@ -136,6 +136,7 @@ impl Hub {
                 && let Some(prior) = &prior
             {
                 let appearance = prior.s.equipment != s.equipment
+                    || prior.s.costumes != s.costumes
                     || prior.s.clan != s.clan
                     || prior.s.character.class != s.character.class
                     || prior.s.sitting != s.sitting
@@ -237,6 +238,12 @@ impl Hub {
             p.extend(item.durability.to_le_bytes());
             p.push(0);
         }
+        for item in [s.costumes[1], s.costumes[0]] {
+            p.extend(item.id.to_le_bytes());
+            p.extend(item.durability.to_le_bytes());
+            p.push(0);
+        }
+        p.push(s.position.zone);
         p
     }
     pub fn chat(&mut self, id: u16, channel: u8, text: &[u8]) -> bool {

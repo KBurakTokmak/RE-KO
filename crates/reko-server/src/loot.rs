@@ -385,6 +385,10 @@ fn pickup(
                     continue;
                 }
                 let amount = u32::from(count) * u32::from(player.s.progress.level) / total_levels;
+                let amount = crate::costumes::gain(
+                    amount,
+                    crate::costumes::bonuses(&player.s.costumes).coins,
+                );
                 let before = starter::coins(&tx, &player.account, player.s.character.slot)?;
                 let after = before
                     .checked_add(amount)
@@ -399,7 +403,7 @@ fn pickup(
                 );
                 let mut response = vec![0x26, 1, 255];
                 response.extend(GOLD.to_le_bytes());
-                response.extend((amount as u16).to_le_bytes());
+                response.extend((amount.min(u32::from(u16::MAX)) as u16).to_le_bytes());
                 response.extend(after.to_le_bytes());
                 updates.push((id, after, response));
             }
@@ -433,10 +437,15 @@ fn pickup(
     let mut changed = Vec::new();
     let mut bag = starter::inventory(&tx, account, session.character.slot)?;
     let mut position = 255u8;
-    let mut total = count;
+    let total;
     if item == GOLD {
+        let amount = crate::costumes::gain(
+            u32::from(count),
+            crate::costumes::bonuses(&session.costumes).coins,
+        );
+        total = amount.min(u32::from(u16::MAX)) as u16;
         coins = coins
-            .checked_add(u32::from(count))
+            .checked_add(amount)
             .filter(|v| *v <= 2100000000)
             .ok_or_else(|| anyhow::anyhow!("coin limit"))?;
         anyhow::ensure!(
@@ -1069,6 +1078,50 @@ mod tests {
         assert!(pickup_routed(&book, &lobby, "LootMate", &mut b, peer, next, 389014000).is_err());
     }
 
+    #[test]
+    fn permanent_costume_noah_bonus_is_pickup_only_and_never_replayed() {
+        let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        s.costumes = [
+            starter::Item {
+                id: 508013321,
+                durability: 3000,
+                count: 1,
+            },
+            starter::Item {
+                id: 508011444,
+                durability: 3000,
+                count: 1,
+            },
+        ];
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO world_monster_loot VALUES(100,1000,0)", [])
+            .unwrap();
+        let book = Book::load(&lobby.db.lock().unwrap(), lobby.combat.as_ref().unwrap()).unwrap();
+        let notification = book
+            .create(100, 12000, s.position, &s.character.name)
+            .unwrap();
+        let id = u32::from_le_bytes(notification[3..7].try_into().unwrap());
+        let base = book.inner.lock().unwrap().bundles[&id].items[0].1;
+        let expected = u32::from(base) * 109 / 100;
+        let peer = "127.0.0.1:1".parse().unwrap();
+        let (reply, _) = pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).unwrap();
+        assert_eq!(s.coins, 1000000 + expected);
+        assert_eq!(
+            u16::from_le_bytes(reply[7..9].try_into().unwrap()) as u32,
+            expected
+        );
+        assert_eq!(
+            starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            s.coins
+        );
+        assert!(pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).is_err());
+        assert_eq!(s.coins, 1000000 + expected);
+    }
     #[test]
     fn independent_drop_rolls_atomic_pickup_ownership_and_replay() {
         let Some((lobby, mut s)) = crate::world_service_tests::setup() else {

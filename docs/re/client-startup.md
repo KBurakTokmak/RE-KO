@@ -1,5 +1,30 @@
 # Original-client startup
 
+## Compatibility with unchanged clients
+
+The owner prefers the original client for all players and server-side fixes
+where possible. The isolated profile is a local workaround, not a prerequisite
+for the server protocol or evidence that every original client needs these fixes.
+Existing local remedies are approved to remain. Before a new client file or
+process-memory change, explain why it is needed and which files/areas it affects,
+then wait for explicit owner approval.
+
+| Local workaround | Server-only equivalent |
+| --- | --- |
+| Inventory tooltip cache | No equivalent through the recovered protocol. The invalidation/layout loop runs inside the client even without a server update; server stats must not be falsified to avoid drawing it. |
+| XTrap child replacement and watchdog shutdown | No established server-only equivalent. The reproduced termination originates in local startup/watchdog code; no verified game-server message replaces these local steps. Compatibility may differ between machines. |
+| English transformation list names | The native list reads local Skill_Magic_6 column2. Its recovered open packet sends a list skill ID, not replacement strings. A separate server-authored selection interface would be a different workflow, not a repair of the existing list. |
+| Final-position MOVE before R | The server already validates movement forecasts and original model reach. An omitted final coordinate cannot be uniquely reconstructed from the attack's target and surface distance. A wider range exemption is not an equivalent correction. Further server-only compensation needs evidence and bounded validation. |
+| `/autoloot` slash routing | Ordinary chat `autoloot`, `autoloot on` and `autoloot off` already reaches the same server handler without this hook. The unchanged client's unknown-slash-command branch prevents the slash spelling from reaching the server. |
+
+Gameplay, inventory transactions, costume equipment/bonuses, reverse upgrades,
+monster drops and transformation rules remain server-side. The protected
+KnightOnline.exe is not patched on disk by the supported profile. Tooltip,
+autoloot routing and final-position synchronization are temporary process-memory
+hooks; English names and helper executables affect only the isolated copy.
+Do not disable working local remedies and claim stock-client equivalence without
+testing their replacements. The original sibling installation remains read-only.
+
 The repeated idle/combat exit was traced to explicit self-termination, not an
 unhandled game exception. A debugger caught TerminateProcess(self,0) at uptime
 about356seconds, return address0078D93B. Watchdog0078D8C0 waits on event009E02F4

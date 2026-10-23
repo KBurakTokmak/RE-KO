@@ -240,6 +240,12 @@ pub(crate) fn handle(
     ) else {
         return vec![0x1f, 0];
     };
+    if payload
+        .get(1)
+        .is_some_and(|direction| matches!(direction, 7 | 8))
+    {
+        return crate::costumes::handle(lobby, account, session, payload);
+    }
     let result = move_items(
         &mut lobby.db.lock().unwrap(),
         account,
@@ -253,7 +259,6 @@ pub(crate) fn handle(
             session.inventory = bag;
             session.combat = stats;
             session.base_combat = stats;
-            session.skills.set_limits(stats.hp, stats.mp);
             crate::utility::refresh(session, lobby.skills.as_ref(), lobby.combat.as_ref());
             session
                 .skills

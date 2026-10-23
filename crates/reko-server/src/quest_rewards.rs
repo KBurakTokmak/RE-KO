@@ -133,6 +133,7 @@ fn apply_monster(
             .parse()?)
     };
     let (xp, np) = amounts(credit, s.progress.level, value("iExp")?, value("iLoyalty")?);
+    let xp = crate::costumes::gain(xp, crate::costumes::bonuses(&s.costumes).experience);
     if xp == 0 && np == 0 {
         return Ok(None);
     }
@@ -468,6 +469,50 @@ mod tests {
             progress::load(&db, "test", s.character.slot).unwrap(),
             next.progress
         );
+    }
+    #[test]
+    fn costume_experience_stacks_for_monsters_and_leaves_quest_rewards_unmodified() {
+        let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        s.progress.level = 60;
+        s.costumes = [
+            crate::starter::Item {
+                id: 508013320,
+                durability: 3000,
+                count: 1,
+            },
+            crate::starter::Item {
+                id: 508011443,
+                durability: 3000,
+                count: 1,
+            },
+        ];
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO world_reference_rules VALUES('MONSTER_REWARD',100,?1)",
+                [r#"{"iExp":"10000","iLoyalty":"7"}"#],
+            )
+            .unwrap();
+        let credit = crate::monsters::ExperienceCredit {
+            party: None,
+            prototype: 100,
+            level: 60,
+            position: s.position,
+            damage: 10,
+            total_damage: 10,
+        };
+        let next = apply_monster(&lobby, "test", &s, &credit).unwrap().unwrap();
+        assert_eq!(next.rewards.experience, 10600);
+        assert_eq!(next.rewards.loyalty, 307);
+        let db = lobby.db.lock().unwrap();
+        assert_eq!(load(&db, "test", 0).unwrap(), next.rewards);
+        let mut quest = State::new(&db, "test", &next).unwrap();
+        quest.gain(900001000, 10000).unwrap();
+        assert_eq!(quest.totals.experience, 20600);
     }
     #[test]
     fn thresholds_level_rewards_cap_and_reload() {

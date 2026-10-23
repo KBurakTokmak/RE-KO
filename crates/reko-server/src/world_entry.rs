@@ -65,6 +65,7 @@ pub(crate) struct Session {
     pub position: crate::movement::Position,
     pub movement: crate::movement::Validator,
     pub equipment: [crate::starter::Item; 14],
+    pub costumes: [crate::starter::Item; 2],
     pub inventory: [crate::starter::Item; 28],
     pub coins: u32,
     pub skills: crate::skills::State,
@@ -108,6 +109,7 @@ impl Session {
             position: crate::movement::Position::default(),
             movement: crate::movement::Validator::default(),
             equipment: [crate::starter::Item::default(); 14],
+            costumes: [crate::starter::Item::default(); 2],
             inventory: [crate::starter::Item::default(); 28],
             coins: 0,
             skills: crate::skills::State::default(),
@@ -206,7 +208,12 @@ impl Session {
             put_u16(&mut packet, item.count);
             packet.extend_from_slice(&[0; 11]);
         }
-        packet.extend_from_slice(&[0; 2 * 15]);
+        for item in self.costumes {
+            put_u32(&mut packet, item.id);
+            put_u16(&mut packet, item.durability);
+            put_u16(&mut packet, item.count);
+            packet.extend_from_slice(&[0; 7]);
+        }
         for item in self.inventory {
             put_u32(&mut packet, item.id);
             put_u16(&mut packet, item.durability);
@@ -317,6 +324,7 @@ mod tests {
             position: crate::movement::Position::default(),
             movement: crate::movement::Validator::default(),
             equipment: [crate::starter::Item::default(); 14],
+            costumes: [crate::starter::Item::default(); 2],
             inventory: [crate::starter::Item::default(); 28],
             coins: 0,
             skills: crate::skills::State::default(),
