@@ -228,6 +228,10 @@ fn repair(
         .item(id)
         .ok_or_else(|| anyhow::anyhow!("unknown repair item"))?;
     let extension = extension.ok_or_else(|| anyhow::anyhow!("unknown repair extension"))?;
+    anyhow::ensure!(
+        combat::integer(row, 10) != 255,
+        "consumable charges cannot be repaired"
+    );
     let maximum = u16::try_from(combat::integer(row, 19) + combat::integer(extension, 12))?;
     anyhow::ensure!(
         maximum > 1 && item.durability <= maximum,

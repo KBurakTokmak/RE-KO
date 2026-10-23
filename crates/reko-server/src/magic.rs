@@ -120,15 +120,17 @@ pub(crate) async fn handle(
     } else if session.skills.hp == 0 {
         Some("You cannot use skills while dead.")
     } else if spell.skill_group == 0
-        && !lobby.combat.as_ref().is_some_and(|items| {
-            items.item(spell.use_item).is_some_and(|(row, extension)| {
-                extension.is_some()
-                    && combat::integer(row, 10) == 97
-                    && combat::integer(row, 24) as u32 == spell.id
-            })
-        })
+        && !lobby
+            .combat
+            .as_ref()
+            .is_some_and(|items| items.usable_item_skill(spell, session.progress.level))
     {
-        Some("This item does not provide a usable recovery skill.")
+        Some("This item does not provide the requested usable skill.")
+    } else if spell.skill_group == 0
+        && target != caster
+        && !(target == u16::MAX && spell.moral == 4 && spell.types == [4, 0])
+    {
+        Some("This consumable must target your own character.")
     } else if !crate::quests::completed(
         &lobby.db.lock().unwrap(),
         account,

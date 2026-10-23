@@ -88,6 +88,10 @@ covers that sequence, complete nonstackable transfers and partial stacks.
 Native3D/006AA7A0: entry count:u16, then21-byte entries containing district:u8,
 slot:u8,item:u32,quantity:u32,new:u8,durability:u16,two trailingu32 fields.
 Keep the trailers even though older source omits them. Weight54 carriesu16.
+For kind255 charged consumables, quantity remains the actual stack count while
+durability carries remaining uses. A30-use pack updates count1/durability29 on
+its first use; count0 is sent only on exhaustion. Do not serialize remaining uses
+as stack quantity or remove the whole pack after one skill.
 For quest exchanges reusing consumed-item slots, send a zero-count entry for
 the old ID before the new item entry. Native004C2816's different-ID branch
 replaces the item record without constructing its icon; the next merchant

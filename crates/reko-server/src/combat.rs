@@ -290,6 +290,23 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
+    pub fn usable_item_skill(&self, spell: &crate::skills::Spell, level: u8) -> bool {
+        self.item(spell.use_item).is_some_and(|(base, ext)| {
+            let kind = integer(base, 10);
+            ext.is_some()
+                && matches!(kind, 97 | 255)
+                && integer(base, 24) as u32 == spell.id
+                && (kind != 255 || {
+                    let (minimum, maximum) =
+                        self.level_bounds.get(&spell.use_item).copied().unwrap_or((
+                            integer(base, 26).max(0) as u8,
+                            integer(base, 27).max(0) as u8,
+                        ));
+                    (minimum..=maximum).contains(&level)
+                })
+        })
+    }
+
     pub fn load_level_bounds(&mut self, db: &rusqlite::Connection) -> anyhow::Result<()> {
         let mut q = db.prepare(
             "SELECT rule_id,data FROM world_reference_rules WHERE table_name='ITEM_LEVEL'",

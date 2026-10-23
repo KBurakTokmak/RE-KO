@@ -198,6 +198,51 @@ pub(crate) fn count_packet(changed: &[(usize, starter::Item)]) -> Vec<u8> {
     packet
 }
 
+pub(crate) fn consume_charges(
+    db: &Connection,
+    account: &str,
+    slot: u8,
+    id: u32,
+    quantity: u16,
+) -> rusqlite::Result<Vec<(usize, starter::Item)>> {
+    if id == 0 || quantity == 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let bag = starter::inventory(db, account, slot)?;
+    let matching: Vec<_> = bag
+        .into_iter()
+        .enumerate()
+        .filter(|(_, i)| i.id == id)
+        .collect();
+    if matching.iter().any(|(_, i)| i.count != 1)
+        || matching
+            .iter()
+            .map(|(_, i)| u32::from(i.durability))
+            .sum::<u32>()
+            < u32::from(quantity)
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut remaining = quantity;
+    let mut changed = Vec::new();
+    for (index, mut item) in matching.into_iter().filter(|(_, i)| i.durability > 0) {
+        let taken = remaining.min(item.durability);
+        item.durability -= taken;
+        remaining -= taken;
+        if item.durability == 0 {
+            item.count = 0;
+            db.execute("DELETE FROM character_inventory WHERE account=?1 AND slot=?2 AND inventory_slot=?3", params![account,slot,index])?;
+        } else {
+            db.execute("UPDATE character_inventory SET durability=?4 WHERE account=?1 AND slot=?2 AND inventory_slot=?3",params![account,slot,index,item.durability])?;
+        }
+        changed.push((index, item));
+        if remaining == 0 {
+            break;
+        }
+    }
+    Ok(changed)
+}
+
 pub(crate) fn reward_packet(
     before: &[starter::Item; 28],
     after: &[starter::Item; 28],

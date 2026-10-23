@@ -200,7 +200,7 @@ impl Radii {
             Table::from_encrypted_bytes(&std::fs::read(game.join("Data/Skill_Magic_6.tbl"))?)?;
         for row in forms.rows {
             let id = crate::combat::integer(&row, 0) as u32;
-            if id / 1000 == 472 {
+            if id / 1000 == 472 || crate::transformation::npc_form(id) {
                 result.forms.insert(
                     id,
                     (

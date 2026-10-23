@@ -34,6 +34,8 @@ mod hotkeys;
 mod inventory;
 #[cfg(test)]
 mod inventory_service_tests;
+#[cfg(test)]
+mod item_scroll_tests;
 mod lobby;
 mod loot;
 mod loot_generation;

@@ -80,8 +80,8 @@ impl Spell {
     pub fn learned_by(&self, class: u16, level: u8, points: &[u8; 9]) -> bool {
         if self.skill_group == 0 {
             return self.use_item != 0
-                && self.moral == 1
-                && self.types == [3, 0]
+                && (self.moral == 1 || self.types == [4, 0] && matches!(self.moral, 2 | 4))
+                && matches!(self.types, [3, 0] | [4, 0])
                 && u16::from(level) >= self.required_points;
         }
         SpeedSkill {

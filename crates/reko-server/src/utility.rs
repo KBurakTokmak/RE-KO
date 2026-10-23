@@ -427,6 +427,7 @@ pub(crate) async fn handle(
         || cure.is_some()
         || category.is_some_and(|kind| {
             matches!(kind, 1 | 2 | 4 | 5 | 7 | 8 | 10 | 18 | 19 | 23 | 28 | 31)
+                || kind == 6 && spell.skill_group == 0
                 || kind == 25
                     && matches!(session.character.class % 100, 3 | 9 | 10)
                     && (5..=7).contains(&(spell.skill_group % 10))
@@ -434,7 +435,19 @@ pub(crate) async fn handle(
     if !supported {
         return None;
     }
-    if target != session.player_id && !(target == u16::MAX && spell.moral == 6) {
+    let form = crate::transformation::appearance(session);
+    if spell.skill_group == 0
+        && spell.types == [4, 0]
+        && form != 1
+        && !crate::transformation::npc_form(form)
+    {
+        return Some(Err(
+            "Buff scrolls cannot be used in a monster transformation.",
+        ));
+    }
+    if target != session.player_id
+        && !(target == u16::MAX && (spell.moral == 6 || spell.skill_group == 0 && spell.moral == 4))
+    {
         return Some(Err(
             "Friendly effects on other players are not implemented yet.",
         ));

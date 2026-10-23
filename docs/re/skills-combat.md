@@ -39,7 +39,7 @@ The primary fallback in MagicInstance::CheckType6Prerequisites/CheckSkillPrerequ
 allows a single Transformation Scroll instead of requiring a Transformation Gem;
 selection atomically consumes one scroll and persists the timed disguise. Failed
 payment/state saves roll back inventory. Original combat/stat modifiers are all
-zero; no new combat bonuses are introduced. Totems and other scroll families
+zero; no new combat bonuses are introduced. Totems and siege transformations
 remain separate, unsupported paths.
 
 Local persisted category96 stores the selected skill and expiry, not a type4 buff.
@@ -53,7 +53,7 @@ The current restricted-zone set is31/48/51..69/71..75 (Bifrost, arena, war and
 combat zones); home/Eslant remain usable as the primary source permits. Full
 war-time map flag changes remain outside this bounded implementation.
 
-Active positive type4 buffs and stealth must be removed before transforming.
+For monster forms, active positive type4 buffs and stealth must be removed before transforming.
 The original MonsterFriendly1 behavior suppresses automatic proximity aggression
 while retaining retaliation against a transformed attacker; disguise never grants
 damage immunity. Basic R now uses the selected type6 model's skeleton radius
@@ -68,6 +68,75 @@ Open-KO GameDef::__TABLE_UPC_SKILL_TYPE_6 corroborates client fields with an exp
 warning about later column naming. Socket/SQLite tests exercise all46 forms in both
 nations, single scroll payment, GM visibility, class/buff/zone guards, rollback,
 replay, cancellation, relog and expiry. AI regression checks disguise versus retaliation.
+
+Direct NPC scrolls500505..500512 now use the same paid/persisted category96
+lifecycle without requiring a monster selection list or substituting381001000.
+Patrick, Menicia, Cougar and Hera each have separate El Morad/Karus items; exactly
+one use of the matching item is consumed. Original ItemOrg24 must bind that item to the
+requested skill, with a supported extension and item level bounds. The original
+type6 model/duration/class/UserSkillUse/Nation fields (columns4/5/21/22/28) match
+the eight primary MAGIC_TYPE6 rows: one hour, class1111, use mode3, nation2 or1,
+MonsterFriendly1 and zero combat modifiers. No new runtime import is required.
+The optional primary-data audit uses the local MAGIC_TYPE6_NPC.json export.
+
+Primary ExecuteType6 exempts NPC disguises from monster-form PvP-zone and active
+buff restrictions. NPC forms therefore retain allowed existing HP/AC/speed buffs,
+can receive new buff scrolls and survive travel into combat zones. They still
+require a living, available self caster, the correct nation and no active second
+transformation. Monster forms retain their existing zone/buff restrictions;
+cash-shop type4 buffs are refused while in a monster form. Disguises do not add
+combat stats or damage immunity. NPC model radii use the same original skeleton/
+scale lookup as monster forms. Wrong item/nation/target, replay and failed SQLite
+commits leave inventory and transformation state unchanged.
+
+### Power-Up Store self-buff consumables
+
+The generic group0 item path previously accepted only moral1/type3 recovery and
+kind97 items, rejecting original PUS kind255/type4 scrolls. Supported self-buff
+effects now use the existing utility transaction: HP (flat/percentage), AC,
+attack, stats and supported resistance/utility categories, plus item speed
+category6. Ordinary Rogue speed skills keep their existing route. ItemOrg24 must
+equal the requested skill, extension data must exist and the exact item is paid
+through the same SQLite transaction as its buff/vitals/cooldown. Item level bounds
+use imported ITEM_LEVEL where available, otherwise native ItemOrg26/27 for PUS
+consumables; ordinary equipment level rules are unchanged.
+
+HP500/1000/1500/2000, AC150/300/350/400 and speed150percent use their original
+Skill_Magic_4 values and duration. Most are1800seconds; original long-duration
+variants such as910140000/910142000 are10800seconds. Do not infer duration from
+item stack count, the L/S label or later server customizations. HP60percent500054
+has party moral4 in the original table; the supported path affects the caster
+(including its native untargeted request), not every party member. Other-player
+PUS targets are refused. Unimplemented categories/services still fail without
+charging; this is not blanket support for every Power-Up Store product.
+
+Kind255 scroll packs store remaining uses in durability, independently of the
+inventory stack count. A purchased30-use item has count1/durability30; skill use
+keeps count1 and changes durability to29, then28, deleting the item only at zero.
+The same applies to20-use NPC transformations and other original pack sizes.
+Payment selects this rule from the consumed item's original kind, inside the
+existing resource transaction. Kind97 potions, ordinary Transformation Scrolls,
+arrows and other stack-based consumables retain count-based payment. Invalid
+multi-item stacks of kind255 are refused rather than silently destroying packs.
+The native3D update carries both actual stack count and remaining-use durability;
+no client change is needed. Repairs cannot replenish consumable charges.
+
+Evidence: primary ItemHandler::RobItem explicitly decrements sDuration for
+kind255, and Open-KO UIInventory::Render displays iDurability for consumable-class
+items. The previous skill tests used synthetic stacks instead of native packs;
+fixtures now distinguish the two. A socket/SQLite regression purchases a real
+30-use pack from Sundries, verifies every charge through exhaustion, packet
+counters, duplicate/save-failure rollback and repair refusal; swift30 and NPC20
+packs are also checked. Existing storage/move paths preserve durability.
+
+Different categories coexist; an active category rejects a second scroll without
+consumption. Native cancel and expiry remove bonuses, clamp HP and persist the
+new limits. Socket/SQLite tests cover both nations/all four classes, exact item
+payment, wrong targets/items, level/death guards, duplicate requests, rollback,
+combined buffs, NPC coexistence, reload, cancellation and normal expiry.
+Source evidence: original1453 tables, primary User::CanUseItem and
+MagicInstance::CheckType4Prerequisites/CheckType6Prerequisites/ExecuteType6.
+Open-KO1298 ExecuteType6 is empty and is not used to invent NPC behavior.
 
 ### Mage integration and original1453 constraints
 

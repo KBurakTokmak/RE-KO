@@ -166,7 +166,15 @@ fn transport(
     let tx = db
         .unchecked_transaction()
         .map_err(|_| "Unable to start teleport transaction.")?;
-    let paid = resources::commit_in(&tx, account, s.character.slot, spell, 1, |_| Ok(()))?;
+    let paid = resources::commit_in(
+        &tx,
+        account,
+        s.character.slot,
+        spell,
+        1,
+        lobby.combat.as_ref(),
+        |_| Ok(()),
+    )?;
     for (player, destination) in &recipients {
         crate::movement::save(&tx, &player.account, player.s.character.slot, *destination)
             .map_err(|_| "Unable to save teleport destination.")?;
@@ -259,7 +267,15 @@ fn player_effect(
     let tx = db
         .unchecked_transaction()
         .map_err(|_| "Unable to start player skill transaction.")?;
-    let mut paid = resources::commit_in(&tx, account, s.character.slot, spell, 1, |_| Ok(()))?;
+    let mut paid = resources::commit_in(
+        &tx,
+        account,
+        s.character.slot,
+        spell,
+        1,
+        lobby.combat.as_ref(),
+        |_| Ok(()),
+    )?;
     let mut changes = Vec::new();
     for player in players {
         let mut state = skills::load(&tx, &player.account, player.s.character.slot)

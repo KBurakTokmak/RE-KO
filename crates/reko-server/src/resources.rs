@@ -21,7 +21,15 @@ pub(crate) fn commit(
     let tx = db
         .unchecked_transaction()
         .map_err(|_| "Unable to start skill transaction.")?;
-    let paid = commit_in(&tx, account, slot, spell, quantity, apply)?;
+    let paid = commit_in(
+        &tx,
+        account,
+        slot,
+        spell,
+        quantity,
+        lobby.combat.as_ref(),
+        apply,
+    )?;
     tx.commit()
         .map_err(|_| "Unable to commit skill resources.")?;
     Ok(paid)
@@ -34,6 +42,7 @@ pub(crate) fn commit_in(
     slot: u8,
     spell: &skills::Spell,
     quantity: u16,
+    catalog: Option<&crate::combat::Catalog>,
     apply: impl FnOnce(&mut skills::State) -> Result<(), &'static str>,
 ) -> Result<Paid, &'static str> {
     let mut state =
@@ -50,8 +59,15 @@ pub(crate) fn commit_in(
             return Err("You do not have the required scroll.");
         }
     }
-    let changed = inventory::consume(tx, account, slot, consumed, quantity)
-        .map_err(|_| "You do not have the required consumable items.")?;
+    let charged = catalog
+        .and_then(|c| c.item(consumed))
+        .is_some_and(|(base, _)| crate::combat::integer(base, 10) == 255);
+    let changed = if charged {
+        inventory::consume_charges(tx, account, slot, consumed, quantity)
+    } else {
+        inventory::consume(tx, account, slot, consumed, quantity)
+    }
+    .map_err(|_| "You do not have the required consumable items.")?;
     apply(&mut state)?;
     if spell.cast_ms > 0 {
         state.buffs.remove(&23);
