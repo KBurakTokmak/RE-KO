@@ -69,7 +69,8 @@ fn give(
     let stackable = combat::integer(row, 23) != 0;
     let slot = bag
         .iter()
-        .position(|i| i.id == 0 || stackable && i.id == id && i.count < 9999)
+        .position(|i| stackable && i.id == id && i.count < 9999)
+        .or_else(|| bag.iter().position(|i| i.id == 0))
         .ok_or_else(|| anyhow::anyhow!("Inventory is full"))?;
     let item = &mut bag[slot];
     if item.id == 0 {
@@ -97,7 +98,7 @@ fn attempt(
     roll: u32,
 ) -> anyhow::Result<Exchange> {
     anyhow::ensure!(
-        p.len() == 8
+        p.len() == 9
             && p[..2] == [0x5b, 5]
             && s.entered
             && !s.zone_loading
@@ -131,12 +132,22 @@ fn attempt(
         })
         .unwrap();
     let before = starter::inventory(&tx, account, s.character.slot)?;
-    let source = before
-        .iter()
-        .position(|i| i.id == fragment && i.count > 0)
-        .ok_or_else(|| anyhow::anyhow!("You do not have this fragment"))?;
-    inventory::consume(&tx, account, s.character.slot, fragment, 1)?;
-    let mut bag = starter::inventory(&tx, account, s.character.slot)?;
+    let source = usize::from(p[8]);
+    let mut bag = before;
+    let payment = bag
+        .get_mut(source)
+        .filter(|i| i.id == fragment && i.count > 0)
+        .ok_or_else(|| anyhow::anyhow!("You do not have this fragment in the selected slot"))?;
+    payment.count -= 1;
+    if payment.count == 0 {
+        tx.execute(
+            "DELETE FROM character_inventory WHERE account=?1 AND slot=?2 AND inventory_slot=?3",
+            rusqlite::params![account, s.character.slot, source],
+        )?;
+        *payment = starter::Item::default();
+    } else {
+        tx.execute("UPDATE character_inventory SET count=?4 WHERE account=?1 AND slot=?2 AND inventory_slot=?3",rusqlite::params![account,s.character.slot,source,payment.count])?;
+    }
     let destination = give(&mut bag, catalog, reward)?;
     let gear_weight = catalog
         .calculate(&s.character, &s.progress, &s.equipment)?
@@ -207,7 +218,7 @@ pub(crate) async fn handle(
             let mut reply = vec![0x5b, 5, 0];
             reply.extend([0; 5]);
             reply.extend(p.get(4..8).unwrap_or(&[0; 4]));
-            reply.extend([0; 2]);
+            reply.extend([p.get(8).copied().filter(|slot| *slot < 28).unwrap_or(0), 0]);
             crate::send_response(sock, peer, &None, &reply, "FRAGMENT_REFUSED").await;
             let notice = crate::chat::packet(
                 7,

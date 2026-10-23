@@ -32,10 +32,15 @@ Password registration/failure and nation-choice semantics are documented in
 
 ## World entry
 
-Native0069BC50 dispatches game opcodes. On matching0D start, send0E full player
+Native0069BC50 dispatches game opcodes. On matching0D/1 start, send0E full player
 data before the one-byte0D acknowledgement. Native0069C368 sets the game-start
 flag and sends7902; omitting acknowledgement stalls loading at99percent.
-Repeated start requests resend only the acknowledgement. Optional6B empty
+Repeated stage1 requests resend only the acknowledgement. Matching0D/2 confirms
+load completion after the snapshot; refresh native0x15 player regions for that
+viewer and nearby observers, without another acknowledgement or bootstrap.
+The0x15 list includes self plus nearby loaded IDs; original0069C18C/006A5D30
+requests missing records through0x16. Individual0x16 records have the same fields
+as0x07/1 after its opcode/subcode, with no extra leading byte. Optional6B empty
 list is `6B 0000`. The full player parser is0069FA60:
 
 | Field order after0E | Width |
@@ -136,5 +141,9 @@ scoped to the server-issued dialog.
 Warehouse45/1 reply includes bank balance and19217-byte records. Normal upgrade
 5B/2 reply has mode/result and ten(item:u32,position:i8) pairs; map effect33/8
 includes result and NPC:u16. Native006B92D0/006B94A0/004B01F0 corroborate layouts.
+Chaotic exchange5B/5 requests are9bytes: NPC:u16, fragment:u32, source slot:u8
+after opcode/subcode (004B4106..004B4130). The14-byte reply contains result:u8,
+reward:u32,destination:u8,fragment:u32,source:u8,effect:u8 after opcode/subcode.
+Validate/pay the selected source, not a first matching item elsewhere in the bag.
 Loot23 binds corpse:u16/bundle:u32;24 returns six(item:u32,count:u16) slots;
 26 solo success includes bag slot, item, total count and current coins.

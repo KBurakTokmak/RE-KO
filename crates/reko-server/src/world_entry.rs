@@ -253,7 +253,9 @@ pub(crate) fn selected_name(payload: &[u8]) -> Option<&str> {
 
 pub(crate) fn start_matches(payload: &[u8], session: &Session) -> bool {
     payload.len() == session.character.name.len() + 3
-        && payload[..3] == [0x0D, 1, session.character.name.len() as u8]
+        && payload[0] == 0x0D
+        && matches!(payload[1], 1 | 2)
+        && payload[2] == session.character.name.len() as u8
         && payload[3..] == *session.character.name.as_bytes()
 }
 

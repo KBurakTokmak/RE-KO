@@ -67,7 +67,66 @@ fn request(s: &Session, id: u32) -> Vec<u8> {
     let mut p = vec![0x5b, 5];
     p.extend(s.merchant.unwrap().to_le_bytes());
     p.extend(id.to_le_bytes());
+    p.push(0);
     p
+}
+
+#[tokio::test]
+async fn captured_fragment_request_uses_its_selected_slot_and_rejects_malformed_or_forged_slots() {
+    let Some((lobby, mut s)) = setup() else {
+        return;
+    };
+    let npc = at(&lobby, &mut s, 603);
+    assert_eq!(npc, 12228);
+    item(&lobby, &mut s, 389160000, 2);
+    {
+        let db = lobby.db.lock().unwrap();
+        db.execute("UPDATE character_inventory SET inventory_slot=5 WHERE account='test' AND slot=0 AND inventory_slot=0",[]).unwrap();
+        db.execute(
+            "INSERT INTO character_inventory VALUES('test',0,0,389160000,1,3)",
+            [],
+        )
+        .unwrap();
+        s.inventory = starter::inventory(&db, "test", 0).unwrap();
+    }
+    // Unmodified1453 capture: NPC12228, Fragment of Arrogance, bag slot5.
+    let captured = [0x5b, 0x05, 0xc4, 0x2f, 0x40, 0x1c, 0x32, 0x17, 0x05];
+    let (mut sock, mut client, peer) = socket().await;
+    crate::upgrading::handle(&mut sock, peer, &lobby, "test", &mut s, &captured).await;
+    assert_eq!(read(&mut client).await[0], 0x3d);
+    let reply = read(&mut client).await;
+    assert_eq!(&reply[..3], &[0x5b, 5, 1]);
+    assert_eq!(reply[12], 5);
+    assert_eq!(read(&mut client).await[..2], [0x33, 9]);
+    assert_eq!(read(&mut client).await[0], 0x54);
+    assert_eq!(s.inventory[0].count, 3);
+    assert_eq!((s.inventory[5].id, s.inventory[5].count), (389160000, 1));
+    let before = s.inventory;
+    let mut extended = captured.to_vec();
+    extended.push(0);
+    let mut bad_slot = captured;
+    bad_slot[8] = 28;
+    let mut empty_slot = captured;
+    empty_slot[8] = 4;
+    let mut wrong_item = captured;
+    wrong_item[4..8].copy_from_slice(&389161000u32.to_le_bytes());
+    for invalid in [
+        captured[..8].to_vec(),
+        extended,
+        bad_slot.to_vec(),
+        empty_slot.to_vec(),
+        wrong_item.to_vec(),
+    ] {
+        crate::upgrading::handle(&mut sock, peer, &lobby, "test", &mut s, &invalid).await;
+        let reply = read(&mut client).await;
+        assert_eq!(&reply[..3], &[0x5b, 5, 0]);
+        assert_eq!(read(&mut client).await[0], 0x10);
+        assert_eq!(s.inventory, before);
+        assert_eq!(
+            starter::inventory(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            before
+        );
+    }
 }
 fn at(lobby: &Lobby, s: &mut Session, prototype: u16) -> u16 {
     let npc = lobby
@@ -112,6 +171,84 @@ async fn click(sock: &mut TcpStream, peer: SocketAddr, lobby: &Lobby, s: &mut Se
 }
 async fn choose(sock: &mut TcpStream, peer: SocketAddr, lobby: &Lobby, s: &mut Session, index: u8) {
     crate::npc_scripts::handle(sock, peer, lobby, "test", s, &[0x55, index, 0]).await;
+}
+
+#[test]
+fn fragment_rewards_prefer_existing_stacks_before_empty_slots_and_respect_stack_limits() {
+    let Some((lobby, mut s)) = setup() else {
+        return;
+    };
+    at(&lobby, &mut s, 603);
+    let catalog = lobby.combat.as_ref().unwrap();
+    let choices = pool(&lobby.db.lock().unwrap(), catalog, 389160000).unwrap();
+    let mut offset = 0;
+    let mut stackable = None;
+    let mut equipment = None;
+    for (id, weight) in choices {
+        if combat::integer(catalog.item(id).unwrap().0, 23) != 0 {
+            stackable.get_or_insert((id, offset));
+        } else {
+            equipment.get_or_insert((id, offset));
+        }
+        offset += weight;
+    }
+    let (reward, roll) = stackable.expect("Primary fragment pool includes stackable rewards");
+    for (fragments, existing, earlier_full, destination, expected_count) in [
+        (1, 7, false, 10, 8),
+        (2, 7, false, 10, 8),
+        (1, 9998, false, 10, 9999),
+        (1, 9999, false, 0, 1),
+        (1, 7, true, 10, 8),
+    ] {
+        item(&lobby, &mut s, 389160000, fragments);
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO character_inventory VALUES('test',0,10,?1,123,?2)",
+                params![reward, existing],
+            )
+            .unwrap();
+            if earlier_full {
+                db.execute(
+                    "INSERT INTO character_inventory VALUES('test',0,2,?1,123,9999)",
+                    [reward],
+                )
+                .unwrap();
+            }
+        }
+        let result = attempt(&lobby, "test", &s, &request(&s, 389160000), roll).unwrap();
+        assert_eq!(result.reply[7], destination as u8);
+        assert_eq!(result.bag[destination].id, reward);
+        assert_eq!(result.bag[destination].count, expected_count);
+        if destination == 10 {
+            assert_eq!(result.bag[10].durability, 123);
+            assert_eq!(result.bag[0].count, fragments - 1);
+        } else {
+            assert_eq!(result.bag[10].count, 9999);
+        }
+        if earlier_full {
+            assert_eq!(result.bag[2].count, 9999);
+        }
+        assert_eq!(
+            starter::inventory(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            result.bag
+        );
+    }
+    let (reward, roll) = equipment.expect("Primary fragment pool includes equipment");
+    item(&lobby, &mut s, 389160000, 1);
+    lobby
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO character_inventory VALUES('test',0,10,?1,123,1)",
+            [reward],
+        )
+        .unwrap();
+    let result = attempt(&lobby, "test", &s, &request(&s, 389160000), roll).unwrap();
+    assert_eq!(result.reply[7], 0);
+    assert_eq!((result.bag[0].id, result.bag[0].count), (reward, 1));
+    assert_eq!((result.bag[10].durability, result.bag[10].count), (123, 1));
 }
 
 #[test]

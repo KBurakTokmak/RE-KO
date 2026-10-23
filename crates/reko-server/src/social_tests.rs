@@ -57,6 +57,56 @@ fn invite(h: &mut Hub, a: u16, b: u16) {
 }
 
 #[test]
+fn administrators_keep_local_gm_privileges_but_have_visible_remote_authority() {
+    let lobby = lobby();
+    let mut a = player(&lobby, "VisibleAdmin", 1, 80);
+    let mut b = player(&lobby, "OtherAdmin", 1, 80);
+    for s in [&mut a, &mut b] {
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO character_privileges VALUES(?1,0,1)",
+                [&s.character.name],
+            )
+            .unwrap();
+        s.is_admin = true;
+        synchronize(&lobby, &s.character.name.clone(), s);
+    }
+    let hub = lobby.social.lock().unwrap();
+    for s in [&a, &b] {
+        let packet = hub.user_in(s.player_id);
+        let mut cursor = 4;
+        cursor += 1 + usize::from(packet[cursor]);
+        cursor += 1 + 2 + 1 + 2;
+        cursor += 1 + usize::from(packet[cursor]);
+        cursor += 1 + 1 + 2 + 2 + 1 + 1 + 2 + 6 + 3 + 4 + 1;
+        assert_eq!(
+            packet[cursor], 1,
+            "Native remote GM authority0 hides an otherwise normal appearance"
+        );
+        let local = s.my_info(&lobby.bootstrap);
+        let mut ordinary = s.clone();
+        ordinary.is_admin = false;
+        let normal = ordinary.my_info(&lobby.bootstrap);
+        let differences: Vec<_> = local
+            .iter()
+            .zip(normal)
+            .filter(|(a, b)| **a != *b)
+            .map(|(a, b)| (*a, b))
+            .collect();
+        assert_eq!(
+            differences,
+            [(0, 1)],
+            "Local GM authority/collision capability remains intact"
+        );
+        assert!(crate::admin::is_admin(&lobby.db.lock().unwrap(), &s.character.name, 0).unwrap());
+        assert!(hub.players[&s.player_id].s.is_admin);
+    }
+}
+
+#[test]
 fn party_consent_capacity_leadership_chat_status_region_and_disconnect() {
     let lobby = lobby();
     let a = player(&lobby, "PartyLeader", 1, 80);
@@ -298,6 +348,120 @@ fn party_death_credits_group_contributions_once_and_share_nearby_kills() {
     assert_eq!(kills, ["DamageA"]);
     assert_eq!(credits.len(), 2);
     assert_eq!(h.group(c.player_id), [c.player_id]);
+}
+
+#[tokio::test]
+async fn three_loaded_clients_receive_complete_regions_and_can_request_each_others_native_records()
+{
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+    let lobby = lobby();
+    let mut a = player(&lobby, "FirstClient", 1, 80);
+    let b = player(&lobby, "SecondClient", 1, 80);
+    let c = player(&lobby, "ThirdClient", 2, 80);
+    let mut distant = player(&lobby, "DistantClient", 1, 80);
+    distant.position.zone = 1;
+    synchronize(&lobby, "DistantClient", &mut distant);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut server, peer) = listener.accept().await.unwrap();
+    async fn read(client: &mut TcpStream) -> Vec<u8> {
+        let mut head = [0; 4];
+        client.read_exact(&mut head).await.unwrap();
+        let length = u16::from_le_bytes([head[2], head[3]]) as usize;
+        let mut data = vec![0; length + 2];
+        client.read_exact(&mut data).await.unwrap();
+        data.truncate(length);
+        data
+    }
+    let mut start = vec![0x0d, 2, a.character.name.len() as u8];
+    start.extend(a.character.name.as_bytes());
+    let mut account = Some("FirstClient".into());
+    let mut world = Some(a.clone());
+    lobby.social.lock().unwrap().queues.clear();
+    crate::handle_game_payload(&mut server, peer, &start, &lobby, &mut account, &mut world).await;
+    assert!(
+        lobby.social.lock().unwrap().queues.is_empty(),
+        "Stage2 cannot complete before the snapshot"
+    );
+    a.snapshot_sent = true;
+    world = Some(a.clone());
+    crate::handle_game_payload(&mut server, peer, &start, &lobby, &mut account, &mut world).await;
+    let region = read(&mut client).await;
+    assert_eq!(&region[..3], &[0x15, 3, 0]);
+    let ids: Vec<_> = region[3..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|v| u16::from_le_bytes([v[0], v[1]]))
+        .collect();
+    let mut expected = vec![a.player_id, b.player_id, c.player_id];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+    {
+        let hub = lobby.social.lock().unwrap();
+        for id in [b.player_id, c.player_id] {
+            assert!(hub.queues[&id].iter().any(|packet| packet == &region));
+        }
+        assert!(!hub.queues.contains_key(&distant.player_id));
+    }
+    let mut request = vec![0x16, 2, 0];
+    request.extend(b.player_id.to_le_bytes());
+    request.extend(c.player_id.to_le_bytes());
+    crate::handle_game_payload(
+        &mut server,
+        peer,
+        &request,
+        &lobby,
+        &mut account,
+        &mut world,
+    )
+    .await;
+    let records = read(&mut client).await;
+    assert_eq!(&records[..3], &[0x16, 2, 0]);
+    let mut cursor = 3;
+    for other in [&b, &c] {
+        assert_eq!(
+            u16::from_le_bytes(records[cursor..cursor + 2].try_into().unwrap()),
+            other.player_id
+        );
+        cursor += 2;
+        let length = usize::from(records[cursor]);
+        cursor += 1;
+        assert_eq!(
+            &records[cursor..cursor + length],
+            other.character.name.as_bytes()
+        );
+        cursor += length;
+        assert_eq!(records[cursor], other.character.nation());
+        cursor += 1 + 2 + 1 + 2;
+        let clan_length = usize::from(records[cursor]);
+        cursor += 1 + clan_length;
+        cursor += 1 + 1 + 2 + 2;
+        assert_eq!(&records[cursor..cursor + 2], &[80, other.character.race]);
+        cursor += 2 + 2 + 6 + 3 + 4 + 5 + 2 + 4 + 10 * 7;
+        assert_eq!(records[cursor], other.position.zone);
+        cursor += 1;
+    }
+    assert_eq!(
+        cursor,
+        records.len(),
+        "Native1453 consumes all records without padding or shifted zone bytes"
+    );
+    let before = world.as_ref().unwrap().clone();
+    crate::handle_game_payload(&mut server, peer, &start, &lobby, &mut account, &mut world).await;
+    assert_eq!(
+        read(&mut client).await,
+        region,
+        "Stage2 replay refreshes presence without replaying inventory/vitals"
+    );
+    assert_eq!(world.as_ref().unwrap().inventory, before.inventory);
+    assert_eq!(world.as_ref().unwrap().coins, before.coins);
+    let mut forged = vec![0x16, 1, 0];
+    forged.extend(distant.player_id.to_le_bytes());
+    crate::handle_game_payload(&mut server, peer, &forged, &lobby, &mut account, &mut world).await;
+    assert_eq!(read(&mut client).await, [0x16, 0, 0]);
 }
 
 #[tokio::test]

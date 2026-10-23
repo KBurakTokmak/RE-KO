@@ -49,6 +49,13 @@ place. It is not free flight or permission to change zone IDs. The native
 authority is sent on entry, so role changes need reconnecting to update client
 collision behavior, even though server combat permissions refresh live.
 
+Remote player07/16 records deliberately use ordinary visible authority1, including
+for admins. Original1453 hides normal-looking remote GM0 characters and excludes
+them from selection (00487646,0048876D,004895E8); that made all tagged test
+characters invisible to one another despite correct presence records. Local0E
+still sends GM0 and all server permission, damage and AI checks remain tied to
+character_privileges. No client patch or privilege-data change is involved.
+
 Tests cover armor-independent admin damage, delay/range checks, remaining-HP
 clamping, revocation, ordinary hits, passive/aggressive AI exclusion and queued
 damage suppression. A packet test verifies the authority byte is the only

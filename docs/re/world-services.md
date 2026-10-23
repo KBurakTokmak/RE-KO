@@ -202,14 +202,29 @@ explicit review rather than silently replacing customized data.
 ### Chaotic Generator and Hemes
 
 The imported Moradon603/type162 Chaotic Generator opens native5B/4 with its
-instance ID;5B/5 exchanges one owned fragment389160000..389166000. Opening a
+instance ID;5B/5 exchanges one owned fragment389160000..389166000. The original
+request is9bytes: opcode/subcode, NPC:u16, fragment:u32, selected bag slot:u8.
+Native004B4106..004B4130 and a captured slot5 request confirm the final byte;
+the supplied primary C++ reader ignores it, which previously led to an incorrect
+8-byte server guard. Validate the selected slot's ID/count and decrement that
+exact stack, including when another identical fragment exists earlier in the
+bag. Never substitute the first matching stack. The result echoes the actual
+source position; malformed/trailing requests and empty/foreign slots fail without
+mutation. Opening a
 nearby generator, living/entered state, exact packet length, supported item,
 inventory capacity and weight are validated. Payment and one original-table
 reward commit together. Missing inputs, a foreign/distant NPC, full inventory,
 invalid reward data or SQLite failure leave all items unchanged. A final fragment
 may free its own slot; inventory replacement uses the existing remove/create
 icon update before the native result/effect. Repeated requests each require a
-remaining fragment. Anvil/reverse-upgrade paths remain separate.
+remaining fragment. For countable rewards, fill the first matching stack below
+9999 before choosing an empty slot, even when consuming the last fragment frees
+an earlier slot. This follows primary1453 User.cpp::FindSlotForItem/GiveItem;
+equipment is never merged and a full stack remains unchanged. The result's
+destination is the actual updated stack, not the primary BifrostPieceProcess's
+premature GetEmptySlot result. Regression coverage includes final/nonfinal
+fragments, full/near-full stacks, existing durability and nonstackable equipment.
+Anvil/reverse-upgrade paths remain separate.
 
 The primary ITEM_EXCHANGE101 rows contain one weighted reward each; all rows
 for each of the seven fragments sum to10000. These complete per-fragment weights
@@ -221,7 +236,10 @@ corrects that inconsistency rather than claiming the custom C++ RNG is retail.
 Native open/result/object9 effect layouts follow NPCHandler::NpcEvent,
 User::SendAnvilRequest and UpgradeHandler::BifrostPieceProcess. Socket/SQLite
 tests cover every fragment pool, native frames, slot reuse, replay after the
-last fragment, distance, capacity and forced transaction failure.
+last fragment, distance, capacity and forced transaction failure. A regression
+replays the exact captured9-byte request with duplicate stacks, validates source5
+payment and rejects missing/trailing bytes, slot28, an empty slot and an item-ID
+mismatch without changing either stack.
 
 Peddler16085/type132 now uses a bounded1453-compatible menu in hemes.rs.
 The supplementary16085_Hamus.lua root menu references later labels2013/2014/

@@ -708,6 +708,13 @@ async fn handle_game_payload_inner(
                 tracing::warn!(%peer, "world start refused: character name or stage mismatch");
                 return;
             }
+            if payload[1] == 2 {
+                if session.snapshot_sent && session.entered && !session.zone_loading {
+                    social::refresh_region(lobby, account.as_deref().unwrap(), session);
+                    tracing::info!(%peer,name=%session.character.name,"client world load completed; player regions refreshed");
+                }
+                return;
+            }
             if !session.snapshot_sent {
                 let packet = session.my_info(&lobby.bootstrap);
                 tracing::info!(%peer, name = %session.character.name, player_id = session.player_id, bytes = packet.len(), "sending initial character data after map load");

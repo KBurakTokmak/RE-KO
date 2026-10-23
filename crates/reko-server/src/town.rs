@@ -120,6 +120,7 @@ pub(crate) async fn relocate(
     super::send_response(sock, peer, &None, &packet, "PLAYER_WARP").await;
     session.entity_region = None;
     crate::population::refresh(sock, peer, lobby, session).await;
+    crate::social::refresh_region(lobby, account, session);
     tracing::info!(%peer,account,x=position.x,z=position.z,zone=position.zone,"same-zone teleport committed");
     Ok(())
 }
@@ -182,6 +183,7 @@ pub(crate) async fn respawn(
     super::send_response(sock, peer, &None, &s.skills.mana_packet(), "RESPAWN_MP").await;
     s.entity_region = None;
     crate::population::refresh(sock, peer, lobby, s).await;
+    crate::social::refresh_region(lobby, account, s);
 }
 
 #[cfg(test)]
@@ -301,6 +303,10 @@ mod tests {
                 [0xaa, 0x55, 5, 0, 0x1e, 0xf4, 0x0b, 0xc0, 0x0d, 0x55, 0xaa]
             );
             let s = world.as_ref().unwrap();
+            client.read_exact(&mut frame).await.unwrap();
+            let mut region = vec![0x15, 1, 0];
+            region.extend(s.player_id.to_le_bytes());
+            assert_eq!(frame.as_slice(), crate::frame_packet(&region));
             assert_eq!(
                 (s.position.x, s.position.z, s.skills.mana),
                 (3060, 3520, 77)

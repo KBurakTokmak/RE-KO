@@ -121,6 +121,9 @@ impl Hub {
                 .map(|(&id, _)| id)
                 .collect();
             let old = self.visible.insert(viewer, now.clone()).unwrap_or_default();
+            if old != now && !self.players[&viewer].s.zone_loading {
+                self.region(viewer);
+            }
             for other in old.difference(&now) {
                 let mut p = vec![7, 2];
                 p.extend(other.to_le_bytes());
@@ -191,6 +194,18 @@ impl Hub {
             }
         }
     }
+    fn region(&mut self, viewer: u16) {
+        let mut ids = self.visible.get(&viewer).cloned().unwrap_or_default();
+        ids.insert(viewer);
+        let mut ids: Vec<_> = ids.into_iter().collect();
+        ids.sort_unstable();
+        let mut packet = vec![0x15];
+        packet.extend((ids.len() as u16).to_le_bytes());
+        for id in ids {
+            packet.extend(id.to_le_bytes());
+        }
+        self.send(viewer, packet);
+    }
     pub fn user_in(&self, id: u16) -> Vec<u8> {
         let s = &self.players[&id].s;
         let mut p = vec![7, 1];
@@ -223,13 +238,7 @@ impl Hub {
             },
         ]);
         p.extend(crate::transformation::appearance(s).to_le_bytes());
-        p.extend([
-            1,
-            u8::from(!s.is_admin),
-            u8::from(self.party(id) == Some(id)),
-            0,
-            0,
-        ]);
+        p.extend([1, 1, u8::from(self.party(id) == Some(id)), 0, 0]);
         p.extend(0u16.to_le_bytes());
         p.extend([0; 4]);
         for slot in [4, 10, 1, 7, 12, 5, 6, 8] {
@@ -266,6 +275,26 @@ impl Hub {
         let p = crate::chat::packet(channel, s.character.nation(), id, &s.character.name, text);
         self.send_many(&members, &p);
         true
+    }
+}
+pub(crate) fn refresh_region(lobby: &Lobby, account: &str, s: &Session) {
+    let mut hub = lobby.social.lock().unwrap();
+    hub.synchronize(account, s);
+    let viewers: Vec<_> = hub
+        .players
+        .keys()
+        .copied()
+        .filter(|viewer| {
+            !hub.players[viewer].s.zone_loading
+                && (*viewer == s.player_id
+                    || hub
+                        .visible
+                        .get(viewer)
+                        .is_some_and(|ids| ids.contains(&s.player_id)))
+        })
+        .collect();
+    for viewer in viewers {
+        hub.region(viewer);
     }
 }
 pub(crate) fn synchronize(lobby: &Lobby, account: &str, s: &mut Session) {
