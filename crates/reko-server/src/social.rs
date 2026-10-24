@@ -24,6 +24,7 @@ pub(crate) struct Hub {
     pub transfers: HashMap<u16, Position>,
     pub loot_rotation: HashMap<u16, usize>,
     visible: HashMap<u16, HashSet<u16>>,
+    gm_public: HashSet<u16>,
 }
 pub(crate) fn near(a: Position, b: Position, meters: u16) -> bool {
     let dx = i64::from(a.x) - i64::from(b.x);
@@ -45,6 +46,12 @@ pub(crate) fn name(p: &[u8]) -> Option<&str> {
         .then_some(text)
 }
 impl Hub {
+    pub fn can_see(&self, viewer: u16, target: u16) -> bool {
+        self.players
+            .get(&viewer)
+            .zip(self.players.get(&target))
+            .is_some_and(|(v, t)| !t.s.is_admin || v.s.is_admin || self.gm_public.contains(&target))
+    }
     pub fn send(&mut self, id: u16, p: Vec<u8>) {
         if self.players.contains_key(&id) {
             self.queues.entry(id).or_default().push(p);
@@ -73,6 +80,7 @@ impl Hub {
             .unwrap_or_else(|| vec![id])
     }
     pub fn disconnect(&mut self, id: u16) {
+        self.gm_public.remove(&id);
         self.skill_refresh.remove(&id);
         self.skill_notice.remove(&id);
         self.transfers.remove(&id);
@@ -97,6 +105,9 @@ impl Hub {
     }
     pub fn synchronize(&mut self, account: &str, s: &Session) {
         let id = s.player_id;
+        if !s.is_admin {
+            self.gm_public.remove(&id);
+        }
         let prior = self.players.insert(
             id,
             Player {
@@ -111,6 +122,7 @@ impl Hub {
                 .iter()
                 .filter(|(other, p)| {
                     **other != viewer
+                        && self.can_see(viewer, **other)
                         && !self.players[&viewer].s.zone_loading
                         && !p.s.zone_loading
                         && crate::population::same_region_view(
@@ -276,6 +288,60 @@ impl Hub {
         self.send_many(&members, &p);
         true
     }
+}
+pub(crate) async fn visibility_command(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    lobby: &Lobby,
+    account: &str,
+    s: &mut Session,
+    text: &[u8],
+) -> bool {
+    let Ok(text) = std::str::from_utf8(text) else {
+        return false;
+    };
+    let mut words = text.split_whitespace();
+    let Some(command) = words.next() else {
+        return false;
+    };
+    if !command
+        .trim_start_matches(['/', '+'])
+        .eq_ignore_ascii_case("gmvisible")
+    {
+        return false;
+    }
+    let args: Vec<_> = words.collect();
+    let result = (|| -> anyhow::Result<String> {
+        s.is_admin = crate::admin::is_admin(&lobby.db.lock().unwrap(), account, s.character.slot)?;
+        anyhow::ensure!(s.is_admin, "GM visibility requires an admin character.");
+        anyhow::ensure!(
+            s.entered && !s.zone_loading,
+            "Finish loading the world first."
+        );
+        anyhow::ensure!(args.len() <= 1, "Usage: gmvisible on|off|status");
+        let mut hub = lobby.social.lock().unwrap();
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("on") => {
+                hub.gm_public.insert(s.player_id);
+            }
+            Some("off") => {
+                hub.gm_public.remove(&s.player_id);
+            }
+            None | Some("status") => {}
+            _ => anyhow::bail!("Usage: gmvisible on|off|status"),
+        }
+        hub.synchronize(account, s);
+        Ok(if hub.gm_public.contains(&s.player_id) {
+            "GM visibility: visible to nearby players."
+        } else {
+            "GM visibility: hidden from normal players; visible to nearby GMs."
+        }
+        .into())
+    })();
+    let message = result.unwrap_or_else(|error| format!("GM visibility: {error}"));
+    let packet = crate::chat::packet(7, s.character.nation(), u16::MAX, "", message.as_bytes());
+    crate::send_response(sock, peer, &None, &packet, "GM_VISIBILITY").await;
+    true
 }
 pub(crate) fn refresh_region(lobby: &Lobby, account: &str, s: &Session) {
     let mut hub = lobby.social.lock().unwrap();

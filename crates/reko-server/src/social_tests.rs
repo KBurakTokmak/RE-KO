@@ -56,6 +56,163 @@ fn invite(h: &mut Hub, a: u16, b: u16) {
     party::process(h, a, &p);
 }
 
+#[tokio::test]
+async fn gm_visibility_filters_regions_details_and_revoked_commands() {
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+    let lobby = lobby();
+    let mut gm = player(&lobby, "HiddenGM", 1, 80);
+    let mut observer = player(&lobby, "ObserverGM", 1, 80);
+    let normal = player(&lobby, "NormalUser", 1, 80);
+    for s in [&mut gm, &mut observer] {
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO character_privileges VALUES(?1,0,1)",
+                [&s.character.name],
+            )
+            .unwrap();
+        s.is_admin = true;
+        synchronize(&lobby, &s.character.name.clone(), s);
+    }
+    {
+        let hub = lobby.social.lock().unwrap();
+        assert!(hub.visible[&observer.player_id].contains(&gm.player_id));
+        assert!(!hub.visible[&normal.player_id].contains(&gm.player_id));
+        assert!(hub.visible[&gm.player_id].contains(&normal.player_id));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut sock, peer) = listener.accept().await.unwrap();
+    async fn read(c: &mut TcpStream) -> Vec<u8> {
+        let mut h = [0; 4];
+        c.read_exact(&mut h).await.unwrap();
+        let n = u16::from_le_bytes([h[2], h[3]]) as usize;
+        let mut p = vec![0; n + 2];
+        c.read_exact(&mut p).await.unwrap();
+        p.truncate(n);
+        p
+    }
+    let mut account = Some("NormalUser".into());
+    let mut world = Some(normal.clone());
+    let mut details = vec![0x16, 1, 0];
+    details.extend(gm.player_id.to_le_bytes());
+    lobby.social.lock().unwrap().queues.clear();
+    crate::handle_game_payload(&mut sock, peer, &details, &lobby, &mut account, &mut world).await;
+    assert_eq!(read(&mut client).await, [0x16, 0, 0]);
+    assert!(
+        visibility_command(
+            &mut sock,
+            peer,
+            &lobby,
+            "NormalUser",
+            world.as_mut().unwrap(),
+            b"gmvisible on"
+        )
+        .await
+    );
+    assert!(
+        read(&mut client)
+            .await
+            .ends_with(b"requires an admin character.")
+    );
+    assert!(
+        !lobby
+            .social
+            .lock()
+            .unwrap()
+            .gm_public
+            .contains(&normal.player_id)
+    );
+    for (command, visible) in [
+        ("gmvisible on", true),
+        ("gmvisible invalid", true),
+        ("gmvisible off", false),
+    ] {
+        visibility_command(
+            &mut sock,
+            peer,
+            &lobby,
+            "HiddenGM",
+            &mut gm,
+            command.as_bytes(),
+        )
+        .await;
+        assert_eq!(&read(&mut client).await[..2], &[0x10, 7]);
+        let mut hub = lobby.social.lock().unwrap();
+        assert_eq!(
+            hub.visible[&normal.player_id].contains(&gm.player_id),
+            visible
+        );
+        assert!(hub.visible[&observer.player_id].contains(&gm.player_id));
+        if command == "gmvisible on" {
+            assert!(
+                hub.queues[&normal.player_id]
+                    .iter()
+                    .any(|p| p.starts_with(&[7, 1]))
+            );
+        }
+        if command == "gmvisible off" {
+            assert!(
+                hub.queues[&normal.player_id]
+                    .iter()
+                    .any(|p| p.starts_with(&[7, 2]))
+            );
+        }
+        hub.queues.clear();
+    }
+    crate::handle_game_payload(&mut sock, peer, &details, &lobby, &mut account, &mut world).await;
+    assert_eq!(read(&mut client).await, [0x16, 0, 0]);
+    visibility_command(
+        &mut sock,
+        peer,
+        &lobby,
+        "HiddenGM",
+        &mut gm,
+        b"gmvisible on",
+    )
+    .await;
+    read(&mut client).await;
+    lobby.social.lock().unwrap().queues.clear();
+    crate::handle_game_payload(&mut sock, peer, &details, &lobby, &mut account, &mut world).await;
+    assert_eq!(&read(&mut client).await[..3], &[0x16, 1, 0]);
+    lobby
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE character_privileges SET is_admin=0 WHERE account='HiddenGM'",
+            [],
+        )
+        .unwrap();
+    visibility_command(
+        &mut sock,
+        peer,
+        &lobby,
+        "HiddenGM",
+        &mut gm,
+        b"gmvisible off",
+    )
+    .await;
+    assert!(
+        read(&mut client)
+            .await
+            .ends_with(b"requires an admin character.")
+    );
+    synchronize(&lobby, "HiddenGM", &mut gm);
+    let mut hub = lobby.social.lock().unwrap();
+    assert!(!hub.gm_public.contains(&gm.player_id));
+    assert!(!gm.is_admin);
+    hub.gm_public.insert(observer.player_id);
+    hub.disconnect(observer.player_id);
+    hub.synchronize("ObserverGM", &observer);
+    assert!(!hub.gm_public.contains(&observer.player_id));
+    assert!(!hub.visible[&normal.player_id].contains(&observer.player_id));
+}
+
 #[test]
 fn administrators_keep_local_gm_privileges_but_have_visible_remote_authority() {
     let lobby = lobby();

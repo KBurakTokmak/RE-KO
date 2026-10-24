@@ -31,16 +31,23 @@ creation006BB810, join006BC1C0, invite006BD3E0, member list005A3920 and loot
 006B2C30. Open-KO `GameProcMain` corroborates packet semantics. Native player
 IN has an extra byte before direction compared with Open-KO. Native party HP/MP
 fields are16-bit, unlike the supplied private server's32-bit serialization.
-Remote07/16 records use visible-player authority1 for administrators as well as
-ordinary characters. Local0E retains GM0 for the owner's native collision bypass;
+GM visibility is filtered on the server for each viewer. A normal player receives
+neither region IDs, IN/movement/equipment presence nor requested16 records for a
+hidden GM; other GMs can see that GM. All chat command `gmvisible on` permits
+ordinary viewers, `gmvisible off` restores hiding and `gmvisible status` reports
+the state privately. Every command rechecks SQLite authorization. The override
+is session-local, defaults to hidden and clears on disconnect or role revocation.
+Membership changes emit native OUT/IN and complete viewer-specific region lists.
+Remote07/16 records that are permitted use visible-player authority1.
+Local0E retains GM0 for the owner's native collision bypass;
 the server's character_privileges role remains unchanged. Original00487646..
 00487666 skips remote GM0 rendering when normal abnormal-state1 is below5;
 0048876D/004895E8 also exclude GM0 from selection. A read-only multi-client
 inspection found the other player already in each native manager, with correct
 IDs/nearby coordinates but authority0. Primary User.cpp::ResetGMVisibility
 corroborates retail GM invisibility, while current Open-KO has commented-out
-render exclusions and must not override original1453 behavior here. Keeping local
-test administrators visible is an intentional local display policy; it neither
+render exclusions and must not override original1453 behavior here. Keeping GMs
+visible to authorized viewers is an intentional local display policy; it neither
 revokes their server permissions nor grants privileges to other clients.
 General player-target combat, complete remote skill animations and PvP remain
 separate from this presence and social implementation.

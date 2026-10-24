@@ -49,12 +49,35 @@ place. It is not free flight or permission to change zone IDs. The native
 authority is sent on entry, so role changes need reconnecting to update client
 collision behavior, even though server combat permissions refresh live.
 
-Remote player07/16 records deliberately use ordinary visible authority1, including
-for admins. Original1453 hides normal-looking remote GM0 characters and excludes
-them from selection (00487646,0048876D,004895E8); that made all tagged test
-characters invisible to one another despite correct presence records. Local0E
-still sends GM0 and all server permission, damage and AI checks remain tied to
-character_privileges. No client patch or privilege-data change is involved.
+GM characters default to hidden from normal players but visible to other GMs.
+Use All chat (bare command, because unknown slash commands can be swallowed by
+the original client):
+
+```
+gmvisible on
+gmvisible off
+gmvisible status
+```
+
+The override applies only to this session and resets on disconnect. Every command
+rechecks the database role; ordinary/revoked characters cannot use it. Server
+region, presence and detail-request filters withhold hidden GM records entirely
+from normal viewers. Existing viewers receive OUT/IN updates immediately when
+visibility changes. This does not remove existing party/clan roster information.
+
+Permitted remote player07/16 records use visible authority1. Original1453 hides
+normal-looking remote GM0 characters and excludes them from selection
+(00487646,0048876D,004895E8); authority0 cannot provide mutual GM visibility by
+itself. Local0E still sends GM0 and all server permission, damage and AI checks
+remain tied to character_privileges. No client patch or privilege-data change
+is involved.
+
+An automatic overhead GM label has not been verified for this original build.
+Texts_us row7807 says GM, but corresponding Open-KO text_resources.h labels it
+IDS_GM_CMD_CAT (the command-window category), not an overhead title. The examined
+original strings/assets and matching player rendering sources do not establish a
+separate GM-label packet or flag. Do not repurpose clan/ranking fields, rename
+characters or claim later-version GM badges are supported1453 behavior.
 
 Tests cover armor-independent admin damage, delay/range checks, remaining-HP
 clamping, revocation, ordinary hits, passive/aggressive AI exclusion and queued

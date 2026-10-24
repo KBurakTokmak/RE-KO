@@ -416,6 +416,7 @@ async fn handle_game_payload_inner(
                     for bytes in payload[3..].as_chunks::<2>().0 {
                         let id = u16::from_le_bytes(*bytes);
                         if id != s.player_id
+                            && h.can_see(s.player_id, id)
                             && seen.insert(id)
                             && h.players.get(&id).is_some_and(|p| {
                                 !p.s.zone_loading
@@ -1128,6 +1129,12 @@ async fn handle_game_payload_inner(
                 tracing::warn!(%peer, "invalid or unsupported chat request");
                 return;
             };
+            if channel == 1
+                && let Some(account) = account.as_deref()
+                && social::visibility_command(sock, peer, lobby, account, session, text).await
+            {
+                return;
+            }
             if channel == 1
                 && let Some(packet) = loot::command(session, text)
             {
