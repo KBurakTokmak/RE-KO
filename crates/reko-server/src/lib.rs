@@ -27,6 +27,7 @@ mod costumes;
 pub mod crypto;
 mod durability;
 mod framing;
+mod friendly;
 mod gm_spawn;
 mod gm_teleport;
 mod hemes;

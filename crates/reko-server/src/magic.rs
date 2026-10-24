@@ -109,49 +109,7 @@ pub(crate) async fn handle(
     let caster = u16::from_le_bytes([payload[6], payload[7]]);
     let target = u16::from_le_bytes([payload[8], payload[9]]);
     let now = skills::now_ms();
-    let failure = if caster != session.player_id {
-        Some("Skill caster does not match this session.")
-    } else if !spell.learned_by(
-        session.character.class,
-        session.progress.level,
-        &session.progress.points,
-    ) {
-        Some("This skill's class or learning requirements are not met.")
-    } else if session.skills.hp == 0 {
-        Some("You cannot use skills while dead.")
-    } else if spell.skill_group == 0
-        && !lobby
-            .combat
-            .as_ref()
-            .is_some_and(|items| items.usable_item_skill(spell, session.progress.level))
-    {
-        Some("This item does not provide the requested usable skill.")
-    } else if spell.skill_group == 0
-        && target != caster
-        && !(target == u16::MAX && spell.moral == 4 && spell.types == [4, 0])
-    {
-        Some("This consumable must target your own character.")
-    } else if !crate::quests::completed(
-        &lobby.db.lock().unwrap(),
-        account,
-        session.character.slot,
-        spell.required_quest,
-    )
-    .unwrap_or(false)
-    {
-        Some("Complete this skill's unlock quest before using it.")
-    } else if spell.item_group == 1 && session.combat.weapon_kind / 10 != 1 {
-        Some("This skill requires an equipped dagger.")
-    } else if spell.item_group == 7 && !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10) {
-        Some("This skill requires an equipped bow.")
-    } else {
-        None
-    };
-    if let Some(reason) = failure {
-        refused(sock, peer, session, id, reason).await;
-        return true;
-    }
-    if payload[1] == 6 && target == caster {
+    if payload[1] == 6 && target == caster && caster == session.player_id {
         if spell.types[0] == 4 && matches!(spell.moral, 7 | 10 | 12) {
             refused(
                 sock,
@@ -205,6 +163,48 @@ pub(crate) async fn handle(
                 .await;
             }
         }
+        return true;
+    }
+    let failure = if caster != session.player_id {
+        Some("Skill caster does not match this session.")
+    } else if !spell.learned_by(
+        session.character.class,
+        session.progress.level,
+        &session.progress.points,
+    ) {
+        Some("This skill's class or learning requirements are not met.")
+    } else if session.skills.hp == 0 {
+        Some("You cannot use skills while dead.")
+    } else if spell.skill_group == 0
+        && !lobby
+            .combat
+            .as_ref()
+            .is_some_and(|items| items.usable_item_skill(spell, session.progress.level))
+    {
+        Some("This item does not provide the requested usable skill.")
+    } else if spell.skill_group == 0
+        && target != caster
+        && !(target == u16::MAX && spell.moral == 4 && spell.types == [4, 0])
+    {
+        Some("This consumable must target your own character.")
+    } else if !crate::quests::completed(
+        &lobby.db.lock().unwrap(),
+        account,
+        session.character.slot,
+        spell.required_quest,
+    )
+    .unwrap_or(false)
+    {
+        Some("Complete this skill's unlock quest before using it.")
+    } else if spell.item_group == 1 && session.combat.weapon_kind / 10 != 1 {
+        Some("This skill requires an equipped dagger.")
+    } else if spell.item_group == 7 && !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10) {
+        Some("This skill requires an equipped bow.")
+    } else {
+        None
+    };
+    if let Some(reason) = failure {
+        refused(sock, peer, session, id, reason).await;
         return true;
     }
     session.sitting = false;
@@ -297,6 +297,14 @@ pub(crate) async fn handle(
     }
     // TODO(re): Validate animation completion against original class/weapon clips.
     session.pending_cast = None;
+    if let Some(result) =
+        crate::friendly::handle(sock, peer, lobby, account, session, spell, target).await
+    {
+        if let Err(reason) = result {
+            refused(sock, peer, session, id, reason).await;
+        }
+        return true;
+    }
     if let Some(result) =
         crate::mage_special::handle(sock, peer, lobby, account, session, spell, payload).await
     {

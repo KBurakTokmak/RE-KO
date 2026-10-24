@@ -283,6 +283,18 @@ fn player_effect(
         if state.hp == 0 {
             return Err("The target is dead.");
         }
+        if !friendly
+            && !drain
+            && state
+                .buffs
+                .get(&29)
+                .is_some_and(|b| skills::now_ms() < b.until)
+        {
+            if spell.moral == 10 {
+                continue;
+            }
+            return Err("The target is protected against curses.");
+        }
         if drain {
             let amount = combat::integer(row, 3).min(0).unsigned_abs().min(32767) as u16;
             state.mana = state.mana.saturating_sub(amount);
@@ -794,6 +806,41 @@ mod tests {
             target.base_combat.resistance = [100; 6];
             let stats = crate::utility::effective(&target, &target.skills, Some(catalog), None);
             assert_eq!(stats.resistance, [80; 6]);
+            let mut protected = skills::load(&lobby.db.lock().unwrap(), "EnemyFixture", 0).unwrap();
+            protected.buffs.insert(
+                29,
+                skills::Buff {
+                    skill: 112676,
+                    until: skills::now_ms() + 10000,
+                },
+            );
+            skills::save(&lobby.db.lock().unwrap(), "EnemyFixture", 0, &protected).unwrap();
+            let before = skills::load(&lobby.db.lock().unwrap(), "MageFixture", 0)
+                .unwrap()
+                .mana;
+            let control = &catalog.spells[&(prefix + 674)];
+            lobby.db.lock().unwrap().execute(
+                "DELETE FROM character_skill_cooldowns WHERE account='MageFixture' AND skill=?1",
+                [control.id],
+            ).unwrap();
+            assert_eq!(
+                player_effect(
+                    &lobby,
+                    "MageFixture",
+                    &s,
+                    control,
+                    &packet(&s, control.id, target.player_id, 3),
+                    22
+                )
+                .err(),
+                Some("The target is protected against curses.")
+            );
+            assert_eq!(
+                skills::load(&lobby.db.lock().unwrap(), "MageFixture", 0)
+                    .unwrap()
+                    .mana,
+                before
+            );
             let mut safe = s.clone();
             safe.position.zone = 21;
             assert!(

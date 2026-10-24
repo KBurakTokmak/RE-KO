@@ -395,6 +395,93 @@ pub(crate) async fn training_command(
     true
 }
 
+pub(crate) fn apply_friendly(
+    lobby: &Lobby,
+    session: &Session,
+    spell: &skills::Spell,
+    state: &mut skills::State,
+) -> Result<Vec<u8>, &'static str> {
+    let catalog = lobby.skills.as_ref().ok_or("Skill data unavailable.")?;
+    let row = catalog
+        .effects
+        .get(&(spell.types[0], spell.id))
+        .ok_or("Effect data unavailable.")?;
+    let heal = spell.types == [3, 0];
+    let category = (spell.types == [4, 0]).then(|| combat::integer(row, 1) as u8);
+    let cure = (spell.types == [5, 0]).then(|| combat::integer(row, 1));
+    let now = skills::now_ms();
+    let mut removed = Vec::new();
+
+    if cure == Some(1) {
+        state.periodic.retain(|_, effect| effect.amount >= 0);
+    } else if cure == Some(2) {
+        state.buffs.retain(|category, buff| {
+            let debuff = catalog
+                .spells
+                .get(&buff.skill)
+                .is_some_and(|s| s.types[0] == 4 && matches!(s.moral, 7 | 10 | 12));
+            if debuff {
+                removed.push(*category);
+            }
+            !debuff
+        });
+    } else if heal {
+        recover(
+            state,
+            if combat::integer(row, 2) == 14 {
+                1
+            } else {
+                combat::integer(row, 2)
+            },
+            combat::integer(row, 3) as u16,
+        );
+        let duration = combat::integer(row, 5).max(0) as u64;
+        if duration >= 2 {
+            let amount = if combat::integer(row, 2) == 14 {
+                let level = f64::from(session.progress.level);
+                (level * (1.0 + level / 30.0)) as i16 + 3
+            } else {
+                (combat::integer(row, 4) / (duration as i32 / 2)).clamp(0, 32767) as i16
+            };
+            if state.periodic.contains_key(&spell.id) {
+                return Err("This recovery effect is already active.");
+            }
+            state.periodic.insert(
+                spell.id,
+                skills::Periodic {
+                    amount,
+                    next: now + 2000,
+                    until: now + duration * 1000,
+                },
+            );
+        }
+    } else {
+        let kind = category.unwrap();
+        if state.buffs.get(&kind).is_some_and(|buff| now < buff.until) {
+            return Err("A buff of this category is already active.");
+        }
+        state.buffs.insert(
+            kind,
+            skills::Buff {
+                skill: spell.id,
+                until: now + combat::integer(row, 3).max(0) as u64 * 1000,
+            },
+        );
+        if matches!(kind, 1 | 7) {
+            let stats = effective(session, state, Some(catalog), lobby.combat.as_ref());
+            let previous = (state.hp, state.max_hp);
+            state.set_limits(stats.hp, stats.mp);
+            if kind == 1 {
+                state.hp = previous
+                    .0
+                    .saturating_add(stats.hp.saturating_sub(previous.1))
+                    .min(stats.hp);
+            }
+        }
+    }
+    Ok(removed)
+}
+
 pub(crate) async fn handle(
     sock: &mut TcpStream,
     peer: SocketAddr,
@@ -455,77 +542,9 @@ pub(crate) async fn handle(
     if !matches!(spell.moral, 1 | 2 | 4 | 6) {
         return Some(Err("This utility's target rules are unavailable."));
     }
-    let row = row.unwrap();
-    let now = skills::now_ms();
     let mut removed = Vec::new();
     let result = resources::commit(lobby, account, session.character.slot, spell, 1, |state| {
-        if cure == Some(1) {
-            state.periodic.retain(|_, effect| effect.amount >= 0);
-        } else if cure == Some(2) {
-            state.buffs.retain(|category, buff| {
-                let debuff = catalog
-                    .spells
-                    .get(&buff.skill)
-                    .is_some_and(|s| s.types[0] == 4 && matches!(s.moral, 7 | 10 | 12));
-                if debuff {
-                    removed.push(*category);
-                }
-                !debuff
-            });
-        } else if heal {
-            recover(
-                state,
-                if combat::integer(row, 2) == 14 {
-                    1
-                } else {
-                    combat::integer(row, 2)
-                },
-                combat::integer(row, 3) as u16,
-            );
-            let duration = combat::integer(row, 5).max(0) as u64;
-            if duration >= 2 {
-                let amount = if combat::integer(row, 2) == 14 {
-                    let level = f64::from(session.progress.level);
-                    (level * (1.0 + level / 30.0)) as i16 + 3
-                } else {
-                    (combat::integer(row, 4) / (duration as i32 / 2)).clamp(0, 32767) as i16
-                };
-                if state.periodic.contains_key(&spell.id) {
-                    return Err("This recovery effect is already active.");
-                }
-                state.periodic.insert(
-                    spell.id,
-                    skills::Periodic {
-                        amount,
-                        next: now + 2000,
-                        until: now + duration * 1000,
-                    },
-                );
-            }
-        } else {
-            let kind = category.unwrap();
-            if state.buffs.get(&kind).is_some_and(|buff| now < buff.until) {
-                return Err("A buff of this category is already active.");
-            }
-            state.buffs.insert(
-                kind,
-                skills::Buff {
-                    skill: spell.id,
-                    until: now + combat::integer(row, 3).max(0) as u64 * 1000,
-                },
-            );
-            if matches!(kind, 1 | 7) {
-                let stats = effective(session, state, Some(catalog), lobby.combat.as_ref());
-                let previous = (state.hp, state.max_hp);
-                state.set_limits(stats.hp, stats.mp);
-                if kind == 1 {
-                    state.hp = previous
-                        .0
-                        .saturating_add(stats.hp.saturating_sub(previous.1))
-                        .min(stats.hp);
-                }
-            }
-        }
+        removed = apply_friendly(lobby, session, spell, state)?;
         Ok(())
     });
     match result {

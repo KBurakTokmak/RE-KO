@@ -91,7 +91,16 @@ failed routing preserves the item. Native party loot results5/3 include a bundle
 ID, unlike solo result1; result4 releases the looter when someone else receives
 an item. Recipient inventory/coins refresh from SQLite before their next action.
 Source: supplied1453 `User::ItemGet/GetItemRoutingUser`, original client006B2C30.
-Party finder and full other-player/group skill effects are not implemented.
+Loot rotation preserves the next recipient across leader promotion and member
+removal, and clears on disband/new-party creation. It cannot inherit a previous
+party's cursor. Regression coverage includes rotation, capacity/range/life
+exclusions, atomic coin rollback, XP level weights and nearby quest credit.
+
+Ordinary friendly/party buffs, heals, periodic restores and cures use the original
+skill morals and table radii; see [skills and combat](skills-combat.md).
+Caster payment and recipient saves are atomic, with party vitals refreshed after
+commit. Party finder, resurrection and complete remote skill animations remain
+unimplemented; core membership/rewards do not imply every retail social feature.
 
 ## Clans
 

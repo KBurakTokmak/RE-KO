@@ -9,16 +9,43 @@ are `magic.rs`, `archery.rs`, `mage.rs`, `priest.rs`, `utility.rs` and `skills.r
 
 | Class | Working paths | Important remaining gaps |
 | --- | --- | --- |
-| Rogue | Melee damage, percentage drains, Sprint/Swift/Light Feet, stealth, multi-arrow volleys, poison/elemental arrows, self healing/armor/AP/resistance/cures | Other-player buffs, full detection/PvP effects, Illusion/Concentration and displacement effects |
+| Rogue | Melee damage, percentage drains, Sprint/Swift/Light Feet, party Wolf, friendly buffs, stealth, multi-arrow volleys, poison/elemental arrows, healing/armor/AP/resistance/cures | Full detection/PvP effects, Illusion/Concentration and displacement effects |
 | Warrior | Physical skills, Blooding/periodic recovery, HP Booster, stat/AC/speed buffs, MP absorption, supported defense/master passives | Party movement/sacrifice, provoke/binding, full stun/AI effects |
 | Mage | Elemental/AoE/staff damage, NPC lightning stun, self/friendly buffs, transport, bounded player drains/control and NPC reactive armor | Full player damage, exact retail freeze/slow chances, bind points and terrain collision |
-| Priest | Instant/periodic self healing, HP/AC/stat/resistance buffs, cures, physical/offensive skills, NPC AC/max-HP curses | Other-player/party heals, resurrection and several control/counter-curse effects |
+| Priest | Instant/periodic self, friendly and party healing, moral-scoped HP/AC/stat/resistance buffs, cures, Counter Curse protection, physical/offensive skills, NPC AC/max-HP curses | Resurrection and several control effects |
 
-Most group buffs/heals currently support the caster where implemented; Mage
-Escape also transfers eligible party members. Party membership and rewards exist,
-but complete group-target buff/heal delivery remains separate. Unsupported effects
+Ordinary friendly effects use original target morals through `friendly.rs`.
+Mage Escape also transfers eligible party members. Unsupported effects
 fail without charging resources. See the
 [backlog](../design/1453-feature-backlog.md) for individual dependencies.
+
+### Friendly and party skill targets
+
+Original `Skill_Magic_Main_us.tbl` moral2 permits a friendly selected player,
+moral3 excludes self, moral4 requires a selected party member (self works solo),
+and moral6 applies to eligible party members including the caster. This follows
+primary1453 `MagicInstance::CheckSkillPrerequisites`, not a class-name whitelist.
+Swift, Priest armor/healing/cures and Mage resistances can reach friendly players
+outside the party; moral4 HP buffs remain party-restricted. Arena48 and cross-nation
+combat zones71/72 retain the existing hostile-player restrictions. Direct targets
+also respect viewer-specific GM visibility; party membership authorizes group effects.
+
+Living, loaded recipients must share the caster's zone. Selected spells use the
+main-table range; party Type3 uses effect column1 radius and Type4 column2 radius.
+Wolf108030 therefore reaches35m; group healing112557 reaches30m and Critical
+Restore112570 reaches20m. Original costs, durations, percentages and periodic totals
+remain table-derived. Caster resources and all recipient saves commit in one SQLite
+transaction before notifications. Group recasts skip already active effects; if no
+recipient can benefit, payment rolls back. Recipient HP/MP, attributes, buff/speed
+effects, party vitals and cached skill state refresh without relogging.
+
+Received beneficial buffs can be cancelled by their recipient without requiring
+that recipient to learn the caster's class skill. Hostile buffs remain protected
+from this cancellation. Counter Curse category29 blocks the existing hostile
+player-target Type4 control path, following primary `GrantType4Buff` and curse
+checks; it does not invent reflection or block Type3 drains. Resurrection Type5
+kind3, complete remote animation broadcast and general player combat remain gaps.
+Group0 item/PUS skills keep their owned self-consumable route below.
 
 ### Transformation Scroll
 
@@ -158,7 +185,7 @@ single payment and rejection of repeated projectile completion.
 | Minor Resist Master20 | Category24 ground-area enemy-player debuff applies the original six20percent resistance reductions after flat bonuses, independent of buff iteration order. |
 | Lightning damage | Successful direct lightning NPC hits can stun for two seconds. Chance is truncate(50 - lightningResistance/2), bounded0..100percent. Active stun is not extended by another hit; AI stops its visible destination and pauses movement/attacks until expiry. |
 | Mana Shield | Existing incoming-NPC absorption now caps absorbed HP by available MP divided by MP cost;15percent absorption costs4MP per absorbed HP. Zero MP cannot provide free absorption. |
-| Friendly buffs | Original Mage resistance and Frozen Armor/Shell/Barrier categories8/2 support a living same-nation player within original range as well as the existing self path. Full party-wide buff distribution remains separate. |
+| Friendly buffs | Original Mage resistance and Frozen Armor/Shell/Barrier categories8/2 use shared moral/range validation and atomic recipient delivery; see friendly and party targets above. |
 
 Player resource/control effects operate only on eligible living enemy players
 in Colony Zone71, Ardream72 or arena48. Party members and protected admin targets

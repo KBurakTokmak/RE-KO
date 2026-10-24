@@ -63,9 +63,14 @@ pub(crate) fn leave(h: &mut Hub, actor: u16, target: u16) {
     if target == leader || members.len() <= 2 {
         h.send_many(&members, &[0x2f, 5]);
         h.parties.remove(&leader);
+        h.loot_rotation.remove(&leader);
         h.party_invites.retain(|_, (owner, _)| *owner != leader);
         leader_state(h, leader, false);
     } else {
+        let cursor = *h.loot_rotation.get(&leader).unwrap_or(&0) % members.len();
+        let next = (0..members.len())
+            .map(|n| members[(cursor + n) % members.len()])
+            .find(|id| *id != target);
         let mut p = vec![0x2f, 4];
         p.extend(target.to_le_bytes());
         h.send_many(&members, &p);
@@ -73,6 +78,15 @@ pub(crate) fn leave(h: &mut Hub, actor: u16, target: u16) {
             .get_mut(&leader)
             .unwrap()
             .retain(|id| *id != target);
+        if let Some(next) = next {
+            h.loot_rotation.insert(
+                leader,
+                h.parties[&leader]
+                    .iter()
+                    .position(|id| *id == next)
+                    .unwrap_or(0),
+            );
+        }
     }
 }
 pub(crate) fn process(h: &mut Hub, id: u16, p: &[u8]) {
@@ -135,6 +149,9 @@ pub(crate) fn process(h: &mut Hub, id: u16, p: &[u8]) {
                 return;
             }
             let actor_name = actor.character.name.clone();
+            if !h.parties.contains_key(&id) {
+                h.loot_rotation.remove(&id);
+            }
             h.parties.entry(id).or_insert_with(|| vec![id]);
             h.party_invites.insert(target, (id, now + 60000));
             let mut reply = vec![0x2f, 2];
@@ -187,8 +204,14 @@ pub(crate) fn process(h: &mut Hub, id: u16, p: &[u8]) {
                 return;
             }
             let mut members = h.parties.remove(&id).unwrap();
+            let cursor = h.loot_rotation.remove(&id).unwrap_or(0) % members.len();
+            let recipient = members[cursor];
             let index = members.iter().position(|v| *v == next).unwrap();
             members.swap(0, index);
+            h.loot_rotation.insert(
+                next,
+                members.iter().position(|id| *id == recipient).unwrap(),
+            );
             h.send_many(&members, &[0x2f, 5]);
             h.parties.insert(next, members.clone());
             h.party_invites.retain(|_, (leader, _)| *leader != id);

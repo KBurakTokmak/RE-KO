@@ -264,6 +264,35 @@ fn administrators_keep_local_gm_privileges_but_have_visible_remote_authority() {
 }
 
 #[test]
+fn party_loot_rotation_follows_the_next_member_across_promotion_removal_and_disband() {
+    let lobby = lobby();
+    let a = player(&lobby, "RotationA", 1, 80);
+    let b = player(&lobby, "RotationB", 1, 80);
+    let c = player(&lobby, "RotationC", 1, 80);
+    let mut h = lobby.social.lock().unwrap();
+    h.parties
+        .insert(a.player_id, vec![a.player_id, b.player_id, c.player_id]);
+    h.loot_rotation.insert(a.player_id, 1);
+    let mut promote = vec![0x2f, 0x1c];
+    promote.extend(c.player_id.to_le_bytes());
+    party::process(&mut h, a.player_id, &promote);
+    assert!(!h.loot_rotation.contains_key(&a.player_id));
+    assert_eq!(
+        h.parties[&c.player_id][h.loot_rotation[&c.player_id]],
+        b.player_id
+    );
+    party::leave(&mut h, c.player_id, b.player_id);
+    assert_eq!(
+        h.parties[&c.player_id][h.loot_rotation[&c.player_id]],
+        a.player_id
+    );
+    party::leave(&mut h, c.player_id, c.player_id);
+    assert!(!h.loot_rotation.contains_key(&c.player_id));
+    invite(&mut h, c.player_id, a.player_id);
+    assert_eq!(*h.loot_rotation.get(&c.player_id).unwrap_or(&0), 0);
+}
+
+#[test]
 fn party_consent_capacity_leadership_chat_status_region_and_disconnect() {
     let lobby = lobby();
     let a = player(&lobby, "PartyLeader", 1, 80);
