@@ -131,7 +131,7 @@ leveling/class/world; **P2** LAN/social/economy; **P3** optional endgame/custom 
 | AUTH-01 | Password validation, login token binding and duplicate-session handling | Partial | P1 before LAN exposure | First-login registration and salted Argon2id verification are implemented, with locked per-server faction choice; see [accounts](../re/accounts.md). Rust `lobby.rs` still uses one-time IP association and rejects ambiguous same-IP pending logins; native token binding and duplicate live-session handling remain. Source GS `LoginHandler.cpp`/login server auth and `WIZ_KICKOUT` behavior. Implement SQLite-local authentication/session binding, not source SQL/ODBC infrastructure. | Native login-token evidence |
 | CHAR-01 | Normal character deletion and appearance change | Missing | P2 | Source pre-world dispatcher includes `WIZ_DEL_CHAR`0x03 and `WIZ_CHANGE_HAIR`; Rust game dispatch creates/selects but lacks0x03 deletion flow. Manual prior SQL removal is not this feature. GS `CharacterSelectionHandler.cpp`, DB requests; ownership/confirmation and cascading records need tests. | AUTH-01 recommended |
 | CHAR-02 | Name, nation, gender and job-change consumables | Missing / Unverified | P3 | GS `NPCHandler.cpp::HandleNameChange`, `CharacterHandler.cpp::NationChange/GenderChange/JobChange` have paths; no corresponding Rust dispatch/effects. Verify client support, item IDs, clan/party restrictions and need for each private service. | AUTH-01, ITEM-06 for metadata if needed |
-| CHAR-03 | Server skillbar/hotkey save and reload | Implemented; native UI test pending | P2 | Native79/1 save and79/2 load,0..64 packed records, character-scoped SQLite persistence and reconnect restoration now exist. Source User.cpp/DatabaseThread.cpp/DBAgent and native0050FB40/0050F8F0 agree. See [skillbar](../re/skillbar.md). | None |
+| CHAR-03 | Server skillbar/hotkey save and reload | Implemented bounded | P2 | Native79/1 save and79/2 load,0..64 packed records and character-scoped SQLite persistence survive restart. Unsent live UI edits are not autosaved when the server stops; menu logout must occur while it is running. Owner declined a new client autosave change. Source User.cpp/DatabaseThread.cpp/DBAgent and native0050FB40/0050F8F0 agree. See [skillbar](../re/skillbar.md). | Native save transmission for unsent edits |
 
 ## Events, PvP services and optional private features
 
@@ -181,7 +181,7 @@ source enums/widths already differed from the original client in prior work.
 | --- | --- | --- |
 | Version/login, nation, new/list/select character | Bounded local implementation | BASE-01, AUTH-01 |
 | Delete character, change hair | Absent entry points | CHAR-01 |
-| GameStart, server index, hotkey/skill data | World bootstrap exists; optional server-index list is empty; server hotkey persistence absent | BASE-01, CHAR-03; native optional metadata audit if needed |
+| GameStart, server index, hotkey/skill data | World bootstrap and received hotkey persistence exist; optional server-index list is empty; unsent UI edits need native save before shutdown | BASE-01, CHAR-03; native optional metadata audit if needed |
 | Move, rotate, request user-in | Shared presence/movement and requested user-in; rotation remains | LAN-01 |
 | Attack, target HP, magic process | Solo/NPC combat and supported effects | BASE-02, CLASS tasks |
 | Chat, chat target | Normal/shout, party and clan; no private/alliance routing | LAN-05 |
