@@ -77,7 +77,7 @@ pub(crate) struct Session {
     pub next_attack: u64,
     pub pending_cast: Option<crate::magic::Cast>,
     pub magic_projectiles: std::collections::HashMap<u32, crate::mage::Flight>,
-    pub arrows: std::collections::HashMap<u32, crate::archery::Volley>,
+    pub arrows: std::collections::HashMap<u32, Vec<crate::archery::Volley>>,
 }
 
 impl Session {

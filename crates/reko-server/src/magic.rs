@@ -102,7 +102,22 @@ pub(crate) async fn handle(
     if crate::transformation::handle(sock, peer, lobby, account, session, payload).await {
         return true;
     }
-    let id = u32::from_le_bytes(payload[2..6].try_into().unwrap());
+    let mut id = u32::from_le_bytes(payload[2..6].try_into().unwrap());
+    let mut recovered;
+    let payload = if id == 0
+        && matches!(payload[1], 3 | 4)
+        && u16::from_le_bytes([payload[6], payload[7]]) == session.player_id
+    {
+        let Some(resolved) = crate::archery::resolve(lobby, session, payload) else {
+            return true;
+        };
+        id = resolved;
+        recovered = payload.to_vec();
+        recovered[2..6].copy_from_slice(&id.to_le_bytes());
+        &recovered[..]
+    } else {
+        payload
+    };
     let Some(spell) = catalog.spells.get(&id) else {
         return false;
     };

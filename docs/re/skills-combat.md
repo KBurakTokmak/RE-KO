@@ -241,11 +241,54 @@ records. Generated per-record reports/raw inputs remain local under ignored
 
 Costs, cooldowns, reagents and persistent effects commit atomically. Cast and
 projectile stages cannot charge twice; bounded paid tickets limit impacts and
-reject forged/duplicate completions. Multiple Shot/Arrow Shower use original
+reject unbound/exhausted completions. Multiple Shot/Arrow Shower use original
 three/five-arrow counts. Post-launch movement/animation cancellation does not
 discard a paid projectile. Movement forecasts alone must not clear a mage cast;
 explicit phase4 cancels it. Five-second projectile expiry is an inferred local
 policy, not a recovered1453 flight-time constant. Animation minimums need work.
+
+### Multiple Shot and Arrow Shower flight indices
+
+Original108515/208515 require15Archery points,40MP and3arrows;
+108555/208555 require55points,150MP and5arrows. Both original recast fields are0;
+cast animations are1300/1500ms. Do not add a shared basic-attack recovery lock
+to these skills or require an earlier animation to finish after its arrows launch.
+Learning and bow requirements remain enforced; no extra skill points are granted.
+
+Original1453 captures show a volley index pattern of `base,base,base+1` or
+`base,base,base+1,base+2,base+3`. Open-KO `MagicSkillMng::FlyingType2` corroborates
+the duplicated base: it emits the central projectile then increments side indices
+starting from the same value. Side directions spread15degrees per pair. Its
+`N3FXMgr` evaluates character boxes/target arrival and world/terrain collisions;
+each projectile reports its actual hit target or ground miss independently.
+Supplied1453 `MagicInstance::ExecuteType2` explicitly leaves impact selection to
+the client and pays all arrows in MAGIC_FLYING, not once per impact.
+
+Server tickets now preserve separate volleys, including overlapping recasts of
+the same skill. Each index has a bounded impact quota (two for the base, one per
+remaining used index). A first base collision's phase4/-101 cleanup must not erase
+the client's skill mapping while the other base arrow is still in flight. Cleanup
+is acknowledged after that index's quota is exhausted. A stale-map skillID0 impact
+or cleanup is resolved only to an unambiguous, same-zone, unexpired paid index;
+unbound ID0 completions are ignored without a false learning-error notice. They
+cannot launch or purchase a new volley. A later impact cannot reuse an exhausted
+side index to consume a different arrow. Unmatched/exhausted/expired impact
+reports are logged and ignored without a chat failure or damage. Captured side
+arrows can travel onward to terrain beyond the five-second paid hit window;
+that harmless late collision must not become a player-facing resource error.
+Late cleanup still acknowledges release of a no-longer-live index; it cannot
+erase a currently active shared index or create a new damage entitlement.
+Native result data3 is0 on success or
+-104 on a miss, rather than echoing a projectile index as a result code.
+
+Flight range validation retains the paid launch position after movement; damage
+and ordinary monster defenses remain unchanged. Independent arrows may hit the
+same close/large body, separate bodies or nothing. The server does not force all
+three/five arrows onto the selected target or approximate a volley with AoE.
+Exact mesh/terrain collision remains the unchanged client's responsibility; no
+new server3D projectile simulation or client patch is claimed. Tickets expire
+after the existing inferred5seconds; a64-active-volley guard and overlapping-index
+refusal are bounded local safeguards before payment. Zone transfer clears tickets.
 
 Sprint's original recast60 means six seconds, separate from its ten-second
 150percent speed buff. Swift has600seconds/150percent; Light Feet10seconds/

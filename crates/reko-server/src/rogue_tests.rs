@@ -391,8 +391,19 @@ async fn arrows_are_paid_once_and_impacts_are_bounded() {
         starter::inventory(&lobby.db.lock().unwrap(), "admin", 0).unwrap()[0].count,
         97
     );
-    for _ in 0..3 {
-        cast(&lobby, &mut session, &mut socket, peer, 108515, 10000, 3).await;
+    for index in [0i16, 0, 1] {
+        let mut impact = skills::effect(108515, session.player_id);
+        impact[8..10].copy_from_slice(&10000u16.to_le_bytes());
+        impact[16..18].copy_from_slice(&index.to_le_bytes());
+        magic::handle(
+            &mut socket,
+            peer,
+            &impact,
+            &lobby,
+            Some("admin"),
+            Some(&mut session),
+        )
+        .await;
     }
     assert!(hp(&lobby) < before);
     assert_eq!(session.skills.mana, 4070);
@@ -422,8 +433,20 @@ async fn captured_multi_arrow_cleanup_and_cross_skill_combo_keep_all_paid_hits()
     let Some((lobby, mut session, mut socket, _client, peer)) = setup().await else {
         return;
     };
-    for id in [108515, 108555] {
-        cast(&lobby, &mut session, &mut socket, peer, id, 10000, 2).await;
+    for (id, index) in [(108515, 30i16), (108555, 32)] {
+        let mut launch = skills::effect(id, session.player_id);
+        launch[1] = 2;
+        launch[8..10].copy_from_slice(&10000u16.to_le_bytes());
+        launch[16..18].copy_from_slice(&index.to_le_bytes());
+        magic::handle(
+            &mut socket,
+            peer,
+            &launch,
+            &lobby,
+            Some("admin"),
+            Some(&mut session),
+        )
+        .await;
     }
     assert_eq!(session.skills.mana, 3920);
     assert_eq!(
@@ -479,6 +502,315 @@ async fn captured_multi_arrow_cleanup_and_cross_skill_combo_keep_all_paid_hits()
         starter::inventory(&lobby.db.lock().unwrap(), "admin", 0).unwrap()[0].count,
         92
     );
+}
+
+#[tokio::test]
+async fn native_arrow_indices_survive_cleanup_zero_ids_misses_and_post_launch_movement() {
+    use tokio::io::AsyncReadExt;
+    async fn receive(client: &mut TcpStream, prefix: &[u8]) -> Vec<u8> {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let mut header = [0; 4];
+                client.read_exact(&mut header).await.unwrap();
+                let size = u16::from_le_bytes([header[2], header[3]]) as usize;
+                let mut packet = vec![0; size + 2];
+                client.read_exact(&mut packet).await.unwrap();
+                packet.truncate(size);
+                if packet.starts_with(prefix) {
+                    return packet;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+    fn event(s: &Session, id: u32, phase: u8, index: i16, target: u16) -> Vec<u8> {
+        let mut p = skills::effect(id, s.player_id);
+        p[1] = phase;
+        p[8..10].copy_from_slice(&target.to_le_bytes());
+        p[10..].fill(0);
+        if phase == 4 {
+            p[16..18].copy_from_slice(&(-101i16).to_le_bytes());
+            p[18..20].copy_from_slice(&index.to_le_bytes());
+        } else {
+            p[16..18].copy_from_slice(&index.to_le_bytes());
+        }
+        p
+    }
+    let Some((lobby, mut s, mut socket, mut client, peer)) = setup().await else {
+        return;
+    };
+    for (id, base) in [(108515, 100), (108555, 103)] {
+        let launch = event(&s, id, 2, base, 10000);
+        magic::handle(
+            &mut socket,
+            peer,
+            &launch,
+            &lobby,
+            Some("admin"),
+            Some(&mut s),
+        )
+        .await;
+        receive(&mut client, &[0x31, 2]).await;
+    }
+    assert_eq!(
+        s.skills.mana, 3920,
+        "alternating volleys charge only once each"
+    );
+    s.position.x += 1000;
+    s.pending_cast = None;
+    let mut cancel = event(&s, 108555, 4, 103, 10000);
+    cancel[16..18].copy_from_slice(&(-100i16).to_le_bytes());
+    magic::handle(
+        &mut socket,
+        peer,
+        &cancel,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    receive(&mut client, &[0x31, 4]).await;
+    // First collision: retain the shared central/side index on the client.
+    let before = hp(&lobby);
+    for p in [
+        event(&s, 108515, 3, 100, 10000),
+        event(&s, 108515, 4, 100, 10000),
+    ] {
+        magic::handle(&mut socket, peer, &p, &lobby, Some("admin"), Some(&mut s)).await;
+    }
+    let effect = receive(&mut client, &[0x31, 3]).await;
+    assert_eq!(&effect[16..18], &0i16.to_le_bytes());
+    assert!(
+        hp(&lobby) < before,
+        "moving away cannot relocate an arrow's launch point"
+    );
+    let mut byte = [0; 1];
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            client.read_exact(&mut byte)
+        )
+        .await
+        .is_err(),
+        "first shared-index cleanup must not erase the other arrow"
+    );
+    // A captured stale-map ID0 is recoverable only through its paid flight index.
+    let before = hp(&lobby);
+    let impact = event(&s, 0, 3, 100, 10000);
+    magic::handle(
+        &mut socket,
+        peer,
+        &impact,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    let effect = receive(&mut client, &[0x31, 3]).await;
+    assert_eq!(u32::from_le_bytes(effect[2..6].try_into().unwrap()), 108515);
+    assert!(hp(&lobby) < before);
+    let cleanup = event(&s, 0, 4, 100, 10000);
+    magic::handle(
+        &mut socket,
+        peer,
+        &cleanup,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    receive(&mut client, &[0x31, 4]).await;
+    let before = hp(&lobby);
+    // Third copy of index100 must not spend the still-unused side arrow101.
+    let replay = event(&s, 0, 3, 100, 10000);
+    magic::handle(
+        &mut socket,
+        peer,
+        &replay,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    assert_eq!(hp(&lobby), before);
+    let miss = event(&s, 108515, 3, 101, u16::MAX);
+    magic::handle(
+        &mut socket,
+        peer,
+        &miss,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    let reply = receive(&mut client, &[0x31, 3]).await;
+    assert_eq!(&reply[16..18], &(-104i16).to_le_bytes());
+    assert_eq!(
+        hp(&lobby),
+        before,
+        "a terrain collision is not forced onto the selected mob"
+    );
+    for (index, target) in [
+        (103, 10000),
+        (103, 10001),
+        (104, 10002),
+        (105, 10000),
+        (106, 10001),
+    ] {
+        let health = |id| {
+            let p = lobby.monsters.as_ref().unwrap().health(id, 21).unwrap();
+            u32::from_le_bytes(p[8..12].try_into().unwrap())
+        };
+        let before = health(target);
+        let p = event(&s, 108555, 3, index, target);
+        magic::handle(&mut socket, peer, &p, &lobby, Some("admin"), Some(&mut s)).await;
+        receive(&mut client, &[0x31, 3]).await;
+        assert!(
+            health(target) < before,
+            "independent arrows may hit different bodies"
+        );
+    }
+    assert_eq!(s.skills.mana, 3920);
+    for v in s.arrows.values_mut().flatten() {
+        v.expires_at = 0;
+    }
+    // Captured side arrows can reach terrain after the five-second hit window.
+    // Neither late ground packets nor stale combat claims get damage or chat errors.
+    let before = hp(&lobby);
+    for target in [u16::MAX, 10000] {
+        let stale = event(&s, 108555, 3, 104, target);
+        magic::handle(
+            &mut socket,
+            peer,
+            &stale,
+            &lobby,
+            Some("admin"),
+            Some(&mut s),
+        )
+        .await;
+    }
+    assert_eq!(hp(&lobby), before);
+    assert_eq!(s.skills.mana, 3920);
+    let late_cleanup = event(&s, 108555, 4, 104, u16::MAX);
+    magic::handle(
+        &mut socket,
+        peer,
+        &late_cleanup,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    receive(&mut client, &[0x31, 4]).await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            client.read_exact(&mut byte)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        starter::inventory(&lobby.db.lock().unwrap(), "admin", 0).unwrap()[0].count,
+        92
+    );
+    let before = hp(&lobby);
+    for p in [event(&s, 0, 2, 200, 10000), event(&s, 0, 3, 999, 10000)] {
+        magic::handle(&mut socket, peer, &p, &lobby, Some("admin"), Some(&mut s)).await;
+    }
+    assert_eq!(
+        hp(&lobby),
+        before,
+        "zero IDs cannot launch free arrows or invent an index"
+    );
+    assert_eq!(s.skills.mana, 3920);
+}
+
+#[tokio::test]
+async fn same_skill_flights_coexist_and_reject_overlapping_indices_without_payment() {
+    let Some((lobby, mut s, mut socket, _client, peer)) = setup().await else {
+        return;
+    };
+    for base in [200i16, 210] {
+        // Advance only this spell's database cooldown, preserving both paid flights.
+        lobby.db.lock().unwrap().execute("UPDATE character_skill_cooldowns SET next_cast=0 WHERE account='admin' AND skill=108555", []).unwrap();
+        let mut launch = skills::effect(108555, s.player_id);
+        launch[1] = 2;
+        launch[8..10].copy_from_slice(&10000u16.to_le_bytes());
+        launch[16..18].copy_from_slice(&base.to_le_bytes());
+        magic::handle(
+            &mut socket,
+            peer,
+            &launch,
+            &lobby,
+            Some("admin"),
+            Some(&mut s),
+        )
+        .await;
+    }
+    assert_eq!(s.arrows[&108555].len(), 2);
+    assert_eq!(s.skills.mana, 3810);
+    let mut overlap = skills::effect(108555, s.player_id);
+    overlap[1] = 2;
+    overlap[8..10].copy_from_slice(&10000u16.to_le_bytes());
+    overlap[16..18].copy_from_slice(&201i16.to_le_bytes());
+    magic::handle(
+        &mut socket,
+        peer,
+        &overlap,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    assert_eq!(
+        s.skills.mana, 3810,
+        "overlapping index ranges cannot pay or replace a volley"
+    );
+    for base in [200i16, 210] {
+        for index in [base, base, base + 1, base + 2, base + 3] {
+            let before = hp(&lobby);
+            let mut impact = skills::effect(108555, s.player_id);
+            impact[8..10].copy_from_slice(&10000u16.to_le_bytes());
+            impact[16..18].copy_from_slice(&index.to_le_bytes());
+            magic::handle(
+                &mut socket,
+                peer,
+                &impact,
+                &lobby,
+                Some("admin"),
+                Some(&mut s),
+            )
+            .await;
+            assert!(
+                hp(&lobby) < before,
+                "recasting cannot overwrite an older paid flight"
+            );
+        }
+    }
+    assert_eq!(
+        starter::inventory(&lobby.db.lock().unwrap(), "admin", 0).unwrap()[0].count,
+        90
+    );
+    for v in s.arrows.values_mut().flatten() {
+        v.expires_at = 0;
+    }
+    let before = hp(&lobby);
+    let mut expired = skills::effect(0, s.player_id);
+    expired[8..10].copy_from_slice(&10000u16.to_le_bytes());
+    expired[16..18].copy_from_slice(&200i16.to_le_bytes());
+    magic::handle(
+        &mut socket,
+        peer,
+        &expired,
+        &lobby,
+        Some("admin"),
+        Some(&mut s),
+    )
+    .await;
+    assert_eq!(hp(&lobby), before);
+    assert_eq!(s.skills.mana, 3810);
 }
 
 #[tokio::test]
