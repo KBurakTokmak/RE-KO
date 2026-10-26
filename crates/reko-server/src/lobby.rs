@@ -13,6 +13,7 @@ struct PendingLogin {
 }
 
 pub(crate) struct Lobby {
+    pub advertised_ip: Option<std::net::Ipv4Addr>,
     pub social: Arc<Mutex<super::social::Hub>>,
     pub merchants: Vec<super::shops::Merchant>,
     pub db: Mutex<Connection>,
@@ -35,6 +36,7 @@ impl Lobby {
     ) -> rusqlite::Result<Self> {
         super::database::initialize(&db)?;
         Ok(Self {
+            advertised_ip: None,
             social: Arc::new(Mutex::new(super::social::Hub::default())),
             merchants: Vec::new(),
             db: Mutex::new(db),

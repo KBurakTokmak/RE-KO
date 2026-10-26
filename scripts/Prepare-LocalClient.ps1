@@ -1,4 +1,4 @@
-param([string]$SourceDirectory)
+param([string]$SourceDirectory, [string]$ServerIp)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -12,6 +12,17 @@ if ((Get-FileHash -LiteralPath (Join-Path $source 'KnightOnline.exe') -Algorithm
 if (Test-Path -LiteralPath $destination) {
     throw 'Local client already exists. Preserve it before preparing a new copy.'
 }
+if ([string]::IsNullOrWhiteSpace($ServerIp)) {
+    $sourceSettings = Get-Content -LiteralPath (Join-Path $source 'Server.ini') -Raw
+    $sourceAddress = [regex]::Match($sourceSettings, '(?mi)^IP0=([^\r\n]+)')
+    $ServerIp = if ($sourceAddress.Success) { $sourceAddress.Groups[1].Value.Trim() } else { '127.0.0.1' }
+}
+$ServerIp = $ServerIp.Trim()
+$parsedAddress = $null
+if ($ServerIp -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or -not [Net.IPAddress]::TryParse($ServerIp, [ref]$parsedAddress)) {
+    throw 'ServerIp/IP0 must be the RE-KO server IPv4 address.'
+}
+$ServerIp = $parsedAddress.ToString()
 
 Push-Location $root
 try {
@@ -21,7 +32,7 @@ try {
     Copy-Item -LiteralPath $source -Destination $destination -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'target/debug/reko-local-guard.exe') -Destination (Join-Path $destination 'XTrap/XTrap.exe') -Force
     Copy-Item -LiteralPath (Join-Path $root 'target/debug/XPatch.exe') -Destination (Join-Path $destination 'XPatch.exe') -Force
-    [IO.File]::WriteAllText((Join-Path $destination 'Server.ini'), "[Server]`r`nCount=1`r`nIP0=127.0.0.1`r`n[Version]`r`nFiles=1453`r`n")
+    [IO.File]::WriteAllText((Join-Path $destination 'Server.ini'), "[Server]`r`nCount=1`r`nIP0=$ServerIp`r`n[Version]`r`nFiles=1453`r`n")
     @{
         profile = 'local-1453-inert-guard-v1'
         client_sha256 = $expectedHash

@@ -177,14 +177,35 @@ Stop-Process -Id $serverProcess.Id
 
 Alternatively, `cargo run -p reko-serverd` runs in the terminal; Ctrl+C stops it.
 Stop the daemon before replacing its Windows executable or importing game data.
-Ports are15100/login and15001/game. The server currently binds all interfaces
-and advertises loopback. Public hosting and reliable simultaneous clients behind one IP remain
+Ports are15100/login and15001/game; the server binds all interfaces.
+The starter uses automatic game addresses without prompting. Each login connection
+receives the local IPv4 address it connected to: localhost, LAN or VPN. This uses
+socket metadata, without scanning interfaces or echoing the client's source IP.
+Clients configure the host's reachable IPv4 in their own Server.ini. Allow inbound
+TCP15100 and15001 on the host firewall for the trusted LAN/VPN.
+
+Only if automatic selection is unsuitable (for example NAT/proxy hosting), force
+an advertised IPv4 explicitly:
+
+```powershell
+.\server_starter.bat -AdvertiseIp 192.168.1.50
+```
+
+Omit the option, pass `-AdvertiseIp auto`, or an empty value for automatic mode.
+For direct `cargo run -p reko-serverd`, `REKO_ADVERTISE_IP` provides the same optional
+override; absent/empty/auto means automatic. Explicit localhost means127.0.0.1.
+An override applies to all login clients, so they must reach that advertised host
+and use a consistent login/game route. Invalid/non-host addresses fail at startup.
+The PowerShell starter clears inherited overrides in automatic mode and restores
+the caller's environment afterward; nothing is saved in SQLite or committed.
+
+Public hosting and reliable simultaneous clients behind one IP remain
 unsupported; see [accounts](re/accounts.md).
 
 ## Client and persistence
 
-Use a separate local-testing client configuration with `IP0=127.0.0.1` in
-Server.ini. Do not use scripts to modify the reference installation. With the
+Use `IP0=127.0.0.1` for a local server or the host LAN/VPN IPv4 for remote
+play in the selected client copy's Server.ini. Do not use scripts to modify the reference installation. With the
 server running, double-click `scripts/Start-LocalClient.cmd`. Its hash-checked
 startup profile is described in [client startup](re/client-startup.md).
 If the legacy XTrap child closes the client on this machine, prepare the isolated

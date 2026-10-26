@@ -97,6 +97,7 @@ pub const MAX_PLAYERS: usize = 20;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
+    pub advertised_ip: Option<std::net::Ipv4Addr>,
     pub db_path: PathBuf,
     pub game_dir: PathBuf,
 }
@@ -105,6 +106,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_LOGIN_PORT)),
+            advertised_ip: None,
             db_path: PathBuf::from("reko.db"),
             game_dir: reko_common::game_dir(),
         }
@@ -153,13 +155,13 @@ fn put_short_str(buf: &mut Vec<u8>, s: &str) {
 }
 
 // Builds a KO server list payload containing 1 server and 1 channel.
-fn build_server_list_payload(opcode: u8) -> Vec<u8> {
+fn build_server_list_payload(opcode: u8, advertised_ip: std::net::Ipv4Addr) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(opcode);
     payload.push(1); // 1 server
 
     // Server IP
-    put_short_str(&mut payload, "127.0.0.1");
+    put_short_str(&mut payload, &advertised_ip.to_string());
     // Server name and channel (delimited by pipe)
     put_short_str(&mut payload, "RE-KO|Channel 1");
     // Stats: player count, free limit, premium limit
@@ -324,7 +326,20 @@ async fn handle_payload(
         // Opcode 0x05 or 0xF5: LS_SERVERLIST
         0x05 | 0xF5 => {
             tracing::info!(%peer, opcode = %format!("0x{opcode:02X}"), "handling LS_SERVERLIST request");
-            let response_payload = build_server_list_payload(opcode);
+            let advertised_ip = match lobby.advertised_ip {
+                Some(ip) => ip,
+                None => match sock.local_addr().map(|a| a.ip()) {
+                    Ok(std::net::IpAddr::V4(ip)) => ip,
+                    other => {
+                        tracing::error!(
+                            ?other,
+                            "Cannot determine IPv4 game address from login connection"
+                        );
+                        return;
+                    }
+                },
+            };
+            let response_payload = build_server_list_payload(opcode, advertised_ip);
             send_response(sock, peer, crypt, &response_payload, "LS_SERVERLIST").await;
         }
         // Opcode 0xF6: LS_NEWS
@@ -1614,6 +1629,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let bootstrap = world_entry::Bootstrap::load(&cfg.game_dir)?;
     let catalog = starter::Catalog::load(&cfg.game_dir)?;
     let mut lobby = lobby::Lobby::new(open_db(&cfg)?, rules, bootstrap)?;
+    lobby.advertised_ip = cfg.advertised_ip;
+    tracing::info!(advertised_ip=?cfg.advertised_ip, "game address override; None uses each login connection local address");
     quest_rewards::verify_thresholds(&lobby.db.lock().unwrap())?;
     starter::grant_missing(&mut lobby.db.lock().unwrap(), &catalog)?;
     lobby.starters = Some(catalog);
@@ -1686,6 +1703,51 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn login_server_lists_use_local_endpoint_or_explicit_override_and_preserve_tail() {
+        assert_eq!(Config::default().advertised_ip, None);
+        for local in ["127.0.0.1", "127.0.0.2"] {
+            for configured in [
+                None,
+                Some("192.168.1.50".parse::<std::net::Ipv4Addr>().unwrap()),
+            ] {
+                let mut lobby = lobby::Lobby::new(
+                    rusqlite::Connection::open_in_memory().unwrap(),
+                    characters::CreationRules::fixture(),
+                    world_entry::Bootstrap { next_level_exp: 50 },
+                )
+                .unwrap();
+                lobby.advertised_ip = configured;
+                let lobby = Arc::new(lobby);
+                for opcode in [0x05, 0xf5] {
+                    let listener = TcpListener::bind(format!("{local}:0")).await.unwrap();
+                    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                        .await
+                        .unwrap();
+                    let (mut socket, actual_peer) = listener.accept().await.unwrap();
+                    // A distinct source IP must never be echoed as the server address.
+                    let peer = SocketAddr::from(([192, 168, 1, 60], actual_peer.port()));
+                    handle_payload(&mut socket, peer, &mut None, &[opcode], &lobby).await;
+                    let mut header = [0; 4];
+                    client.read_exact(&mut header).await.unwrap();
+                    let size = usize::from(u16::from_le_bytes([header[2], header[3]]));
+                    let mut body = vec![0; size + 2];
+                    client.read_exact(&mut body).await.unwrap();
+                    assert_eq!(&body[..2], &[opcode, 1]);
+                    let len = usize::from(u16::from_le_bytes([body[2], body[3]]));
+                    let expected = configured
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_else(|| local.to_owned());
+                    assert_eq!(&body[4..4 + len], expected.as_bytes());
+                    let base = build_server_list_payload(opcode, std::net::Ipv4Addr::LOCALHOST);
+                    let oldlen = usize::from(u16::from_le_bytes([base[2], base[3]]));
+                    assert_eq!(&body[4 + len..size], &base[4 + oldlen..]);
+                    assert_eq!(&body[size..], &[0x55, 0xaa]);
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn admin_basic_hits_are_fixed_bounded_and_revocable_without_affecting_normal_attacks() {

@@ -49,3 +49,8 @@ same-IP sessions are refused. Recovering native token binding, duplicate live
 session handling, password recovery and stronger transport are separate work.
 Passwords now validate, but the legacy protocol is not modern secure internet
 transport. Keep the server on trusted development/LAN networks.
+The server-list handoff automatically uses the local IPv4 of each accepted login
+socket. Localhost/LAN/VPN connections therefore receive the address they connected
+to, preserving the current IP-based login/game association. `REKO_ADVERTISE_IP` or
+starter `-AdvertiseIp` optionally forces a host address for NAT/proxy setups; there
+is no interface scan or startup prompt. See [setup](../setup.md).

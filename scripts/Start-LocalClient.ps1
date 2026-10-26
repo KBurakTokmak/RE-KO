@@ -4,9 +4,22 @@ $game = Join-Path (Split-Path -Parent $root) 'KnightOnline1453'
 $localGame = Join-Path $root '.local/client-1453'
 if (Test-Path -LiteralPath (Join-Path $localGame '.reko-local-client.json')) { $game = $localGame }
 if (Get-Process KnightOnline -ErrorAction SilentlyContinue) { throw 'Close the running game before starting the local-server client.' }
-if (-not (Get-NetTCPConnection -LocalPort 15001 -State Listen -ErrorAction SilentlyContinue)) { throw 'Start RE-KO server before the client.' }
-$serverIni = Get-Content (Join-Path $game 'Server.ini')
-if (-not ($serverIni | Where-Object { $_ -match '^IP0=127\.0\.0\.1\s*$' })) { throw 'This startup profile requires the local RE-KO server configuration.' }
+$serverIni = Get-Content -LiteralPath (Join-Path $game 'Server.ini') -Raw
+$serverAddress = [regex]::Match($serverIni, '(?mi)^IP0=([^\r\n]+)')
+$serverIp = $null
+if (-not $serverAddress.Success -or -not [Net.IPAddress]::TryParse($serverAddress.Groups[1].Value.Trim(), [ref]$serverIp) -or $serverIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+    throw 'Set IP0 in the selected client Server.ini to the RE-KO server IPv4 address.'
+}
+foreach ($port in @(15100,15001)) {
+    $connection = New-Object Net.Sockets.TcpClient
+    try {
+        $pending = $connection.BeginConnect($serverIp, $port, $null, $null)
+        if (-not $pending.AsyncWaitHandle.WaitOne(3000)) { throw 'Connection timed out.' }
+        $connection.EndConnect($pending)
+    }
+    catch { throw "Cannot reach RE-KO at $serverIp TCP $port. Check the server, VPN and host firewall. $($_.Exception.Message)" }
+    finally { $connection.Dispose() }
+}
 $log = Join-Path $root ('logs/local-client-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
 New-Item -ItemType Directory -Path (Join-Path $root 'logs') -Force | Out-Null
 $python = (Get-Command python -ErrorAction Stop).Source

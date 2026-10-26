@@ -108,6 +108,10 @@ Never replay old one-off grants or edit a live character merely to satisfy tests
 - The start BAT pulls with `git pull --ff-only` before startup; the stop BAT
   attempts the same after stopping. Direct PowerShell launchers do not pull.
   Account for that difference when inspecting changes or selecting a build.
+- Server address selection is automatic from the accepted login socket's local
+  IPv4, with no prompt/interface scan. `-AdvertiseIp` (or daemon REKO_ADVERTISE_IP)
+  is an optional override for special routing; do not force a machine-specific
+  address during ordinary starts/restarts.
 - Reference imports/repairs and local client preparation are separate from a
   Git update. Inspect their required exports, existing save rules and dry runs
   before applying them; do not assume pulling commits provisions gameplay data.

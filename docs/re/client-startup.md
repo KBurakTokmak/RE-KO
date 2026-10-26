@@ -60,7 +60,8 @@ not establish compatibility with a working XTrap child process.
 Run `scripts/Prepare-LocalClient.ps1` once with Rust available. It copies the
 original installation to ignored `.local/client-1453`, builds the existing
 XPatch success helper and an inert `reko-local-guard` child, and installs those
-only in the copy. The local Server.ini targets127.0.0.1. An existing destination
+only in the copy. Server.ini preserves the source IP0 unless `-ServerIp` is
+provided; use the host LAN/VPN address for remote play. An existing destination
 is refused to preserve its configuration. Allow roughly1.1GB for this copy.
 
 `Start-LocalClient.cmd` selects the prepared copy when its profile manifest is
@@ -81,6 +82,31 @@ Sessions beyond the former exit window were validated, including a21-minute
 idle run closed intentionally by the tester. A later run exceeded an hour.
 Future exits still need their own process/packet evidence. Keep raw dumps,
 debugger traces, protected binaries and generated decompilation outside Git.
+
+## Remote players and XTrap startup errors
+
+The original EXE/launcher still starts its original XTrap components. The reported
+`01-300-00000000-031` unsupported-operating-system message belongs to that local
+startup path, not the RE-KO login/game server. A historical [XTrap support thread](https://forum.z8games.com/discussion/232619/list-of-xtrap-errors-and-possible-solutions/p2)
+lists the equivalent `01-0300-00000000-031` category; it does not establish modern
+Windows compatibility or the precise cause on an uninspected computer.
+
+Reuse the existing approved isolated profile, rather than inventing another
+EXE/driver modification. On the player's own machine, with Rust/Python available:
+
+```powershell
+.\scripts\Prepare-LocalClient.ps1 -SourceDirectory '<original1453-client>' -ServerIp '<host-IPv4>'
+.\scripts\Start-LocalClient.cmd
+```
+
+Preparation refuses an existing destination. If the isolated copy already exists,
+retain it and configure its own `.local/client-1453/Server.ini` IP0; do not rerun
+preparation over it. The launcher now checks both TCP15100/15001 at the configured
+IP0, so a remote player does not need a local server process. Profile hashes and
+all watchdog/helper behavior are unchanged. Launching the original EXE directly
+does not activate this startup procedure. If the error persists through the
+prepared CMD launcher, capture that player's Windows version and generated
+`logs/local-client-*` outputs before attributing a new cause or changing remedies.
 
 ## Local inventory UI fixes
 
