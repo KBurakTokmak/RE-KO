@@ -10,6 +10,42 @@ world entries after loading completes. Disconnects clear presence and pending
 invitations; selecting a character already active on another connection is refused.
 Notifications flush before a new transaction and after processing/ticks, preserving
 ordering between external party rewards and the player's own shop/loot replies.
+Queued updates also wake the recipient's socket task immediately; remote effects
+and vitals do not wait for the250ms character tick.
+
+Accepted movement relays validated coordinates, signed speed and start/stop
+flags, including a stop at unchanged coordinates. Snapshot synchronization no
+longer invents a constant45-speed move for every changed position. Teleports
+invalidate both sides' visibility caches and rebuild native OUT/IN and region
+records even within the same region, without exposing hidden GMs.
+The connection's online-player guard stays registered during zone loading.
+Cross-zone travel explicitly removes the travelling character from its party
+before the loading handshake, including pending invites/summons. Returning does
+not rejoin. A departing leader promotes the next member when at least two members
+can remain; a two-member party disbands. Same-zone warps/summons retain membership.
+This follows primary1453 CharacterMovementHandler.cpp::ZoneChange's leader
+promotion and PartyRemove path; it is separate from socket-disconnect cleanup.
+
+`visuals.rs` collects server-produced attack08, level1B and validated magic31
+cast/fly/effect/failure replies during actions/ticks. Only visible nearby
+observers receive them; source IDs must match the actor, skills must exist in the
+catalog and hidden targets stay hidden. Incoming requests, private resource/items
+and client-claimed damage are never broadcast. Friendly recipients keep their
+direct effect without a second observer copy. Primary1453 User.cpp::LevelChange
+and MagicInstance.cpp region sends, corroborated by Open-KO GameProcMain's remote
+level/attack/magic receivers, define these visual packets.
+
+Target22 replies cover visible players, monsters and ordinary NPCs using native
+ID:u16, immediate:u8, maximum/currentHP:u32 and delta:i16. Player target watchers
+receive HP changes independently of party membership; noncombat NPCs use imported
+HP. Monster snapshots share actual maximum/current HP and set immediate1 for
+prompt bars. Target22's delta is personal: Open-KO/native client logs any negative
+delta as damage dealt by the local player, with no caster field. Only the credited
+character receives its own direct/DoT/curse HP loss; observers get delta0. Combined
+DoT events retain separate owner portions. This changes presentation, not damage,
+resource checks, XP or loot attribution. No extra periodic monster polling is added.
+Source1453 User::SendTargetHP and Open-KO GameProcMain::MsgRecv_TargetHP corroborate
+widths and echo behavior.
 
 Native0D/1 builds the character snapshot; matching0D/2 confirms that the client's
 world load completed. Stage2 requires a prior snapshot/entry and refreshes player
@@ -49,8 +85,52 @@ corroborates retail GM invisibility, while current Open-KO has commented-out
 render exclusions and must not override original1453 behavior here. Keeping GMs
 visible to authorized viewers is an intentional local display policy; it neither
 revokes their server permissions nor grants privileges to other clients.
-General player-target combat, complete remote skill animations and PvP remain
+General player-target combat and PvP remain
 separate from this presence and social implementation.
+
+## Player trading
+
+Native0x30 supports request1, consent2, add3/other-add4, confirm5/other-confirm6,
+complete7 and cancel8. Use the player's native Trade control while nearby.
+Each player can be in only one pending or active exchange: both participants
+are checked and reserved under the same Hub lock, so simultaneous or crossed
+requests cannot create overlapping trades. There are twelve item offer slots
+plus Noah. Both players must be alive, loaded,
+within10m and visible to one another. Nations must match except in Moradon or
+Forgotten Temple, as with existing zone social rules. Requests expire after60s;
+active windows after10minutes. These are bounded local session policies.
+
+Offers stay in the owner's saved bag/wallet until completion. Add validates
+ownership, quantities, original item/extension and untradeable race20; IDs
+at/above900000000 are excluded except the explicit Noah offer. Both confirmations
+are required, and either confirmation freezes both offers. Final validation reads
+both current inventories/wallets, removes both outgoing offers, then simulates
+incoming stack merges, free slots, durability, weight and the2100000000 coin cap.
+Native countable1 stacks cap9999; small-countable3 cap500. Nonstackable charged
+packs transfer whole without merging; the native unit-count1 request moves all
+remaining charges with that icon (Open-KO UIPerTradeDlg::ReceiveIconDrop). All four inventory/wallet writes commit
+in one SQLite transaction; validation/write failure rolls everything back and
+sends native failure plus a private reason to both players. Success sends incoming
+item placements and final Noah; the trade UI owns its icon changes, with no duplicate
+inventory snapshot. Session caches refresh from committed data before later actions.
+
+Cancel, decline, disconnect, death, excessive distance and teleport discard offers.
+Periodic timestamp41 and other read-only traffic do not cancel exchange. Cancel
+captures record both participants, the reason and triggering gameplay opcode.
+Other inventory/service/combat actions end exchange before dispatch; autoloot pauses
+during exchange. External inventory/Noah notifications end it before applying their
+update, preserving party loot rather than withholding rewards. No schema migration,
+startup grant or persistent half-trade state is needed.
+
+Evidence: supplied1453 GameServer/TradeHandler.cpp, Open-KO GameProcMain and
+SubProcPerTrade, original1453 receiver006B5900 and item insertion00634170. Original
+agree/add results are bytes; other-add includes a trailing u32 user-data length0.
+Completion is success:u8,coins:u32,count:u16, then destination:u8,item:u32,
+quantity:u16,durability:u16,user-data-length:u32 per incoming placement. The native
+receiver consumes this tail unlike Open-KO1298; nonzero pet/user data is outside
+the current item model. Ordinary nearby trade requests accept source four-byte
+form or the native five-byte form with near-mode1; remote trade-board mode is
+not implemented.
 
 ## Parties
 
@@ -99,7 +179,7 @@ exclusions, atomic coin rollback, XP level weights and nearby quest credit.
 Ordinary friendly/party buffs, heals, periodic restores and cures use the original
 skill morals and table radii; see [skills and combat](skills-combat.md).
 Caster payment and recipient saves are atomic, with party vitals refreshed after
-commit. Party finder, resurrection and complete remote skill animations remain
+commit. Party finder and resurrection remain
 unimplemented; core membership/rewards do not imply every retail social feature.
 
 ## Clans

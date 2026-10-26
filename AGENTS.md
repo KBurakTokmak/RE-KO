@@ -40,6 +40,9 @@ bounded coverage and missing systems; a handler's existence is not full fidelity
   Record mismatches/unknowns; do not silently invent mechanics or rewards.
 - Preserve confirmed equipment, loot, potion, combat and quest behavior.
   Administrative grants must not become ordinary creation/startup defaults.
+- Owner-defined potion prices/weights are server-only ITEM_ECONOMY defaults in
+  `config/item-balance.json`. The owner declined matching client table changes;
+  retain original client prices/weight text unless separately authorized later.
 - Keep scripts and documentation path-independent. Resolve paths from the
   repository/script location or configuration; do not embed personal drive paths.
 - Preserve required license attribution when incorporating substantial source.

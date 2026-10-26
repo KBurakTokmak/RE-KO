@@ -14,6 +14,18 @@ are `magic.rs`, `archery.rs`, `mage.rs`, `priest.rs`, `utility.rs` and `skills.r
 | Mage | Elemental/AoE/staff damage, NPC lightning stun, self/friendly buffs, transport, bounded player drains/control and NPC reactive armor | Full player damage, exact retail freeze/slow chances, bind points and terrain collision |
 | Priest | Instant/periodic self, friendly and party healing, moral-scoped HP/AC/stat/resistance buffs, cures, Counter Curse protection, physical/offensive skills, NPC AC/max-HP curses | Resurrection and several control effects |
 
+Mage cast state and paid projectile tickets have separate lifetimes. After
+launch, another skill may cast and resolve while the older projectile travels.
+A ticketed impact does not clear the current pending cast; a direct effect or
+launch consumes only its matching skill/target cast. Late cleanup for a different
+skill cannot cancel the newer cast. Fire Spear followed by Ignition is covered
+in both impact orders, including duplicate-impact refusal and one mana payment
+per spell. Original1453 packets demonstrate castB starting between flyA and hitA;
+primary1453 MagicInstance and Open-KO MagicProcess distinguish cast/fly/effect
+phases. The original per-skill recast/resource checks remain; no shared250ms
+impact delay or fixed animation-duration floor is introduced. Faster client
+animations/transformation timing do not need a server-side wait for older hits.
+
 Ordinary friendly effects use original target morals through `friendly.rs`.
 Mage Escape also transfers eligible party members. Unsupported effects
 fail without charging resources. See the
@@ -44,7 +56,8 @@ that recipient to learn the caster's class skill. Hostile buffs remain protected
 from this cancellation. Counter Curse category29 blocks the existing hostile
 player-target Type4 control path, following primary `GrantType4Buff` and curse
 checks; it does not invent reflection or block Type3 drains. Resurrection Type5
-kind3, complete remote animation broadcast and general player combat remain gaps.
+kind3 and general player combat remain gaps. Accepted skill visuals replicate to
+eligible nearby viewers; see [social](social.md).
 Group0 item/PUS skills keep their owned self-consumable route below.
 
 ### Transformation Scroll
@@ -136,6 +149,16 @@ has party moral4 in the original table; the supported path affects the caster
 (including its native untargeted request), not every party member. Other-player
 PUS targets are refused. Unimplemented categories/services still fail without
 charging; this is not blanket support for every Power-Up Store product.
+
+Active buffs restore at login and after the native zone-load completion27/2,
+matching supplied1453 CharacterMovementHandler.cpp::RecvZoneChange calling
+InitType4/RecastSavedMagic after ZoneChangeLoaded.
+The client receives its current attributes/vitals and each unexpired effect with
+remaining seconds from the original persisted deadline. This does not consume
+another scroll, restart its duration/cooldown, heal/refill resources or change
+ordinary recast exclusion. The transformation/visibility refresh retains existing
+zone restrictions. Restore occurs after loading, not at the earlier27/1 stage
+where the client can still clear its buff UI.
 
 Kind255 scroll packs store remaining uses in durability, independently of the
 inventory stack count. A purchased30-use item has count1/durability30; skill use

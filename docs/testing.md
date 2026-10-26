@@ -65,6 +65,10 @@ Useful original-client regression passes:
   location persistence. At level10 use Kaishan's first job change.
 - Buy, equip, swap and sell items; verify pants, both rings, hand conflicts,
   inventory icon removal, durability loss and sundries repair.
+- For potion economy overrides compare actual deducted Noah and server total
+  weight, not unchanged client item text. Soul costs11250, Wisdom/Favors5250,
+  Speed+1000; other shop HP/MP potions retain20percent of original price and all
+  ten recovery-potion weights halve. Repeated migration/start must not discount again.
 - Deposit/withdraw Noah at an Inn; check immediate wallet/bank balances and
   persistence after relog. Store an existing scroll stack and equipment on page8;
   reject merging separate nonstackable stacks. Captured money packets use255
@@ -151,3 +155,55 @@ a claimed short packet distance, rejects a forged position, persists a valid
 final stop before allowing damage, and retains attack cooldown enforcement.
 Native owner testing reports R appears repaired with the isolated profile.
 Additional item combinations, LAN latency and broader combat feel remain checks.
+
+For multiplayer presentation, use two nearby normal/visible characters. Check both
+HP bars by selecting each other and a merchant/monster; observe HP changes outside
+a party too. Test R, targeted magic, ground AoE, bow flight and level-up effects on
+both screens, movement/backward/speed changes and stopping without a position
+change. Summon a party member within one region, across regions and after relog;
+both must see each other immediately. Repeat with a hidden GM to verify privacy,
+not to globally reveal admins. Monster HP bars should use each committed snapshot
+without an extra client interpolation delay. Preserve party XP and loot routing.
+
+Keep a partially elapsed Speed+ potion and HP/AC scroll active while using gates
+between Moradon and the home castle. Confirm effects return on load completion,
+remaining times continue (not restart), resources/pack charges stay unchanged and
+recast remains blocked until normal expiry. Compare after relog as well.
+
+Cross-zone party check: leave Luferson for Moradon as an ordinary member and as
+leader. The traveller must disappear from the server party as well as the UI;
+remaining members keep a valid leader/loot cursor if two or more remain. Return
+without reinviting: no shared rewards or party summon eligibility should return.
+Same-zone Mage summons must preserve the party.
+
+## Native player trade
+
+- With two nearby characters, request trade and decline once; verify both can
+  continue normally. Then accept, offer Noah plus equipment and a partial stack
+  from each side. Confirm one side first: nothing transfers. Confirm the other:
+  verify items, counts, durability and balances immediately and after relog.
+  Leave the window open while adding both items and Noah across several periodic
+  timestamp checks; it must stay open. With a third player, try competing requests
+  to either participant during pending consent and active exchange: reject the
+  extra requests while preserving the original pair and its offers.
+- Fill both bags and swap one whole item each: outgoing slots must make room.
+  Try a gift into a full bag, an overweight receipt and a currency-cap overflow:
+  both sides must receive failure and keep their original items/coins.
+- Cancel after offering items/Noah; also walk away, teleport and disconnect.
+  Verify restoration and that a later fresh trade works. Offers cannot change
+  once either side confirms. Check normal party loot while a trade is open:
+  the trade closes before the external item/Noah update, without losing rewards.
+- Have two players attack one monster separately and with overlapping DoTs.
+  Each sees only their own damage in logs, while both bars show identical HP.
+  Cross-zone travel removes the traveller from the party; same-zone summons
+  retain it. Active Speed+ buffs must survive both zone transitions.
+
+Automated trade checks use two real TCP socket pairs through the game dispatcher
+and SQLite rollback injection, including full-bag swaps, final weight/coin/ownership
+failure, stack splitting, whole charged packs, cancellation and replay rejection.
+Native UI rendering still requires the two-player checks above.
+
+For Mage overlap, cast Fire Spear from range and immediately cast Ignition while
+the spear travels. Both must damage in either arrival order, including with a
+transformation. Repeat while moving after launch: the paid spear keeps its launch
+origin, and the new spell still uses its own range/resource/cooldown checks.

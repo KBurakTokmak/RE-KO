@@ -358,3 +358,140 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
         "explicit cast cancellation still blocks completion"
     );
 }
+
+#[tokio::test]
+async fn fire_spear_and_ignition_overlap_in_either_impact_order_without_shared_damage_lock() {
+    for spear_first in [true, false] {
+        let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let game = reko_common::game_dir();
+        lobby.skills = Some(skills::Catalog::load(&game).unwrap());
+        lobby.monsters = Some(Arc::new(monsters::World::load(&game).unwrap()));
+        s.character.class = 110;
+        s.progress.points = [0, 0, 0, 0, 0, 80, 80, 80, 20];
+        s.skills.set_limits(5000, 10000);
+        skills::save(&lobby.db.lock().unwrap(), "test", 0, &s.skills).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        let player = s.player_id;
+        let packet = |id, phase| {
+            let mut p = skills::effect(id, player);
+            p[1] = phase;
+            p[8..10].copy_from_slice(&10000u16.to_le_bytes());
+            p
+        };
+        let hp = || {
+            let p = lobby.monsters.as_ref().unwrap().health(10000, 21).unwrap();
+            u32::from_le_bytes(p[8..12].try_into().unwrap())
+        };
+        let spells = &lobby.skills.as_ref().unwrap().spells;
+        assert!(spells[&110527].name.eq_ignore_ascii_case("Fire Spear"));
+        assert_eq!(spells[&110518].name, "Ignition");
+        let mana = 10000 - spells[&110527].mana - spells[&110518].mana;
+        for phase in [1, 2] {
+            magic::handle(
+                &mut socket,
+                peer,
+                &packet(110527, phase),
+                &lobby,
+                Some("test"),
+                Some(&mut s),
+            )
+            .await;
+        }
+        assert!(s.magic_projectiles.contains_key(&110527));
+        let launch_mana = s.skills.mana;
+        magic::handle(
+            &mut socket,
+            peer,
+            &packet(110518, 1),
+            &lobby,
+            Some("test"),
+            Some(&mut s),
+        )
+        .await;
+        let initial_hp = hp();
+        if spear_first {
+            for phase in [3, 4] {
+                magic::handle(
+                    &mut socket,
+                    peer,
+                    &packet(110527, phase),
+                    &lobby,
+                    Some("test"),
+                    Some(&mut s),
+                )
+                .await;
+            }
+            assert!(hp() < initial_hp);
+            assert_eq!(
+                s.skills.mana, launch_mana,
+                "paid projectile impact cannot charge again"
+            );
+            assert!(
+                s.pending_cast
+                    .as_ref()
+                    .is_some_and(|c| c.matches(110518, 10000, skills::now_ms())),
+                "older impact/cleanup must preserve Ignition cast"
+            );
+        }
+        let before = hp();
+        magic::handle(
+            &mut socket,
+            peer,
+            &packet(110518, 3),
+            &lobby,
+            Some("test"),
+            Some(&mut s),
+        )
+        .await;
+        assert!(
+            hp() < before,
+            "Ignition deals damage even with Fire Spear still travelling"
+        );
+        assert_eq!(s.skills.mana, mana);
+        assert!(s.pending_cast.is_none());
+        if !spear_first {
+            assert!(
+                s.magic_projectiles.contains_key(&110527),
+                "Ignition must not consume the other projectile"
+            );
+            let before = hp();
+            magic::handle(
+                &mut socket,
+                peer,
+                &packet(110527, 3),
+                &lobby,
+                Some("test"),
+                Some(&mut s),
+            )
+            .await;
+            assert!(hp() < before);
+            assert_eq!(s.skills.mana, mana);
+        }
+        assert!(!s.magic_projectiles.contains_key(&110527));
+        let before = hp();
+        for id in [110527, 110518] {
+            magic::handle(
+                &mut socket,
+                peer,
+                &packet(id, 3),
+                &lobby,
+                Some("test"),
+                Some(&mut s),
+            )
+            .await;
+        }
+        assert_eq!(hp(), before, "duplicate impact packets cannot damage again");
+        assert_eq!(s.skills.mana, mana);
+        let persisted = skills::load(&lobby.db.lock().unwrap(), "test", 0).unwrap();
+        assert_eq!(persisted.mana, mana);
+        assert!(
+            persisted.cooldowns.contains_key(&110527) && persisted.cooldowns.contains_key(&110518)
+        );
+    }
+}

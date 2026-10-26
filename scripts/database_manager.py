@@ -228,10 +228,21 @@ def zone_names(db, historical, template):
         from_template(db, template, {'world_reference_rules': lambda r: r['table_name'] == 'ZONE_INFO'})
 
 
+def potion_balance(db, historical, template):
+    from item_balance import definitions
+    for item in definitions():
+        value = json.dumps(dict(price=item['price'], weight=item['weight']), sort_keys=True)
+        existing = db.execute("SELECT data FROM world_reference_rules WHERE table_name='ITEM_ECONOMY' AND rule_id=?", (item['id'],)).fetchone()
+        if existing and json.loads(existing[0]) != json.loads(value):
+            raise ValueError(f"Item {item['id']} has a different local economy rule; refusing overwrite.")
+        db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('ITEM_ECONOMY',?,?)", (item['id'], value))
+
+
 # Append new revisions in order; never rename/replay an already shipped revision.
 MIGRATIONS = ((REVISION, delos), ('002-mage-combat-travel', mage_travel),
               ('003-combat-zone-population', combat_zones), ('004-transformations', transformations),
-              ('005-suppression-loot', suppression_loot), ('006-zone-metadata', zone_names))
+              ('005-suppression-loot', suppression_loot), ('006-zone-metadata', zone_names),
+              ('007-potion-balance', potion_balance))
 
 
 def migrate_content(db, historical, template=None):

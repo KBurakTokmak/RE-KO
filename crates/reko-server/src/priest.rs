@@ -91,7 +91,14 @@ async fn execute(
             |_| Ok(()),
         )?);
         for id in world.area_targets(center, radius) {
-            let _ = world.curse(id, center, (radius - 2.0).max(0.0), curse, || Ok(()));
+            let _ = world.curse(
+                id,
+                center,
+                (radius - 2.0).max(0.0),
+                curse,
+                &session.character.name,
+                || Ok(()),
+            );
         }
     } else {
         world.curse(
@@ -99,6 +106,7 @@ async fn execute(
             session.position,
             f32::from(spell.range),
             curse,
+            &session.character.name,
             || {
                 paid = Some(resources::commit(
                     lobby,

@@ -107,6 +107,7 @@ pub(crate) async fn relocate(
         session.character.slot,
         position,
     )?;
+    lobby.social.lock().unwrap().reset_view(session.player_id);
     session.position = position;
     session.movement = movement::Validator::default();
     session.pending_cast = None;

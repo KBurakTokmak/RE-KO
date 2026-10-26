@@ -14,6 +14,7 @@ pub(crate) struct Player {
 #[derive(Default)]
 pub(crate) struct Hub {
     pub players: HashMap<u16, Player>,
+    pub exchanges: HashMap<u16, crate::trade::Exchange>,
     pub parties: HashMap<u16, Vec<u16>>,
     pub party_invites: HashMap<u16, (u16, u64)>,
     pub clan_invites: HashMap<u16, (u16, u16, u64)>,
@@ -25,6 +26,8 @@ pub(crate) struct Hub {
     pub loot_rotation: HashMap<u16, usize>,
     visible: HashMap<u16, HashSet<u16>>,
     gm_public: HashSet<u16>,
+    targets: HashMap<u16, u16>,
+    notifiers: HashMap<u16, std::sync::Arc<tokio::sync::Notify>>,
 }
 pub(crate) fn near(a: Position, b: Position, meters: u16) -> bool {
     let dx = i64::from(a.x) - i64::from(b.x);
@@ -46,6 +49,65 @@ pub(crate) fn name(p: &[u8]) -> Option<&str> {
         .then_some(text)
 }
 impl Hub {
+    pub fn notifier(&mut self, id: u16) -> std::sync::Arc<tokio::sync::Notify> {
+        self.notifiers.entry(id).or_default().clone()
+    }
+    pub fn watch_target(&mut self, viewer: u16, target: u16) {
+        self.targets.insert(viewer, target);
+    }
+
+    pub fn broadcast_visual(
+        &mut self,
+        actor: u16,
+        target: Option<u16>,
+        direct: Option<u16>,
+        packet: &[u8],
+    ) {
+        let viewers: Vec<_> = self
+            .players
+            .iter()
+            .filter_map(|(&viewer, p)| {
+                (viewer != actor
+                    && Some(viewer) != direct
+                    && p.s.entered
+                    && !p.s.zone_loading
+                    && self
+                        .visible
+                        .get(&viewer)
+                        .is_some_and(|ids| ids.contains(&actor))
+                    && self.can_see(viewer, actor)
+                    && target.is_none_or(|id| {
+                        id == u16::MAX
+                            || id == actor
+                            || self.players.contains_key(&id) && self.can_see(viewer, id)
+                            || id >= 10000 && p.s.visible_entities.contains(&id)
+                    }))
+                .then_some(viewer)
+            })
+            .collect();
+        self.send_many(&viewers, packet);
+    }
+
+    pub fn reset_view(&mut self, id: u16) {
+        if let Some(old) = self.visible.remove(&id) {
+            for other in old {
+                let mut p = vec![7, 2];
+                p.extend(other.to_le_bytes());
+                self.send(id, p);
+            }
+        }
+        let viewers: Vec<_> = self
+            .visible
+            .iter_mut()
+            .filter_map(|(&viewer, seen)| seen.remove(&id).then_some(viewer))
+            .collect();
+        for viewer in viewers {
+            let mut p = vec![7, 2];
+            p.extend(id.to_le_bytes());
+            self.send(viewer, p);
+        }
+        self.targets.remove(&id);
+    }
     pub fn can_see(&self, viewer: u16, target: u16) -> bool {
         self.players
             .get(&viewer)
@@ -53,8 +115,14 @@ impl Hub {
             .is_some_and(|(v, t)| !t.s.is_admin || v.s.is_admin || self.gm_public.contains(&target))
     }
     pub fn send(&mut self, id: u16, p: Vec<u8>) {
+        if matches!(p.first(), Some(0x26 | 0x3d | 0x4a)) {
+            crate::trade::cancel(self, id, "Trade cancelled: inventory or Noah changed.");
+        }
         if self.players.contains_key(&id) {
             self.queues.entry(id).or_default().push(p);
+            if let Some(wake) = self.notifiers.get(&id) {
+                wake.notify_one();
+            }
         }
     }
     pub fn send_many(&mut self, ids: &[u16], p: &[u8]) {
@@ -80,6 +148,10 @@ impl Hub {
             .unwrap_or_else(|| vec![id])
     }
     pub fn disconnect(&mut self, id: u16) {
+        crate::trade::cancel(self, id, "Trade cancelled: player disconnected.");
+        self.notifiers.remove(&id);
+        self.targets
+            .retain(|viewer, target| *viewer != id && *target != id);
         self.gm_public.remove(&id);
         self.skill_refresh.remove(&id);
         self.skill_notice.remove(&id);
@@ -115,6 +187,7 @@ impl Hub {
                 s: s.clone(),
             },
         );
+        crate::trade::maintain(self, id);
         let ids: Vec<_> = self.players.keys().copied().collect();
         for viewer in ids {
             let now: HashSet<_> = self
@@ -162,19 +235,34 @@ impl Hub {
                     self.send(viewer, p);
                     let p = self.user_in(id);
                     self.send(viewer, p);
-                } else if prior.s.position != s.position {
-                    let mut p = vec![6];
-                    p.extend(id.to_le_bytes());
-                    p.extend(s.position.x.to_le_bytes());
-                    p.extend(s.position.z.to_le_bytes());
-                    p.extend(s.position.y.to_le_bytes());
-                    p.extend(45u16.to_le_bytes());
-                    p.push(3);
-                    self.send(viewer, p);
                 }
             }
         }
         if let Some(prior) = prior {
+            if (prior.s.skills.hp, prior.s.skills.max_hp) != (s.skills.hp, s.skills.max_hp) {
+                let viewers: Vec<_> = self
+                    .targets
+                    .iter()
+                    .filter_map(|(&viewer, &target)| {
+                        (target == id
+                            && self.can_see(viewer, id)
+                            && self.players.get(&viewer).is_some_and(|p| {
+                                p.s.entered
+                                    && !p.s.zone_loading
+                                    && crate::population::same_region_view(p.s.position, s.position)
+                            }))
+                        .then_some(viewer)
+                    })
+                    .collect();
+                self.send_many(
+                    &viewers,
+                    &crate::target_hp::packet(
+                        id,
+                        u32::from(s.skills.max_hp),
+                        u32::from(s.skills.hp),
+                    ),
+                );
+            }
             let members = self.group(id);
             if members.len() > 1 {
                 if (
@@ -288,6 +376,17 @@ impl Hub {
         self.send_many(&members, &p);
         true
     }
+}
+pub(crate) fn movement(lobby: &Lobby, account: &str, s: &Session, payload: &[u8]) {
+    if payload.len() != 10 || payload.first() != Some(&6) {
+        return;
+    }
+    let mut hub = lobby.social.lock().unwrap();
+    hub.synchronize(account, s);
+    let mut packet = vec![6];
+    packet.extend(s.player_id.to_le_bytes());
+    packet.extend(&payload[1..]);
+    hub.broadcast_visual(s.player_id, None, None, &packet);
 }
 pub(crate) async fn visibility_command(
     sock: &mut TcpStream,

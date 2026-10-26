@@ -290,6 +290,37 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
+    pub fn load_item_economy(&mut self, db: &rusqlite::Connection) -> anyhow::Result<()> {
+        #[derive(serde::Deserialize)]
+        struct Economy {
+            price: i32,
+            weight: i16,
+        }
+        let mut query = db.prepare(
+            "SELECT rule_id,data FROM world_reference_rules WHERE table_name='ITEM_ECONOMY'",
+        )?;
+        let mut changes = Vec::new();
+        for row in query.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, text) = row?;
+            let values: Economy = serde_json::from_str(&text)?;
+            anyhow::ensure!(
+                id % 1000 == 0 && values.price >= 0 && values.weight >= 0,
+                "Invalid item economy rule for {id}"
+            );
+            anyhow::ensure!(
+                self.items.get(&id).is_some_and(|row| row.len() > 20),
+                "Unknown item economy ID {id}"
+            );
+            changes.push((id, values));
+        }
+        for (id, values) in changes {
+            let row = self.items.get_mut(&id).unwrap();
+            row[20] = CellValue::I32(values.price);
+            row[18] = CellValue::I16(values.weight);
+        }
+        Ok(())
+    }
+
     pub fn usable_item_skill(&self, spell: &crate::skills::Spell, level: u8) -> bool {
         self.item(spell.use_item).is_some_and(|(base, ext)| {
             let kind = integer(base, 10);

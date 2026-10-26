@@ -247,7 +247,13 @@ async fn execute(
             world.validate(target, origin, f32::from(spell.range))?;
         }
         let paid = pay(lobby, account, session, spell)?;
-        session.pending_cast = None;
+        if session
+            .pending_cast
+            .as_ref()
+            .is_some_and(|c| c.matches(spell.id, target, now))
+        {
+            session.pending_cast = None;
+        }
         session.magic_projectiles.insert(
             spell.id,
             Flight {
@@ -291,7 +297,16 @@ async fn execute(
         )?;
         hits.push((target, hit));
     }
-    session.pending_cast = None;
+    // A paid projectile belongs to an earlier completed cast. Its impact must
+    // not erase the next spell being cast while that projectile travels.
+    if !launched
+        && session
+            .pending_cast
+            .as_ref()
+            .is_some_and(|c| c.matches(spell.id, target, now))
+    {
+        session.pending_cast = None;
+    }
     if let Some(paid) = paid {
         resources::sync(sock, peer, lobby, account, session, paid).await;
     }

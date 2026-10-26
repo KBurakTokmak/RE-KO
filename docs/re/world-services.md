@@ -102,6 +102,22 @@ and tariff initialization use the verified transaction flow. Innkeepers expose
 account-shared storage:192slots, eight pages of24, with validated deposit,
 withdrawal, stack/bag moves and bank coins. All transactions check ownership,
 quantity, range, capacity, weight and applicable coin caps before commit.
+
+Owner-defined economy defaults live in `config/item-balance.json` and migration
+`007-potion-balance`, persisted as ITEM_ECONOMY rules. The ten shop HP/MP potions
+have half their original weight. Seven cost20percent of original price; Water of
+favors, Potion of wisdom and Potion of soul retain75percent (5250,5250,11250Noah).
+Speed+ Potion800015000 costs1000Noah at Sundries stock, including Moradon; its
+weight stays unchanged. Prices are absolute, so restart/reimport does not compound
+discounts. The shared item catalog applies overrides to buying, resale and every
+server bag-weight/capacity calculation, including already-owned items. Existing
+balances, quantities, drops, skill effects and ordinary creation grants are unchanged.
+
+These overrides are **server-side only** by owner choice. Original client tables
+retain their prices/per-item weight text and may enforce old local affordability
+or weight checks before sending a purchase request (Open-KO
+`UITransactionDlg.cpp::ItemCountOK`). Server replies use the new actual balance/weight.
+Do not alter client tables or falsify server balances to conceal that limitation.
 Storage preserves the count of an existing item stack even when the original
 client table marks that scroll nonstackable. It may move into an empty slot,
 but separate nonstackable stacks cannot merge. This matches supplied1453
@@ -470,3 +486,12 @@ supplementary Quests/7001_dungeun.lua. Older Open-KO User::ClientEvent corrobora
 type28 plus TrapNumber event dispatch. Socket/SQLite regressions exercise all37
 menus,34 forward transitions, missing keys, shortcuts, back/exit, Hell/Dragon
 connections, wrong-zone trigger rejection, party rollback and replay refusal.
+
+Wolf-family loot audit: supplied1453 group180 is shared by500/501/502/550/551/552
+Werewolf/Lycan/Loup-garou prototypes in the existing Moradon/home-zone spawns.
+The source group has30 entries and a10percent group roll. Two-Handed Sword(+8)
+125310048, Bow(+8)160100048 and Burning Wood Staff(+8)180110508 each occupy one
+entry (1/300 per kill); Panic Maul(+8)140210048 occupies two (1/150). Original
+client base/extensions validate all four, including the staff's508 extension.
+The imported pool matches the supplied source; no rate or drop-table repair is
+needed. These are reference-package rates, not a claim about every retail server.

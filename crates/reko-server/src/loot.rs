@@ -660,6 +660,78 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_wolf_group_accepts_all_four_plus_eight_weapons_without_filtering_the_staff() {
+        let Some((lobby, s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let ids = [125310048u32, 160100048, 180110508, 140210048];
+        let prototypes = [500u16, 501, 502, 550, 551, 552];
+        {
+            let db = lobby.db.lock().unwrap();
+            for proto in prototypes {
+                db.execute(
+                    "INSERT INTO world_monster_loot VALUES (?1,0,?1)",
+                    rusqlite::params![proto],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO world_drop_rules VALUES (?1,0,180,1000)",
+                    rusqlite::params![proto],
+                )
+                .unwrap();
+            }
+            // Only the source entries relevant to this regression; other entries
+            // retain empty probability so this is not a replacement loot table.
+            for slot in 0..30 {
+                let item = match slot {
+                    0 => ids[0],
+                    1 => ids[1],
+                    2 => ids[2],
+                    3 | 4 => ids[3],
+                    _ => 0,
+                };
+                db.execute(
+                    "INSERT INTO world_drop_groups VALUES (180,?1,?2)",
+                    rusqlite::params![slot, item],
+                )
+                .unwrap();
+            }
+        }
+        let book = Book::load(&lobby.db.lock().unwrap(), lobby.combat.as_ref().unwrap()).unwrap();
+        assert!(ids.iter().all(|id| book.valid.contains(id)));
+        book.inner.lock().unwrap().rng = 1234567;
+        let mut counts = HashMap::<u32, u32>::new();
+        for n in 0..60000 {
+            if let Some(packet) =
+                book.create(prototypes[n % 6], 12000, s.position, &s.character.name)
+            {
+                let bundle = u32::from_le_bytes(packet[3..7].try_into().unwrap());
+                for (id, _) in book
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .bundles
+                    .remove(&bundle)
+                    .unwrap()
+                    .items
+                {
+                    *counts.entry(id).or_default() += 1;
+                }
+            }
+        }
+        for id in ids {
+            assert!(
+                counts[&id] > 100 && counts[&id] < 600,
+                "valid native drop {id}: {}",
+                counts[&id]
+            );
+        }
+        assert!(
+            counts[&ids[3]] > counts[&ids[0]] && counts[&ids[3]] > counts[&ids[2]],
+            "Maul has two group entries"
+        );
+    }
     #[tokio::test]
     async fn autoloot_toggles_and_keeps_ownership_range_capacity_and_single_pickup() {
         let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {

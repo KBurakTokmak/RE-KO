@@ -1,0 +1,15 @@
+{
+  "items": [
+    {"id":389010000,"name":"Holy water","original_price":70,"original_weight":50,"price":14,"weight":25},
+    {"id":389011000,"name":"Water of life","original_price":160,"original_weight":60,"price":32,"weight":30},
+    {"id":389012000,"name":"Water of love","original_price":600,"original_weight":70,"price":120,"weight":35},
+    {"id":389013000,"name":"Water of grace","original_price":2000,"original_weight":80,"price":400,"weight":40},
+    {"id":389014000,"name":"Water of favors","original_price":7000,"original_weight":90,"price":5250,"weight":45},
+    {"id":389016000,"name":"Potion of spirit","original_price":160,"original_weight":22,"price":32,"weight":11},
+    {"id":389017000,"name":"Potion of intelligence","original_price":600,"original_weight":24,"price":120,"weight":12},
+    {"id":389018000,"name":"Potion of sagacity","original_price":2000,"original_weight":26,"price":400,"weight":13},
+    {"id":389019000,"name":"Potion of wisdom","original_price":7000,"original_weight":28,"price":5250,"weight":14},
+    {"id":389020000,"name":"Potion of soul","original_price":15000,"original_weight":30,"price":11250,"weight":15},
+    {"id":800015000,"name":"Speed+ Potion","original_price":1000000,"original_weight":1,"price":1000,"weight":1}
+  ]
+}

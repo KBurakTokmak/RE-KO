@@ -6,6 +6,270 @@ use crate::{
     world_entry::{Bootstrap, Session},
 };
 use rusqlite::Connection;
+
+#[test]
+fn cross_zone_travel_removes_members_and_promotes_departing_leaders_but_same_zone_keeps_party() {
+    for leader_leaves in [false, true] {
+        let lobby = lobby();
+        let a = player(&lobby, "TravelChief", 1, 80);
+        let b = player(&lobby, "TravelMember", 1, 80);
+        let c = player(&lobby, "TravelThird", 1, 80);
+        {
+            let mut hub = lobby.social.lock().unwrap();
+            invite(&mut hub, a.player_id, b.player_id);
+            party::process(&mut hub, b.player_id, &[0x2f, 2, 1]);
+            invite(&mut hub, a.player_id, c.player_id);
+            party::process(&mut hub, c.player_id, &[0x2f, 2, 1]);
+            hub.loot_rotation.insert(a.player_id, 2);
+        }
+        let mut traveller = if leader_leaves { a.clone() } else { b.clone() };
+        let mut within = traveller.position;
+        within.x += 10;
+        crate::travel::begin(&lobby, &mut traveller, within);
+        assert_eq!(
+            lobby
+                .social
+                .lock()
+                .unwrap()
+                .group(traveller.player_id)
+                .len(),
+            3
+        );
+        let destination = Position {
+            zone: 1,
+            x: 3540,
+            z: 16100,
+            y: 0,
+        };
+        {
+            let mut hub = lobby.social.lock().unwrap();
+            hub.queues.clear();
+            hub.party_invites
+                .insert(traveller.player_id, (c.player_id, u64::MAX));
+            hub.transfers.insert(traveller.player_id, within);
+        }
+        crate::travel::begin(&lobby, &mut traveller, destination);
+        {
+            let hub = lobby.social.lock().unwrap();
+            assert!(hub.party(traveller.player_id).is_none());
+            let expected_leader = if leader_leaves {
+                b.player_id
+            } else {
+                a.player_id
+            };
+            assert_eq!(hub.party(c.player_id), Some(expected_leader));
+            assert_eq!(hub.group(c.player_id).len(), 2);
+            assert_eq!(
+                hub.parties[&expected_leader][*hub.loot_rotation.get(&expected_leader).unwrap()],
+                c.player_id
+            );
+            assert!(!hub.party_invites.contains_key(&traveller.player_id));
+            assert!(!hub.transfers.contains_key(&traveller.player_id));
+            assert!(
+                hub.queues[&traveller.player_id]
+                    .iter()
+                    .any(|p| p.starts_with(&[0x2f, 4]) || p.starts_with(&[0x2f, 5]))
+            );
+        }
+        let home = within;
+        crate::travel::begin(&lobby, &mut traveller, home);
+        traveller.entered = true;
+        traveller.zone_loading = false;
+        let mut hub = lobby.social.lock().unwrap();
+        hub.synchronize(&traveller.character.name, &traveller);
+        assert_eq!(
+            hub.group(traveller.player_id),
+            vec![traveller.player_id],
+            "returning does not silently rejoin"
+        );
+        let contributor = if leader_leaves { &b } else { &a };
+        let damage = std::collections::HashMap::from([(contributor.character.name.clone(), 100)]);
+        let (credits, kills) = hub.death(100, 80, home, &damage);
+        assert!(
+            !credits
+                .iter()
+                .any(|(name, _)| name == &traveller.character.name)
+        );
+        assert!(!kills.contains(&traveller.character.name));
+    }
+}
+
+#[tokio::test]
+async fn committed_skill_and_level_visuals_reach_nearby_observers_without_gm_or_zone_leaks() {
+    let mut lobby = lobby();
+    let game = reko_common::game_dir();
+    if !game.join("Data/Skill_Magic_Main_us.tbl").is_file() {
+        return;
+    }
+    lobby.skills = Some(crate::skills::Catalog::load(&game).unwrap());
+    let mut caster = player(&lobby, "VisualCaster", 1, 80);
+    caster.progress.points = [0, 0, 0, 0, 0, 80, 80, 80, 20];
+    crate::skills::save(&lobby.db.lock().unwrap(), "VisualCaster", 0, &caster.skills).unwrap();
+    let observer = player(&lobby, "VisualObserver", 1, 80);
+    let mut distant = player(&lobby, "VisualDistant", 1, 80);
+    distant.position.zone = 1;
+    synchronize(&lobby, "VisualDistant", &mut distant);
+    lobby.social.lock().unwrap().queues.clear();
+    let wake = lobby.social.lock().unwrap().notifier(observer.player_id);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut socket, peer) = listener.accept().await.unwrap();
+    let id = caster.player_id;
+    let request = crate::skills::effect(108725, id);
+    let mana = caster.skills.mana;
+    let mut account = Some("VisualCaster".to_owned());
+    let mut session = Some(caster);
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &request,
+        &lobby,
+        &mut account,
+        &mut session,
+    )
+    .await;
+    let s = session.as_mut().unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified())
+            .await
+            .is_ok(),
+        "remote action delivery must wake without waiting for the character tick"
+    );
+    assert!(
+        s.skills.mana < mana,
+        "real skill must commit its resource payment"
+    );
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        assert_eq!(
+            hub.queues[&observer.player_id]
+                .iter()
+                .filter(|p| p.first() == Some(&0x31) && p.len() == 22 && p[1] == 3)
+                .count(),
+            1
+        );
+        assert!(
+            !hub.queues
+                .get(&distant.player_id)
+                .is_some_and(|q| q.iter().any(|p| p.first() == Some(&0x31)))
+        );
+        hub.queues.clear();
+    }
+    let packet = crate::quest_rewards::level_packet(s);
+    crate::visuals::publish(&lobby, s, vec![packet.clone()]);
+    assert!(lobby.social.lock().unwrap().queues[&observer.player_id].contains(&packet));
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        hub.players
+            .get_mut(&observer.player_id)
+            .unwrap()
+            .s
+            .visible_entities
+            .insert(10000);
+        hub.queues.clear();
+    }
+    let mut attack = vec![8, 1, 1];
+    attack.extend(id.to_le_bytes());
+    attack.extend(10000u16.to_le_bytes());
+    let mut effect = crate::skills::effect(108655, id);
+    effect[8..10].copy_from_slice(&10000u16.to_le_bytes());
+    crate::visuals::publish(&lobby, s, vec![attack.clone(), effect.clone()]);
+    {
+        let hub = lobby.social.lock().unwrap();
+        assert!(hub.queues[&observer.player_id].contains(&attack));
+        assert!(hub.queues[&observer.player_id].contains(&effect));
+    }
+    s.is_admin = true;
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        hub.synchronize("VisualCaster", s);
+        hub.queues.clear();
+    }
+    crate::visuals::publish(&lobby, s, vec![request]);
+    assert!(
+        !lobby
+            .social
+            .lock()
+            .unwrap()
+            .queues
+            .get(&observer.player_id)
+            .is_some_and(|q| q.iter().any(|p| p.first() == Some(&0x31)))
+    );
+}
+
+#[tokio::test]
+async fn same_region_summon_refreshes_both_players_and_target_bars_follow_health() {
+    use tokio::io::AsyncReadExt;
+    let lobby = lobby();
+    let a = player(&lobby, "SummonMage", 1, 80);
+    let mut b = player(&lobby, "SummonFriend", 1, 80);
+    let packet = crate::target_hp::query(&lobby, &a, b.player_id).unwrap();
+    assert_eq!((packet.len(), packet[3]), (14, 1));
+    assert_eq!(u32::from_le_bytes(packet[4..8].try_into().unwrap()), 500);
+    assert_eq!(u32::from_le_bytes(packet[8..12].try_into().unwrap()), 500);
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        hub.queues.clear();
+        hub.watch_target(a.player_id, b.player_id);
+        b.skills.hp = 123;
+        hub.synchronize("SummonFriend", &b);
+        assert!(
+            hub.queues[&a.player_id]
+                .iter()
+                .any(|p| p.first() == Some(&0x22)
+                    && u32::from_le_bytes(p[8..12].try_into().unwrap()) == 123)
+        );
+        hub.queues.clear();
+        hub.transfers.insert(b.player_id, a.position);
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut socket, peer) = listener.accept().await.unwrap();
+    crate::clan_promotion::transfer(&mut socket, peer, &lobby, &mut b).await;
+    let mut warp = [0; 13];
+    client.read_exact(&mut warp).await.unwrap();
+    assert_eq!(warp[4], 0x1e);
+    let hub = lobby.social.lock().unwrap();
+    for (viewer, other) in [(a.player_id, b.player_id), (b.player_id, a.player_id)] {
+        assert!(
+            hub.queues[&viewer].iter().any(|p| p.len() > 4
+                && p[..2] == [7, 1]
+                && u16::from_le_bytes([p[2], p[3]]) == other),
+            "both sides need fresh native USER_IN records after same-region warp"
+        );
+    }
+}
+
+#[test]
+fn validated_movement_relays_speed_direction_and_unchanged_position_stop() {
+    let lobby = lobby();
+    let mut a = player(&lobby, "MoveActor", 1, 80);
+    let b = player(&lobby, "MoveObserver", 1, 80);
+    lobby.social.lock().unwrap().queues.clear();
+    let mut packet = vec![6];
+    packet.extend((a.position.x + 10).to_le_bytes());
+    packet.extend(a.position.z.to_le_bytes());
+    packet.extend(a.position.y.to_le_bytes());
+    packet.extend(90i16.to_le_bytes());
+    packet.push(3);
+    a.position.x += 10;
+    movement(&lobby, "MoveActor", &a, &packet);
+    packet[7..9].copy_from_slice(&0i16.to_le_bytes());
+    packet[9] = 0;
+    movement(&lobby, "MoveActor", &a, &packet);
+    let hub = lobby.social.lock().unwrap();
+    let updates: Vec<_> = hub.queues[&b.player_id]
+        .iter()
+        .filter(|p| p.first() == Some(&6))
+        .collect();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(i16::from_le_bytes([updates[0][9], updates[0][10]]), 90);
+    assert_eq!(&updates[1][9..], &[0, 0, 0]);
+}
 pub(crate) fn lobby() -> Lobby {
     Lobby::new(
         Connection::open_in_memory().unwrap(),

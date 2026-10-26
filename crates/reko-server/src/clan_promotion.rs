@@ -138,6 +138,16 @@ pub(crate) async fn transfer(
         crate::send_response(sock, peer, &None, &p, "CLAN_TRIAL_TRANSFER").await;
         if s.entered {
             crate::population::refresh(sock, peer, lobby, s).await;
+            let account = lobby
+                .social
+                .lock()
+                .unwrap()
+                .players
+                .get(&s.player_id)
+                .map(|p| p.account.clone());
+            if let Some(account) = account {
+                crate::social::refresh_region(lobby, &account, s);
+            }
         }
     }
 }

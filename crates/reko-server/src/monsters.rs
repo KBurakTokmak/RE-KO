@@ -11,6 +11,7 @@ mod ai;
 
 #[derive(Clone)]
 pub(crate) struct Event {
+    pub personal_hp: Vec<(String, i16)>,
     pub zone: u8,
     pub packet: Vec<u8>,
 }
@@ -28,6 +29,76 @@ pub(crate) struct ExperienceCredit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn damage_events_attribute_only_actual_direct_and_periodic_damage_to_each_owner() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists() {
+            return;
+        }
+        let world = World::load(&game).unwrap();
+        let mut events = world.events.subscribe();
+        let position = world.inner.lock().unwrap().mobs[&10000].position;
+        world
+            .hit_owned(
+                10000,
+                Attack {
+                    position,
+                    range: 5.0,
+                    attack: 0,
+                    percent: 0,
+                    extra: 123,
+                    skill: true,
+                    drain_percent: 0,
+                    arrow: false,
+                    penetrate: false,
+                    magic: None,
+                },
+                Some("DirectOwner"),
+                || Ok(()),
+            )
+            .unwrap();
+        let direct = events.try_recv().unwrap();
+        assert_eq!(direct.personal_hp, vec![("DirectOwner".into(), -123)]);
+        let now = skills::now_ms();
+        {
+            let mut inner = world.inner.lock().unwrap();
+            let mob = inner.mobs.get_mut(&10000).unwrap();
+            mob.hp = 1000;
+            mob.dots = vec![
+                Dot {
+                    owner: Some("Alice".into()),
+                    amount: 10,
+                    remaining: 1,
+                    next: now,
+                },
+                Dot {
+                    owner: Some("Bob".into()),
+                    amount: 20,
+                    remaining: 1,
+                    next: now,
+                },
+                Dot {
+                    owner: Some("Alice".into()),
+                    amount: 30,
+                    remaining: 1,
+                    next: now,
+                },
+            ];
+        }
+        let ticks = world.tick(now);
+        let tick = ticks
+            .iter()
+            .find(|e| e.packet.first() == Some(&0x22) && e.packet[1..3] == 10000u16.to_le_bytes())
+            .unwrap();
+        let parts: HashMap<_, _> = tick.personal_hp.iter().cloned().collect();
+        assert_eq!(parts["Alice"], -40);
+        assert_eq!(parts["Bob"], -20);
+        assert_eq!(world.inner.lock().unwrap().mobs[&10000].hp, 940);
+        assert_eq!(
+            i16::from_le_bytes(tick.packet[12..14].try_into().unwrap()),
+            -60
+        );
+    }
     #[test]
     fn suppression_gate_removal_and_boss_countdown_work_for_direct_and_periodic_kills() {
         let game = reko_common::game_dir();
@@ -972,6 +1043,7 @@ impl World {
         position: Position,
         range: f32,
         curse: Curse,
+        owner: &str,
         pay: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<(), &'static str> {
         let mut inner = self.inner.lock().unwrap();
@@ -999,6 +1071,7 @@ impl World {
         let before = mob.hp;
         mob.hp = mob.hp.min(mob.maximum());
         let event = Event {
+            personal_hp: vec![(owner.to_owned(), -((before - mob.hp).min(32767) as i16))],
             zone: mob.position.zone,
             packet: mob.health(-((before - mob.hp).min(32767) as i16), false),
         };
@@ -1157,6 +1230,7 @@ impl World {
             damage_by: HashMap::new(),
         };
         let event = Event {
+            personal_hp: Vec::new(),
             zone: mob.position.zone,
             packet: mob.spawn(),
         };
@@ -1517,19 +1591,34 @@ impl World {
         let loot_packet = if dead { self.drop(mob) } else { None };
         drop(inner);
         let _ = self.events.send(Event {
+            personal_hp: owner
+                .map(|name| vec![(name.to_owned(), -(damage.min(32767) as i16))])
+                .unwrap_or_default(),
             zone,
             packet: health,
         });
         if dead {
             let mut packet = vec![0x11];
             packet.extend(id.to_le_bytes());
-            let _ = self.events.send(Event { zone, packet });
+            let _ = self.events.send(Event {
+                personal_hp: Vec::new(),
+                zone,
+                packet,
+            });
         }
         if let Some(packet) = gate_out {
-            let _ = self.events.send(Event { zone, packet });
+            let _ = self.events.send(Event {
+                personal_hp: Vec::new(),
+                zone,
+                packet,
+            });
         }
         if let Some(packet) = loot_packet {
-            let _ = self.events.send(Event { zone, packet });
+            let _ = self.events.send(Event {
+                personal_hp: Vec::new(),
+                zone,
+                packet,
+            });
         }
         Ok(Hit { damage, dead })
     }
@@ -1657,10 +1746,12 @@ impl World {
             let mut out = vec![0x0a, 2];
             out.extend(mob.id.to_le_bytes());
             events.push(Event {
+                personal_hp: Vec::new(),
                 zone: mob.position.zone,
                 packet: out,
             });
             events.push(Event {
+                personal_hp: Vec::new(),
                 zone: mob.position.zone,
                 packet: mob.spawn(),
             });
@@ -1670,6 +1761,7 @@ impl World {
             mob.modifiers.retain(|_, m| now < m.until);
             if hp_modified && !mob.modifiers.contains_key(&1) && mob.hp > 0 {
                 events.push(Event {
+                    personal_hp: Vec::new(),
                     zone: mob.position.zone,
                     packet: mob.health(0, false),
                 });
@@ -1702,21 +1794,25 @@ impl World {
                 let mut out = vec![0x0a, 2];
                 out.extend(mob.id.to_le_bytes());
                 events.push(Event {
+                    personal_hp: Vec::new(),
                     zone: mob.position.zone,
                     packet: out,
                 });
                 events.push(Event {
+                    personal_hp: Vec::new(),
                     zone: mob.position.zone,
                     packet: mob.spawn(),
                 });
             } else if mob.hp > 0 {
                 let mut loss = 0u32;
+                let mut owner_parts = Vec::new();
                 for dot in &mut mob.dots {
                     if now >= dot.next && dot.remaining > 0 {
                         let amount = u32::from(dot.amount).min(mob.hp.saturating_sub(loss));
                         loss += amount;
                         if let Some(owner) = dot.owner.as_ref() {
                             *mob.damage_by.entry(owner.clone()).or_default() += amount;
+                            owner_parts.push((owner.clone(), amount));
                         }
                         dot.remaining -= 1;
                         dot.next = now + 2000;
@@ -1735,6 +1831,19 @@ impl World {
                     };
                     mob.hp -= loss;
                     events.push(Event {
+                        personal_hp: {
+                            let mut budget = loss;
+                            let mut totals: HashMap<String, u32> = HashMap::new();
+                            for (owner, amount) in owner_parts {
+                                let actual = amount.min(budget);
+                                budget -= actual;
+                                *totals.entry(owner).or_default() += actual;
+                            }
+                            totals
+                                .into_iter()
+                                .map(|(owner, amount)| (owner, -(amount.min(32767) as i16)))
+                                .collect()
+                        },
                         zone: mob.position.zone,
                         packet: mob.health(-(loss as i16), false),
                     });
@@ -1749,17 +1858,20 @@ impl World {
                         let mut death = vec![0x11];
                         death.extend(mob.id.to_le_bytes());
                         events.push(Event {
+                            personal_hp: Vec::new(),
                             zone: mob.position.zone,
                             packet: death,
                         });
                         if let Some(packet) = mob.gate_out() {
                             events.push(Event {
+                                personal_hp: Vec::new(),
                                 zone: mob.position.zone,
                                 packet,
                             });
                         }
                         if let Some(packet) = self.drop(mob) {
                             events.push(Event {
+                                personal_hp: Vec::new(),
                                 zone: mob.position.zone,
                                 packet,
                             });
@@ -1774,6 +1886,7 @@ impl World {
                     if amount > 0 {
                         mob.hp += amount;
                         events.push(Event {
+                            personal_hp: Vec::new(),
                             zone: mob.position.zone,
                             packet: mob.health(amount.min(32767) as i16, false),
                         });

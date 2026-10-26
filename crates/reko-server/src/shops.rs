@@ -558,6 +558,102 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_potion_prices_weights_and_speed_cost_apply_to_real_trade_and_capacity() {
+        let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let rules: serde_json::Value =
+            serde_json::from_str(include_str!("../../../config/item-balance.json")).unwrap();
+        let db = lobby.db.lock().unwrap();
+        let catalog = lobby.combat.as_mut().unwrap();
+        let mut expected_weight = 0u16;
+        for rule in rules["items"].as_array().unwrap() {
+            let id = rule["id"].as_u64().unwrap() as u32;
+            let price = rule["price"].as_u64().unwrap() as u32;
+            let weight = rule["weight"].as_u64().unwrap() as u16;
+            let (base, _) = catalog.item(id).unwrap();
+            let old_price = combat::integer(base, 20) as u32;
+            let old_weight = combat::integer(base, 18) as u16;
+            if id == 800015000 {
+                assert_eq!(price, 1000);
+                assert_eq!(weight, old_weight);
+            } else {
+                assert_eq!(weight * 2, old_weight);
+                let percent = if matches!(id, 389014000 | 389019000 | 389020000) {
+                    75
+                } else {
+                    20
+                };
+                assert_eq!(price, old_price * percent / 100);
+            }
+            db.execute(
+                "INSERT INTO world_reference_rules VALUES('ITEM_ECONOMY',?1,?2)",
+                rusqlite::params![
+                    id,
+                    serde_json::json!({"price":price,"weight":weight}).to_string()
+                ],
+            )
+            .unwrap();
+            expected_weight += weight * if id == 800015000 { 1 } else { 2 };
+        }
+        catalog.load_item_economy(&db).unwrap();
+        catalog.load_item_economy(&db).unwrap();
+        s.combat.max_weight = 7000;
+        let mut merchant = Merchant {
+            id: 11000,
+            prototype: 506,
+            appearance: 2040,
+            name: "Test".into(),
+            group: 253000,
+            nation: 3,
+            level: 50,
+            kind: 21,
+            position: s.position,
+            size: 100,
+            weapons: [0; 2],
+            direction: 0,
+            object: false,
+            object_status: 0,
+        };
+        let mut total_spent = 0;
+        for (slot, rule) in rules["items"].as_array().unwrap().iter().enumerate() {
+            let id = rule["id"].as_u64().unwrap() as u32;
+            let price = rule["price"].as_u64().unwrap() as u32;
+            let count = if id == 800015000 { 1u16 } else { 2 };
+            merchant.group = if id == 800015000 { 255000 } else { 253000 };
+            let mut packet = vec![0x21, 1];
+            packet.extend(merchant.group.to_le_bytes());
+            packet.extend(merchant.id.to_le_bytes());
+            packet.extend(id.to_le_bytes());
+            packet.push(slot as u8);
+            packet.extend(count.to_le_bytes());
+            let (bag, coins, _, spent) =
+                trade(&db, &merchant, catalog, "test", &s, &packet).unwrap();
+            total_spent += price * u32::from(count);
+            assert_eq!(spent, price * u32::from(count));
+            assert_eq!(coins, 1000000 - total_spent);
+            assert_eq!(bag[slot].count, count);
+        }
+        let bag = starter::inventory(&db, "test", 0).unwrap();
+        assert_eq!(catalog.bag_weight(&bag), expected_weight);
+        let before = starter::coins(&db, "test", 0).unwrap();
+        s.combat.max_weight = expected_weight;
+        let mut over = vec![0x21, 1];
+        over.extend(255000u32.to_le_bytes());
+        over.extend(11000u16.to_le_bytes());
+        over.extend(800015000u32.to_le_bytes());
+        over.push(11);
+        over.extend(1u16.to_le_bytes());
+        assert!(trade(&db, &merchant, catalog, "test", &s, &over).is_err());
+        assert_eq!(starter::coins(&db, "test", 0).unwrap(), before);
+        assert_eq!(starter::inventory(&db, "test", 0).unwrap(), bag);
+        over[1] = 2;
+        over[12] = 10;
+        let (_, coins, _, received) = trade(&db, &merchant, catalog, "test", &s, &over).unwrap();
+        assert_eq!((received, coins), (250, before + 250));
+    }
     #[tokio::test]
     async fn habice_opens_native_cape_service_only_when_nearby() {
         use tokio::io::AsyncReadExt;

@@ -4,6 +4,50 @@ use crate::{combat, inventory, lobby::Lobby, resources, skills, world_entry::Ses
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
+pub(crate) fn buff_restore_packets(s: &Session, now: u64) -> Vec<Vec<u8>> {
+    let mut buffs: Vec<_> = s
+        .skills
+        .buffs
+        .iter()
+        .filter(|(_, b)| now < b.until)
+        .collect();
+    buffs.sort_by_key(|(category, _)| **category);
+    buffs
+        .into_iter()
+        .map(|(_, buff)| {
+            let mut packet = skills::effect(buff.skill, s.player_id);
+            let remaining = buff.until.saturating_sub(now).div_ceil(1000).min(32767) as u16;
+            packet[16..18].copy_from_slice(&remaining.to_le_bytes());
+            packet
+        })
+        .collect()
+}
+
+pub(crate) async fn restore_after_zone(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    lobby: &Lobby,
+    account: &str,
+    s: &mut Session,
+) {
+    refresh(s, lobby.skills.as_ref(), lobby.combat.as_ref());
+    crate::transformation::refresh(sock, peer, lobby, account, s).await;
+    for packet in [
+        s.skills.hp_packet(0),
+        s.skills.mana_packet(),
+        inventory::attributes(&s.combat, 2),
+    ] {
+        super::send_response(sock, peer, &None, &packet, "ZONE_BUFF_ATTRIBUTES").await;
+    }
+    let now = skills::now_ms();
+    for packet in buff_restore_packets(s, now) {
+        super::send_response(sock, peer, &None, &packet, "ZONE_BUFF_RESTORE").await;
+    }
+    if s.skills.buffs.get(&91).is_some_and(|b| now < b.until) {
+        crate::magic::visibility(lobby, s, true);
+    }
+}
+
 pub(crate) fn refresh(
     session: &mut Session,
     catalog: Option<&skills::Catalog>,

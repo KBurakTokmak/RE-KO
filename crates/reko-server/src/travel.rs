@@ -205,8 +205,16 @@ fn select(
 }
 
 pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position) -> Vec<u8> {
-    s.suppression_notice = None;
     let same_zone = s.position.zone == position.zone;
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        if !same_zone {
+            crate::party::zone_leave(&mut hub, s.player_id);
+        }
+        crate::trade::cancel(&mut hub, s.player_id, "Trade cancelled: teleport.");
+        hub.reset_view(s.player_id);
+    }
+    s.suppression_notice = None;
     if !same_zone
         && (s.transformation_visual != 1
             || s.skills
@@ -419,6 +427,7 @@ pub(crate) async fn handle(
         Some(0x27) if s.zone_loading && p == [0x27, 2] => {
             s.zone_loading = false;
             s.entered = true;
+            crate::utility::restore_after_zone(sock, peer, lobby, account, s).await;
             crate::population::refresh(sock, peer, lobby, s).await;
             if let Some(world) = &lobby.monsters {
                 world.observe(s, crate::skills::now_ms());

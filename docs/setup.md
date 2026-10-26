@@ -38,7 +38,8 @@ logged out normally and the daemon stopped, run `python scripts/database_manager
 the ports. Existing characters/accounts stay local to each installation.
 Schema initialization uses the same Rust code as the runtime. Named content
 migrations apply once; ordered migrations cover Delos/CZ/Ardream travel, combat-zone population and boss
-pools, transformations, the bounded suppression repair and source zone metadata.
+pools, transformations, the bounded suppression repair, source zone metadata and
+owner-defined potion economy defaults from tracked `config/item-balance.json`.
 An update is staged on a disposable database, validated and published only on
 success, with the prior save backed up under `logs/`. Missing inputs, conflicting
 local routes, damaged saves and newer unsupported versions stop startup with an

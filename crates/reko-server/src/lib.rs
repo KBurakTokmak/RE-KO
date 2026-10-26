@@ -70,11 +70,14 @@ mod starter;
 mod stat_points;
 mod storage;
 mod suppression;
+mod target_hp;
 mod town;
+mod trade;
 mod transformation;
 mod travel;
 mod upgrading;
 mod utility;
+mod visuals;
 mod wallet;
 #[cfg(test)]
 mod warrior_tests;
@@ -186,6 +189,7 @@ async fn send_response(
     payload: &[u8],
     name: &str,
 ) {
+    visuals::record(payload);
     let body = if let Some(c) = crypt {
         c.encrypt_server_packet(payload)
     } else {
@@ -368,9 +372,13 @@ async fn handle_game_payload(
         social::synchronize(lobby, account, s);
         social::flush(sock, peer, lobby, s).await;
     }
-    handle_game_payload_inner(sock, peer, payload, lobby, account, world).await;
+    let packets = visuals::capture(handle_game_payload_inner(
+        sock, peer, payload, lobby, account, world,
+    ))
+    .await;
     if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
         social::synchronize(lobby, account, s);
+        visuals::publish(lobby, s, packets);
         social::flush(sock, peer, lobby, s).await;
     }
 }
@@ -386,6 +394,9 @@ async fn handle_game_payload_inner(
         return;
     }
     let opcode = payload[0];
+    if let Some(s) = world.as_ref() {
+        trade::before_action(&mut lobby.social.lock().unwrap(), s.player_id, opcode);
+    }
     if let Some(s) = world.as_ref().filter(|s| s.entered) {
         let frozen = s
             .skills
@@ -451,6 +462,11 @@ async fn handle_game_payload_inner(
                     }
                     h.send(s.player_id, p);
                 }
+            }
+        }
+        0x30 => {
+            if let Some(s) = world.as_ref().filter(|s| s.entered && !s.zone_loading) {
+                trade::process(lobby, s.player_id, payload);
             }
         }
         0x2f => {
@@ -771,15 +787,7 @@ async fn handle_game_payload_inner(
                 }
             }
             let now = skills::now_ms();
-            for buff in session
-                .skills
-                .buffs
-                .values()
-                .filter(|buff| now < buff.until)
-            {
-                let mut packet = skills::effect(buff.skill, session.player_id);
-                let remaining = ((buff.until - now).div_ceil(1000) as u16).to_le_bytes();
-                packet[16..18].copy_from_slice(&remaining);
+            for packet in utility::buff_restore_packets(session, now) {
                 send_response(sock, peer, &None, &packet, "SPRINT_RESTORE").await;
             }
             if session
@@ -830,6 +838,7 @@ async fn handle_game_payload_inner(
                     if travel::movement_event(sock, peer, lobby, account, session, previous).await {
                         return;
                     }
+                    social::movement(lobby, account, session, payload);
                     population::refresh(sock, peer, lobby, session).await;
                     if i16::from_le_bytes([payload[7], payload[8]]) != 0 {
                         session.sitting = false;
@@ -969,11 +978,12 @@ async fn handle_game_payload_inner(
                 return;
             }
             let target = u16::from_le_bytes([payload[1], payload[2]]);
-            if let Some(packet) = lobby
-                .monsters
-                .as_ref()
-                .and_then(|w| w.health(target, session.position.zone))
-            {
+            if let Some(packet) = target_hp::query(lobby, session, target) {
+                lobby
+                    .social
+                    .lock()
+                    .unwrap()
+                    .watch_target(session.player_id, target);
                 send_response(sock, peer, &None, &packet, "TARGET_HP").await;
             }
         }
@@ -1376,7 +1386,10 @@ async fn tick_character(
     if !session.entered {
         return;
     }
-    loot::auto_tick(sock, peer, lobby, account, session, now).await;
+    let exchanging = trade::busy(&lobby.social.lock().unwrap(), session.player_id);
+    if !exchanging {
+        loot::auto_tick(sock, peer, lobby, account, session, now).await;
+    }
     transformation::refresh(sock, peer, lobby, account, session).await;
     utility::npc_strikes(sock, peer, lobby, account, session, now).await;
     if let Some(world) = &lobby.monsters {
@@ -1525,8 +1538,17 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     let mut npc_receiver = lobby.monsters.as_ref().map(|w| w.events.subscribe());
     let mut skill_tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_received = tokio::time::Instant::now();
+    let mut social_notify: Option<Arc<tokio::sync::Notify>> = None;
     loop {
         let read = tokio::select! {
+            _=async {social_notify.as_ref().unwrap().notified().await}, if social_notify.is_some()=> {
+                if let (Some(session),Some(account))=(world.as_mut(),account.as_deref()) {
+                    clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
+                    social::synchronize(&lobby,account,session);
+                    social::flush(&mut sock,peer,&lobby,session).await;
+                }
+                continue;
+            }
             event=async {npc_receiver.as_mut().unwrap().recv().await}, if npc_receiver.is_some()=> {
                 match event {
                     Ok(event)=> {if let Some(packet)=world.as_mut().and_then(|s|population::event_packet(&event,&lobby,s)) {send_response(&mut sock,peer,&None,&packet,"COMBAT_WORLD").await;} }
@@ -1539,8 +1561,9 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                 if let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), account.as_deref()) {
                     clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
                     if !session.entered { continue; }
-                    tick_character(&mut sock,peer,&lobby,account,session,skills::now_ms()).await;
+                    let packets=visuals::capture(tick_character(&mut sock,peer,&lobby,account,session,skills::now_ms())).await;
                     social::synchronize(&lobby,account,session);
+                    visuals::publish(&lobby,session,packets);
                     social::flush(&mut sock,peer,&lobby,session).await;
                 }
                 continue;
@@ -1595,12 +1618,17 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                             )
                             .instrument(span)
                             .await;
-                            let current = world.as_ref().filter(|s| s.entered).map(|s| s.player_id);
+                            let current = world
+                                .as_ref()
+                                .filter(|s| s.entered || s.zone_loading)
+                                .map(|s| s.player_id);
                             if social_guard.id != current {
                                 if let Some(old) = social_guard.id {
                                     lobby.social.lock().unwrap().disconnect(old);
                                 }
                                 social_guard.id = current;
+                                social_notify =
+                                    current.map(|id| lobby.social.lock().unwrap().notifier(id));
                             }
                         }
                         Ok(None) => break,
@@ -1651,6 +1679,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             .as_mut()
             .unwrap()
             .load_level_bounds(&lobby.db.lock().unwrap())?;
+        lobby
+            .combat
+            .as_mut()
+            .unwrap()
+            .load_item_economy(&lobby.db.lock().unwrap())?;
     }
     let mut target_world = monsters::World::load(&cfg.game_dir)?;
     target_world.social = Some(lobby.social.clone());

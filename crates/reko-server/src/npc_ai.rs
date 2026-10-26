@@ -198,6 +198,7 @@ fn movement_event(mob: &Mob, speed: f32, destination: Position) -> Event {
     p.extend(destination.y.to_le_bytes());
     p.extend(((speed * 10.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes());
     Event {
+        personal_hp: Vec::new(),
         zone: mob.position.zone,
         packet: p,
     }

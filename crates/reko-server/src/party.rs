@@ -89,6 +89,26 @@ pub(crate) fn leave(h: &mut Hub, actor: u16, target: u16) {
         }
     }
 }
+
+pub(crate) fn zone_leave(h: &mut Hub, id: u16) {
+    // Zone departure is not a socket disconnect. The source promotes the next
+    // member before removing a travelling leader when a party can remain.
+    if h.party(id) == Some(id)
+        && h.parties[&id].len() > 2
+        && let Some(next) = h.parties[&id]
+            .iter()
+            .copied()
+            .find(|other| *other != id && h.players.contains_key(other))
+    {
+        let mut promote = vec![0x2f, 0x1c];
+        promote.extend(next.to_le_bytes());
+        process(h, id, &promote);
+    }
+    leave(h, id, id);
+    h.party_invites
+        .retain(|target, (owner, _)| *target != id && *owner != id);
+    h.transfers.remove(&id);
+}
 pub(crate) fn process(h: &mut Hub, id: u16, p: &[u8]) {
     let now = crate::skills::now_ms();
     let expired = h

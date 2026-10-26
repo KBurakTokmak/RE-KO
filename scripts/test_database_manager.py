@@ -141,6 +141,24 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown content migrations"):
             manager.status(self.save)
 
+    def test_potion_defaults_are_absolute_idempotent_and_preserve_personal_data(self):
+        with manager.connect(self.save) as db:
+            db.execute("INSERT INTO lobby_accounts VALUES('private','secret')")
+            manager.potion_balance(db,self.historical,None)
+            first=db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name='ITEM_ECONOMY' ORDER BY rule_id").fetchall()
+            manager.potion_balance(db,self.historical,None)
+            self.assertEqual(first,db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name='ITEM_ECONOMY' ORDER BY rule_id").fetchall())
+            self.assertEqual(len(first),11)
+            by_id={key:json.loads(value) for key,value in first}
+            self.assertEqual(by_id[389020000],dict(price=11250,weight=15))
+            self.assertEqual(by_id[800015000],dict(price=1000,weight=1))
+            self.assertEqual(db.execute("SELECT password FROM lobby_accounts").fetchone()[0],'secret')
+        with manager.connect(self.save) as db:
+            db.execute("UPDATE world_reference_rules SET data='{\"price\":1,\"weight\":1}' WHERE table_name='ITEM_ECONOMY' AND rule_id=389020000")
+        with self.assertRaisesRegex(ValueError,'different local economy'):
+            with manager.connect(self.save) as db:
+                manager.potion_balance(db,self.historical,None)
+
     def run(self, result=None):
         def initialize(arguments, **kwargs):
             path = Path(arguments[-1])

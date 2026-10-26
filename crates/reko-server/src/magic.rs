@@ -26,6 +26,7 @@ pub(crate) fn visibility(lobby: &Lobby, session: &Session, invisible: bool) {
     packet.extend(u32::from(invisible).to_le_bytes());
     if let Some(world) = lobby.monsters.as_ref() {
         let _ = world.events.send(monsters::Event {
+            personal_hp: Vec::new(),
             zone: session.position.zone,
             packet,
         });

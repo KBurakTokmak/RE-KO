@@ -36,7 +36,8 @@ renderer/client and an in-process game host have not been implemented.
 - Persistent nation-specific clans: creation, invitations, member roles and clan chat.
 - Source-based clan grades, Caitharos knight promotion and persistent cape purchases.
 - Private quest journal chat commands to list, inspect and abandon active quests.
-- Nearby player presence, movement and equipment synchronization.
+- Nearby player presence, movement/equipment, skill/attack/level-up visuals and target HP bars.
+- Native player trading with two-party confirmation, inventory/weight checks and atomic item/Noah exchange.
 - Administrative test fixtures, packet capture and a local-client startup profile.
 - Admin-only 30,000-damage basic attacks, monster protection and native GM
   collision bypass, monster summoning by ID/name, coordinate and zone teleport;
@@ -44,7 +45,7 @@ renderer/client and an in-process game host have not been implemented.
 
 These are working subsets, not a claim of complete retail behavior. Some NPC
 services, specialist quests, skills and multiplayer mechanics remain incomplete.
-Terrain pathfinding, monster spells, trading, advanced clan systems and full PvP are
+Terrain pathfinding, monster spells, advanced clan systems and full PvP are
 among the remaining systems. See the [feature backlog](docs/design/1453-feature-backlog.md).
 
 ## Run and develop

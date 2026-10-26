@@ -137,7 +137,24 @@ pub(crate) fn event_packet(
         }
         return Some(event.packet.clone());
     }
-    event_visible(event, lobby, s).then(|| event.packet.clone())
+    event_visible(event, lobby, s).then(|| {
+        let mut packet = event.packet.clone();
+        // Damage is already authoritative. Avoid a second client-side smoothing
+        // delay for nearby observers. Native TargetHP logs its delta as local
+        // damage, so only the credited character receives their own delta.
+        if packet.first() == Some(&0x22) && packet.len() == 14 {
+            packet[3] = 1;
+            let delta = event
+                .personal_hp
+                .iter()
+                .filter(|(owner, _)| owner.eq_ignore_ascii_case(&s.character.name))
+                .map(|(_, delta)| i32::from(*delta))
+                .sum::<i32>()
+                .clamp(-32767, 32767) as i16;
+            packet[12..14].copy_from_slice(&delta.to_le_bytes());
+        }
+        packet
+    })
 }
 
 pub(crate) fn event_visible(
@@ -428,6 +445,7 @@ pub(crate) mod tests {
         assert_eq!(s.visible_entities.len(), 3);
         assert!(s.visible_entities.contains(&10000));
         let health = crate::monsters::Event {
+            personal_hp: Vec::new(),
             zone: 21,
             packet: world.health(10000, 21).unwrap(),
         };
@@ -439,7 +457,11 @@ pub(crate) mod tests {
         s.position = Position::default();
         let packet = world.spawns(21).remove(0);
         assert!(event_visible(
-            &crate::monsters::Event { zone: 21, packet },
+            &crate::monsters::Event {
+                personal_hp: Vec::new(),
+                zone: 21,
+                packet
+            },
             &lobby,
             &mut s
         ));

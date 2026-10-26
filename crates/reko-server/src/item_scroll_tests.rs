@@ -106,6 +106,91 @@ fn failed(packets: &[Vec<u8>]) -> bool {
 }
 
 #[tokio::test]
+async fn zone_loading_restores_pus_buffs_with_remaining_time_without_recharging_or_consuming() {
+    let Some((lobby, mut s, mut sock, mut client, peer)) = setup().await else {
+        return;
+    };
+    for id in [500035, 500033, 500030] {
+        let item = lobby.skills.as_ref().unwrap().spells[&id].use_item;
+        give(&lobby, &mut s, item, 3);
+        assert!(!failed(
+            &cast(&lobby, &mut s, &mut sock, &mut client, peer, id, 3).await
+        ));
+    }
+    let now = skills::now_ms();
+    s.skills.buffs.get_mut(&6).unwrap().until = now + 25 * 60 * 1000;
+    skills::save(&lobby.db.lock().unwrap(), "test", 0, &s.skills).unwrap();
+    let before = s.skills.buffs.clone();
+    let cooldowns = s.skills.cooldowns.clone();
+    let inventory = s.inventory;
+    let limits = (
+        s.skills.hp,
+        s.skills.max_hp,
+        s.skills.mana,
+        s.skills.max_mana,
+    );
+    let position = crate::movement::Position {
+        zone: 1,
+        x: 3540,
+        z: 16100,
+        y: 0,
+    };
+    crate::movement::save(&lobby.db.lock().unwrap(), "test", 0, position).unwrap();
+    let begin = crate::travel::begin(&lobby, &mut s, position);
+    assert_eq!(&begin[..4], &[0x27, 3, 1, 0]);
+    crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 1]).await;
+    assert!(
+        !drain(&mut client)
+            .await
+            .iter()
+            .any(|p| p.starts_with(&[0x31, 3]))
+    );
+    crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 2]).await;
+    let packets = drain(&mut client).await;
+    assert!(s.entered && !s.zone_loading);
+    for id in [500035, 500033, 500030] {
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|p| p.len() == 22
+                    && p[..2] == [0x31, 3]
+                    && u32::from_le_bytes(p[2..6].try_into().unwrap()) == id)
+                .count(),
+            1,
+            "restore {id} once at load completion"
+        );
+    }
+    let speed = packets
+        .iter()
+        .find(|p| {
+            p.len() == 22
+                && p[..2] == [0x31, 3]
+                && u32::from_le_bytes(p[2..6].try_into().unwrap()) == 500035
+        })
+        .unwrap();
+    assert!((1498..=1500).contains(&u16::from_le_bytes(speed[16..18].try_into().unwrap())));
+    assert!(s.skills.speed(lobby.skills.as_ref(), skills::now_ms()) > 45);
+    assert_eq!(s.inventory, inventory);
+    assert_eq!(s.skills.cooldowns, cooldowns);
+    assert_eq!(
+        (
+            s.skills.hp,
+            s.skills.max_hp,
+            s.skills.mana,
+            s.skills.max_mana
+        ),
+        limits
+    );
+    let saved = skills::load(&lobby.db.lock().unwrap(), "test", 0).unwrap();
+    for (category, buff) in before {
+        assert_eq!(
+            (saved.buffs[&category].skill, saved.buffs[&category].until),
+            (buff.skill, buff.until)
+        );
+    }
+}
+
+#[tokio::test]
 async fn pus_hp_defence_swift_stat_and_attack_scrolls_use_owned_items_for_every_class() {
     let Some((lobby, mut s, mut sock, mut client, peer)) = setup().await else {
         return;
