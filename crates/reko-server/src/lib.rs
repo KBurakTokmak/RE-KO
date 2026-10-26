@@ -865,7 +865,11 @@ async fn handle_game_payload_inner(
                         session.combat.attack
                     },
                     percent: 100,
-                    extra: if session.is_admin { 10_000 } else { 0 },
+                    extra: if session.is_admin {
+                        admin::BASIC_ATTACK_DAMAGE
+                    } else {
+                        0
+                    },
                     skill: false,
                     drain_percent: 0,
                     arrow: false,
@@ -1702,13 +1706,21 @@ mod tests {
             .await
             .unwrap();
         let (mut socket, peer) = listener.accept().await.unwrap();
+        {
+            let db = lobby.db.lock().unwrap();
+            population::tests::seed(&db);
+            db.execute("UPDATE world_spawns SET hp=75000,armor=60000,x0=3250,x1=3250,z0=4060,z1=4060 WHERE id=12000",[]).unwrap();
+            monsters
+                .load_population(&db, &reko_common::game_dir())
+                .unwrap();
+        }
         let mut account = Some("test".to_string());
         let mut world = Some(s);
         let hp = |id| {
             let p = monsters.health(id, 21).unwrap();
             u32::from_le_bytes(p[8..12].try_into().unwrap())
         };
-        let request = [8, 1, 0, 0x12, 0x27, 0, 0, 0, 0];
+        let request = [8, 1, 0, 0xe0, 0x2e, 0, 0, 0, 0];
         handle_game_payload(
             &mut socket,
             peer,
@@ -1718,7 +1730,7 @@ mod tests {
             &mut world,
         )
         .await;
-        assert_eq!(hp(10002), 15000);
+        assert_eq!(hp(12000), 45000);
         handle_game_payload(
             &mut socket,
             peer,
@@ -1728,7 +1740,7 @@ mod tests {
             &mut world,
         )
         .await;
-        assert_eq!(hp(10002), 15000, "normal attack delay remains enforced");
+        assert_eq!(hp(12000), 45000, "normal attack delay remains enforced");
         world.as_mut().unwrap().next_attack = 0;
         world.as_mut().unwrap().position.x = 5000;
         handle_game_payload(
@@ -1740,7 +1752,7 @@ mod tests {
             &mut world,
         )
         .await;
-        assert_eq!(hp(10002), 15000, "remote admin targets remain out of range");
+        assert_eq!(hp(12000), 45000, "remote admin targets remain out of range");
         world.as_mut().unwrap().position.x = 3250;
         handle_game_payload(
             &mut socket,
@@ -1751,7 +1763,7 @@ mod tests {
             &mut world,
         )
         .await;
-        assert_eq!(hp(10002), 5000);
+        assert_eq!(hp(12000), 15000);
         world.as_mut().unwrap().next_attack = 0;
         handle_game_payload(
             &mut socket,
@@ -1762,7 +1774,7 @@ mod tests {
             &mut world,
         )
         .await;
-        assert_eq!(hp(10002), 0, "last hit clamps to remaining HP");
+        assert_eq!(hp(12000), 0, "last hit clamps to remaining HP");
         lobby
             .db
             .lock()

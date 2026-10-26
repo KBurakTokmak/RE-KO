@@ -38,7 +38,7 @@ renderer/client and an in-process game host have not been implemented.
 - Private quest journal chat commands to list, inspect and abandon active quests.
 - Nearby player presence, movement and equipment synchronization.
 - Administrative test fixtures, packet capture and a local-client startup profile.
-- Admin-only 10,000-damage basic attacks, monster protection and native GM
+- Admin-only 30,000-damage basic attacks, monster protection and native GM
   collision bypass, monster summoning by ID/name and coordinate teleport;
   per-character skillbar save/load.
 

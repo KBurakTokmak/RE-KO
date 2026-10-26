@@ -5,6 +5,22 @@ Read [README](README.md), the [documentation index](docs/README.md),
 changing gameplay. The [backlog](docs/design/1453-feature-backlog.md) records
 bounded coverage and missing systems; a handler's existence is not full fidelity.
 
+## Resuming work
+
+- Compare the checkout and fetched upstream history before continuing an older
+  chat. Use current subsystem docs and code to establish coverage; do not treat
+  an old handover's commit, process ID, test count or missing-feature list as
+  current state. Preserve local changes when updating the checkout.
+- Review [testing](docs/testing.md) and run a baseline with the available local
+  inputs before selecting the next implementation. Distinguish code regressions
+  from missing imports, optional fixtures and native-client checks not exercised.
+- Recent systems already include clan promotion/capes, friendly and party skill
+  targeting, Mage special effects, transformations/PUS items, costumes, NPC
+  exchanges, combat-zone travel, GM visibility and multi-arrow flight tracking.
+  Consult [social](docs/re/social.md), [skills/combat](docs/re/skills-combat.md),
+  [world services](docs/re/world-services.md) and
+  [admin testing](docs/re/admin-testing.md) before reimplementing those paths.
+
 ## Scope and rules
 
 - Target Knight Online 1453, singleplayer and small LAN sessions. Current work
@@ -43,6 +59,25 @@ addresses, confidence and version differences in the subsystem docs. Update
 existing documentation when behavior changes; do not append session histories,
 process IDs, account details or raw log extracts.
 
+## Documentation and repository hygiene
+
+- Keep documentation small, relevant and maintained. Prefer updating an existing
+  subsystem document over creating a separate report for each task or fix.
+- After implementing and verifying a feature, review its supporting documents.
+  Remove unrelated, duplicated, superseded or temporary documents, test-result
+  reports and research write-ups when they have no remaining maintenance,
+  reproducibility or future implementation use. Fix affected links and indexes.
+- Fold still-useful findings into concise subsystem notes before removing a
+  redundant report. Preserve essential protocol/source evidence, unresolved
+  questions, setup instructions and required license attribution.
+- Keep raw test outputs, captures, generated research and intermediate analysis
+  outside tracked repository content. Do not add historical pass counts or
+  session-by-session results to maintained docs; report them in the task/PR.
+- Retain useful automated regression tests and required reference inputs. This
+  cleanup rule concerns obsolete reports and artifacts, not deleting coverage
+  merely because the feature is implemented. Do not move unnecessary documents
+  into a tracked archive just to avoid removing them.
+
 Before finishing implementation changes:
 
 ```powershell
@@ -60,3 +95,29 @@ Run from the workspace root. See [setup](docs/setup.md) for data imports and
 server start/stop. Stop the Windows daemon before replacing its executable or
 offline imports; back up the save and verify unrelated data is preserved.
 Never replay old one-off grants or edit a live character merely to satisfy tests.
+
+## Runtime and regression safeguards
+
+- When a player is connected before a planned shutdown/restart, have them exit
+  or log out through the native menu while the server is still running. Check
+  for the accepted opcode79/1 skillbar save when shortcut persistence matters.
+  SQLite can preserve
+  only received layouts; never invent an autosave request, reconstruct bars from
+  skill use or reset them to defaults. The owner declined a new client change
+  for unsent skillbar edits; see [skillbar](docs/re/skillbar.md).
+- The start BAT pulls with `git pull --ff-only` before startup; the stop BAT
+  attempts the same after stopping. Direct PowerShell launchers do not pull.
+  Account for that difference when inspecting changes or selecting a build.
+- Reference imports/repairs and local client preparation are separate from a
+  Git update. Inspect their required exports, existing save rules and dry runs
+  before applying them; do not assume pulling commits provisions gameplay data.
+- Preserve the approved isolated-client remedies described in
+  [client startup](docs/re/client-startup.md). Read-only analysis and standalone
+  harness tests do not authorize new client-file or process-memory patches.
+- Player visibility is viewer-specific. Follow `social.rs` and the admin guide
+  when testing GM self/party/normal-player views; do not globally expose hidden
+  GMs merely to repair a roster or a friendly-target failure.
+- Archery uses paid per-flight indices and bounded impact quotas, including the
+  native duplicated base index. Preserve launch-position validation, cross-skill
+  combos and harmless late cleanup; do not add an invented shared recovery lock
+  or make every arrow hit the selected target. See the combat subsystem notes.

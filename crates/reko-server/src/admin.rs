@@ -1,6 +1,8 @@
 //! Shared character-level administrative privilege, independent of account names.
 use rusqlite::{Connection, OptionalExtension, params};
 
+pub(crate) const BASIC_ATTACK_DAMAGE: u16 = 30_000;
+
 pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS character_privileges (

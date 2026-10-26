@@ -6,7 +6,7 @@ grant this role. No new per-feature permission flags or automatic grants exist.
 
 ## Basic attacks and monsters
 
-Successful admin basic R attacks apply 10,000 physical damage, clamped to the
+Successful admin basic R attacks apply 30,000 physical damage, clamped to the
 target's remaining HP. Life, attack delay and target validation still apply.
 Basic attacks use weapon reach plus half the sum of the player's original
 skeleton radius and the target's radius scaled by its spawn size. This applies
@@ -22,7 +22,7 @@ loot, XP, quest credit, respawn and weapon wear. Ordinary characters retain the
 existing formulas and weapon restrictions.
 
 Source: supplied1453 `GameServer/Unit.cpp::GetDamage` has a GM-only normal-hit
-override (`m_nGameMasterRHitDamage`). 10,000 is the owner's requested testing
+override (`m_nGameMasterRHitDamage`). 30,000 is the owner's requested testing
 value. `AIServer/Npc.cpp` excludes GMs during target search and attack handling;
 Open-KO's corresponding AI is the corroborating reference.
 
