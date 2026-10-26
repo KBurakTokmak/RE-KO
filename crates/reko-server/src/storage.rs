@@ -69,7 +69,6 @@ fn transfer(
     let page = usize::from(p[start + 4]);
     let src = usize::from(p[start + 5]);
     let dst = usize::from(p[start + 6]);
-    anyhow::ensure!(page < 8, "invalid warehouse page");
     let count = if action <= 3 {
         u32::from_le_bytes(p[start + 7..start + 11].try_into()?)
     } else {
@@ -95,6 +94,7 @@ fn transfer(
             .filter(|v| *v <= 2100000000)
             .ok_or_else(|| anyhow::anyhow!("coin cap"))?;
     } else {
+        anyhow::ensure!(page < 8, "invalid warehouse page");
         let catalog = lobby
             .combat
             .as_ref()
@@ -145,7 +145,8 @@ fn transfer(
             to.id == 0 || (stack && to.id == id && to.durability == from.durability),
             "destination occupied"
         );
-        anyhow::ensure!(stack || count == 1, "nonstackable count");
+        // Source WarehouseProcess preserves existing counts even for skill-scroll
+        // stacks whose client table does not permit merging separate stacks.
         let total = u32::from(to.count) + count;
         anyhow::ensure!(total <= 9999, "stack cap");
         if to.id == 0 {
@@ -232,6 +233,7 @@ pub(crate) async fn handle(
     }
     match transfer(lobby, account, s, p) {
         Ok((bag, coins)) => {
+            tracing::info!(%peer, account, action=p[1], before_coins=s.coins, after_coins=coins, "warehouse transfer committed");
             s.inventory = bag;
             s.coins = coins;
             super::send_response(sock, peer, &None, &[0x45, p[1], 1], "WAREHOUSE_TRANSFER").await;
@@ -265,6 +267,11 @@ mod tests {
             .unwrap();
             db.execute(
                 "INSERT INTO character_inventory VALUES ('test',0,0,389014000,1,10)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO character_inventory VALUES ('test',0,3,379064000,1,18),('test',0,4,379064000,1,2)",
                 [],
             )
             .unwrap();
@@ -308,6 +315,55 @@ mod tests {
             600000
         );
         assert_eq!(contents(&lobby.db.lock().unwrap(), "other").unwrap().1, 0);
+        // Native coin transfers have no page or slot: all three bytes are FF.
+        let mut coin = request(2, 900000000, 255, 255, 200000);
+        coin[6] = 255;
+        transfer(&lobby, "test", &s, &coin).unwrap();
+        assert_eq!(
+            contents(&lobby.db.lock().unwrap(), "test").unwrap().1,
+            600000
+        );
+        assert_eq!(
+            starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            400000
+        );
+        coin[1] = 3;
+        transfer(&lobby, "test", &s, &coin).unwrap();
+        assert_eq!(
+            starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
+            600000
+        );
+        coin[2..6].copy_from_slice(&379064000u32.to_le_bytes());
+        assert!(
+            transfer(&lobby, "test", &s, &coin).is_err(),
+            "sentinel slots are valid only for coins"
+        );
+        // Captured native request: an existing 18-count Magic Shield Scroll
+        // stack, although ItemOrg's stackable flag is zero for this scroll.
+        let captured = [0x45, 2, 0xc0, 0x0e, 0x98, 0x16, 0, 3, 18, 18, 0, 0, 0];
+        transfer(&lobby, "test", &s, &captured).unwrap();
+        assert_eq!(
+            contents(&lobby.db.lock().unwrap(), "test").unwrap().0[18].count,
+            18
+        );
+        assert_eq!(
+            starter::inventory(&lobby.db.lock().unwrap(), "test", 0).unwrap()[3].id,
+            0
+        );
+        // Do not permit merging a second nonstackable item into that stack.
+        assert!(transfer(&lobby, "test", &s, &request(2, 379064000, 4, 18, 2)).is_err());
+        transfer(&lobby, "test", &s, &request(3, 379064000, 18, 3, 18)).unwrap();
+        assert_eq!(
+            starter::inventory(&lobby.db.lock().unwrap(), "test", 0).unwrap()[3].count,
+            18
+        );
+        let mut last_page = request(2, 379064000, 3, 23, 18);
+        last_page[6] = 7;
+        transfer(&lobby, "test", &s, &last_page).unwrap();
+        assert_eq!(
+            contents(&lobby.db.lock().unwrap(), "test").unwrap().0[191].count,
+            18
+        );
         s.position.x = 100;
         assert!(transfer(&lobby, "test", &s, &request(3, 900000000, 0, 0, 1)).is_err());
     }

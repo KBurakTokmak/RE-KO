@@ -102,6 +102,21 @@ and tariff initialization use the verified transaction flow. Innkeepers expose
 account-shared storage:192slots, eight pages of24, with validated deposit,
 withdrawal, stack/bag moves and bank coins. All transactions check ownership,
 quantity, range, capacity, weight and applicable coin caps before commit.
+Storage preserves the count of an existing item stack even when the original
+client table marks that scroll nonstackable. It may move into an empty slot,
+but separate nonstackable stacks cannot merge. This matches supplied1453
+`ItemHandler.cpp::WarehouseProcess`; the captured Magic Shield Scroll request
+deposits18 items. No item-table or character-data rewrite is needed.
+Native money transfers use page/source/destination255 sentinels. They bypass
+item-slot validation and retain the same atomic ownership, balance and coin-cap
+checks. Opcode45 requests and refusals are captured; successful transfers log
+the action and character balance before/after for debugging.
+
+Delos uses the existing original1453 K_OBJECTPOS gate groups301..305 and the
+five destinations from Open-KO `siege_0722.smd`: nation-specific Moradon returns
+and the neutral20,000Noah Abyss entrance. Database migration `001-delos-travel`
+adds absent routes, validates matching gate nations/destination starts and refuses
+conflicting local records. See [database setup](../setup.md).
 
 Type25 mantle clerks, including Habice, open the native cape window with3C1B
 instead of searching for a QUEST_HELPER row. Supplied1453 NPCHandler::NpcEvent

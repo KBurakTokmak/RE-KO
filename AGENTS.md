@@ -111,6 +111,21 @@ Never replay old one-off grants or edit a live character merely to satisfy tests
 - Reference imports/repairs and local client preparation are separate from a
   Git update. Inspect their required exports, existing save rules and dry runs
   before applying them; do not assume pulling commits provisions gameplay data.
+- After pulling, check database compatibility with `python scripts/database_manager.py check`.
+  Apply required schema/content migrations with the server stopped before testing;
+  the standard startup script runs `update` automatically. Preserve each installation's
+  accounts, characters, clans, inventory and local customizations. Never replace an
+  existing save with another developer's database or silently factory-reset it.
+- Register new persistent world-data fixes in the ordered content migrations in
+  `scripts/database_manager.py`; bump the schema version and add a data-preserving
+  migration when changing schema. Keep the Rust schema version and manager in sync.
+  Test upgrades, repeat runs, rollback and fresh creation from a world-only template.
+  Templates/reference exports stay ignored and separate from Git; update the setup
+  instructions when a new input is required. Missing inputs must fail clearly.
+- Reconcile every outstanding feature import with the migration registry when
+  adopting changes from another checkout. Do not declare a database current
+  after applying only the feature reported by the player. Initial world imports
+  and one-off administrative grants are not repeatable catch-up migrations.
 - Preserve the approved isolated-client remedies described in
   [client startup](docs/re/client-startup.md). Read-only analysis and standalone
   harness tests do not authorize new client-file or process-memory patches.

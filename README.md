@@ -39,7 +39,7 @@ renderer/client and an in-process game host have not been implemented.
 - Nearby player presence, movement and equipment synchronization.
 - Administrative test fixtures, packet capture and a local-client startup profile.
 - Admin-only 30,000-damage basic attacks, monster protection and native GM
-  collision bypass, monster summoning by ID/name and coordinate teleport;
+  collision bypass, monster summoning by ID/name, coordinate and zone teleport;
   per-character skillbar save/load.
 
 These are working subsets, not a claim of complete retail behavior. Some NPC
@@ -76,6 +76,8 @@ the server and its startup watcher.
 This starts the server in the background with login on TCP 15100 and game traffic
 on TCP 15001. For an attached terminal session, use `cargo run -p reko-serverd`.
 The daemon stores characters and imported rules in local `reko.db`.
+Startup checks and migrates that save while preserving players. A missing save
+is created from a separate local world-only template; see [database setup](docs/setup.md).
 
 **Trusted networks only:** passwords are validated, but the legacy game-session
 handoff still uses a temporary IP association and the default listeners bind

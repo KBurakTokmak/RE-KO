@@ -39,7 +39,14 @@ $env:REKO_GAME_DIR = (Resolve-Path '../KnightOnline1453').Path
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
+python -m unittest discover -s scripts -p test_database_manager.py -v
 ```
+
+Database-manager regressions use synthetic world rows and no private fixtures.
+They exercise preservation, repeat application, rollback, fresh creation,
+world-only template filtering, explicit reset backups and future-version rejection.
+Also test a disposable fresh database using a real local template before sharing
+it; verify empty account tables and normal registration/creation defaults.
 
 Some tests skip without original client assets, coefficient exports, supplementary
 Lua or imported fixture databases. Broad NPC/quest audits can take about two
@@ -58,6 +65,13 @@ Useful original-client regression passes:
   location persistence. At level10 use Kaishan's first job change.
 - Buy, equip, swap and sell items; verify pants, both rings, hand conflicts,
   inventory icon removal, durability loss and sundries repair.
+- Deposit/withdraw Noah at an Inn; check immediate wallet/bank balances and
+  persistence after relog. Store an existing scroll stack and equipment on page8;
+  reject merging separate nonstackable stacks. Captured money packets use255
+  page/slot sentinels, which must remain invalid for item transfers.
+- On an admin, `zonechange aradon` should privately suggest Moradon21 without
+  moving; `zonechange 71` should load Colony Zone. Verify a normal/revoked
+  character cannot use the command, and ordinary gates retain their entry rules.
 - Walk across regions and zone gates; verify nearby entities remain visible.
 - Attack a neutral monster at range, observe retaliation, stop attacking and
   escape its leash. Check aggressive monsters, roaming, respawn and loot pickup.

@@ -14,6 +14,8 @@ try {
         cargo build -p reko-serverd
         if ($LASTEXITCODE -ne 0) { throw 'Server build failed.' }
     }
+    python (Join-Path $PSScriptRoot 'database_manager.py') update
+    if ($LASTEXITCODE -ne 0) { throw 'Database preparation failed; server was not started. See docs/setup.md.' }
     $logDir = Join-Path $projectRoot 'logs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     $captureName = 'capture-' + (Get-Date -Format 'yyyyMMdd-HHmmss')

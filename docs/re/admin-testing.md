@@ -86,6 +86,25 @@ changed world-entry field. Native scenery walking still needs gameplay testing.
 
 ## Summoning monsters
 
+Admins can also change zones through ordinary All chat:
+
+```
+zonechange
+zonechange 71
+zonechange Colony Zone
+zonechange aradon
+```
+
+Exact names/aliases or IDs teleport to the character's nation town coordinates.
+Partial text lists matching names and IDs privately without moving; `marad` and
+`aradon` both find Moradon21. Names ignore case/spaces; `Maradon`, `Ronark Land`,
+`Karus` and `Elmorad` are accepted aliases. An empty query lists configured zones.
+Only source town rows with installed original-client maps are offered. The command
+rechecks the database admin tag, requires a living character outside loading and
+saves before the normal native zone-loading handshake. It bypasses ordinary
+testing level/nation/entry fees without changing normal gate policy. Same-zone
+selection uses the native warp; no client patch is involved.
+
 Use normal/all chat on a database-tagged admin character:
 
 ```

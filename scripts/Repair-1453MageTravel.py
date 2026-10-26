@@ -66,8 +66,10 @@ def plan(db, reference, historical, supplementary, game):
     def offer(zone, row):
         key = zone * 100000 + row['id']
         existing = warps.get(key)
-        if existing and existing != row:
+        if existing and {k:v for k,v in existing.items() if k != 'source'} != {k:v for k,v in row.items() if k != 'source'}:
             raise ValueError(f'Refusing to overwrite an occupied warp: {key}.')
+        if existing:
+            row = existing  # Keep provenance when the same map was selected by another path.
         warps[key] = row
         changed[key] = row
 

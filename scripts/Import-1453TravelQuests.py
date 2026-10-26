@@ -19,6 +19,10 @@ def rows(name):
 
 def smd_warps(path, include_tiles=False):
     data = path.read_bytes()
+    try:
+        source = str(path.relative_to(ROOT.parent))
+    except ValueError:
+        source = 'historical/' + path.name
     offset = 0
 
     def read(fmt):
@@ -58,7 +62,7 @@ def smd_warps(path, include_tiles=False):
         result.append(dict(id=warp, name=name.split(b'\0')[0].decode('cp1252'),
                            text=text.split(b'\0')[0].decode('cp1252'), coins=pay,
                            zone=zone, x=x, y=y, z=z, radius=radius, nation=nation,
-                           source=str(path.relative_to(ROOT.parent))))
+                           source=source))
     return (result, tiles) if include_tiles else result
 
 

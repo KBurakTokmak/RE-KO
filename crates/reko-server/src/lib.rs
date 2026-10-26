@@ -25,11 +25,13 @@ mod combat;
 mod combat_zone_tests;
 mod costumes;
 pub mod crypto;
+pub mod database;
 mod durability;
 mod framing;
 mod friendly;
 mod gm_spawn;
 mod gm_teleport;
+mod gm_zone;
 mod hemes;
 mod hotkeys;
 mod inventory;
@@ -1154,7 +1156,8 @@ async fn handle_game_payload_inner(
             }
             if channel == 1
                 && let Some(account) = account.as_deref()
-                && gm_teleport::handle(sock, peer, lobby, account, session, text).await
+                && (gm_teleport::handle(sock, peer, lobby, account, session, text).await
+                    || gm_zone::handle(sock, peer, lobby, account, session, text).await)
             {
                 return;
             }

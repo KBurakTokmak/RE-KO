@@ -7,6 +7,26 @@ use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let mut arguments = std::env::args_os().skip(1);
+    if let Some(command) = arguments.next() {
+        anyhow::ensure!(
+            command == "--prepare-db",
+            "usage: reko-serverd [--prepare-db PATH]"
+        );
+        let path = arguments
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing database path"))?;
+        anyhow::ensure!(arguments.next().is_none(), "unexpected database arguments");
+        let cfg = reko_server::Config {
+            db_path: path.into(),
+            ..Default::default()
+        };
+        let db = reko_server::open_db(&cfg)?;
+        reko_server::database::initialize(&db)?;
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        println!("Database schema ready: {}", cfg.db_path.display());
+        return Ok(());
+    }
     let log_path = std::env::var_os("REKO_LOG_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("logs/server.log"));

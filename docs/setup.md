@@ -24,10 +24,90 @@ No game content or populated database is distributed. SQL files in the Rust
 source define schemas; offline imports populate them from local reference files.
 An empty database cannot provide the documented world/combat features.
 
+### Existing installations and a friend's fresh installation
+
+Code, schema and world content have separate versions. After pulling, run:
+
+```powershell
+python scripts/database_manager.py check
+```
+
+Exit code2 means preparation is needed; it does not modify the save. With players
+logged out normally and the daemon stopped, run `python scripts/database_manager.py update`.
+`Start-ServerWatch.ps1` also runs this update after building and before opening
+the ports. Existing characters/accounts stay local to each installation.
+Schema initialization uses the same Rust code as the runtime. Named content
+migrations apply once; ordered migrations cover Delos/CZ/Ardream travel, combat-zone population and boss
+pools, transformations, the bounded suppression repair and source zone metadata.
+An update is staged on a disposable database, validated and published only on
+success, with the prior save backed up under `logs/`. Missing inputs, conflicting
+local routes, damaged saves and newer unsupported versions stop startup with an
+error. They never trigger an automatic reset. Initial world imports below still require their original inputs. Do not rerun
+them on an existing world merely to catch up with feature migrations.
+
+For a machine without a database, first export a **world-only template** from a
+provisioned installation:
+
+```powershell
+python scripts/database_manager.py export-template
+```
+
+Copy the resulting ignored `local-data/world-template.json` to the same relative
+location on the other machine, alongside its separately obtained compatible
+client. Then run the normal server starter. An absent database is created with
+the current schema and template world rules; account registration and ordinary
+creation defaults remain in code (level1,20,000Noah,300NP and the starter kit).
+Templates select only an explicit list of world tables and required local combat
+CSV inputs. They contain no accounts, passwords, characters, clans, privileges,
+personal inventory, skillbars or grants. Imported world/training entities remain
+world content. Keep templates/private source data out of Git. A clone without
+either a template or the original reference inputs cannot reconstruct that data;
+creation stops with instructions rather than opening an empty world.
+
+An existing database never has its world tables replaced by a template. Bounded
+migrations may read the needed source records from it when original map inputs
+are absent. Refresh the template after adding imported content: export to a new
+`--template` path, review it, then replace the previous local template intentionally.
+The export command refuses to overwrite an existing file.
+
+
+For reference-based updates rather than a shared current template, export the
+required primary1453 JSON inputs read-only from your own SQL reference instance:
+
+```powershell
+.\scripts\Export-1453MigrationInputs.ps1 -Server '<reference-instance>' -Database '<reference-database>'
+```
+
+This writes only local MAGIC_TYPE8, the46 scroll MAGIC_TYPE6 rules, the eight
+NPC-form audit rules and ZONE_INFO JSON. Other inputs are the original client,
+Open-KO historical maps, supplementary2004 maps and existing reference-rules CSVs;
+see [reference data](reference-data.md). Build `cargo build -p reko-tools` for the
+original table reader used by imports. The manager runs the existing bounded
+repair planners on its staging copy. Suppression repair retains its documented
+owner-approved estimates; [rates/provenance](re/world-services.md#suppression-quest-loot-repair).
+Missing inputs stop the whole update without publishing a partially migrated save.
+A current world-only template supplies bounded migration rows when references
+are unavailable on the other computer. Do not copy another developer's live save.
+
+An intentional factory reset is available, with a backup of the old save:
+
+```powershell
+python scripts/database_manager.py reset --confirm-reset reko.db
+```
+
+This removes **all** accounts, characters and clans and rebuilds from the local
+world template. It is never part of pulling or normal startup. `--db`, `--template`,
+`--historical` and `--server` select other paths. Do not use a save database as a
+template. A template checksum detects damage; accept templates only from trusted
+sources, and use matching client/reference versions.
+
+### Provisioning directly from original references
+
 1. Obtain the inputs listed in [reference data](reference-data.md).
-2. Run `cargo run -p reko-serverd` once with valid client assets. It initializes
-   SQLite and exits if the required LEVEL_UP rules have not been imported. This
-   first missing-data error is expected; verify that no daemon remains running.
+2. Run `target/debug/reko-serverd.exe --prepare-db reko.db` to create the schema
+   without starting listeners or requiring game assets. This low-level command
+   does not populate world data or back up an existing save; normal upgrades
+   should use the database manager instead.
 3. Keep the daemon stopped and import the reference rules:
 
 ```powershell
@@ -53,21 +133,7 @@ supplied package/export schemas and are not a general installer for arbitrary
 server releases. Review dry runs and script inputs before `--apply`. They back
 up the save and refuse the running default daemon. Existing installations with
 populated data do not need to rerun these imports for normal startup.
-
-For the owner-approved suppression loot repair, after the population/quest
-imports, review a dry run with the daemon running or stopped:
-
-```powershell
-python scripts/Repair-1453SuppressionLoot.py
-```
-
-Stop the daemon before adding `--apply`. The repair backs up the save and changes
-only the specified suppression drop slots/groups. It restores quest certificate
-availability and adds estimated +1 defense armor pools, validated against original
-client tables. See [loot evidence and rates](re/world-services.md#suppression-quest-loot-repair).
-It requires the locally built `target/debug/reko.exe` table reader; game assets
-can be selected with `--game-dir` or REKO_GAME_DIR. Do not rerun general imports
-merely to apply this bounded repair.
+After initial imports, run the manager's `update` and export a world template.
 
 The current combat loader expects `logs/reference-coefficients.csv`; supplementary
 cure definitions use `logs/reference-rules/MAGIC_TYPE5.csv`. These are local
@@ -77,25 +143,6 @@ coefficients disable the optional combat catalog rather than supplying complete
 combat from an empty database.
 
 ## Start and stop
-
-For the bounded Mage transport and Delos/Colony Zone/Ardream repair, export
-`SELECT * FROM MAGIC_TYPE8` from the supplied1453 reference backup as an array
-of JSON objects into local `logs/reference1453/MAGIC_TYPE8.json`. This input is
-not included in Git. Use the primary1453 export, not the legacy2086 CSV. The
-repair also reads original Zones.tbl/GTD assets, Open-KO historical maps and
-the supplied supplementary2004 maps; see [travel provenance](re/world-services.md#travel-and-scripts).
-
-```powershell
-python scripts/Repair-1453MageTravel.py       # Validate in a disposable copy
-# Stop the daemon before applying the reviewed plan.
-python scripts/Repair-1453MageTravel.py --apply
-```
-
-Paths can be selected with --db, --reference, --historical, --supplementary and
---game-dir (or REKO_GAME_DIR). The script uses SQLite backup, checks all table
-hashes and permits changes only to world_reference_rules/world_town_starts.
-No character grants or startup data resets are performed. Mage transport needs
-the imported rules; Blink also needs supported original outdoor map bounds.
 
 Double-click `server_starter.bat` in the repository root to build and start
 the background server and its client-startup watcher. Double-click
@@ -107,6 +154,9 @@ the update fails. The stop BAT attempts the same update after stopping, so a
 network or Git error cannot prevent shutdown. Pull never forces a merge or
 discards local changes; resolve any reported conflict before restarting.
 Direct PowerShell invocation does not pull updates.
+Both startup paths prepare the SQLite save through the database manager before
+launch. Direct `cargo run -p reko-serverd` initializes schemas only; run the manager
+first when content migrations are pending.
 
 ```powershell
 # Background daemon, capture and client-startup observer

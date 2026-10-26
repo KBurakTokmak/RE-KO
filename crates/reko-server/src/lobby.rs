@@ -33,22 +33,7 @@ impl Lobby {
         rules: super::characters::CreationRules,
         bootstrap: super::world_entry::Bootstrap,
     ) -> rusqlite::Result<Self> {
-        super::characters::initialize(&db)?;
-        super::costumes::initialize(&db)?;
-        super::auth::initialize(&db)?;
-        super::hotkeys::initialize(&db)?;
-        super::admin::initialize(&db)?;
-        super::movement::initialize(&db)?;
-        super::skills::initialize(&db)?;
-        super::quest_rewards::initialize(&db)?;
-        super::stat_points::initialize(&db)?;
-        super::shops::initialize(&db)?;
-        super::population::initialize(&db)?;
-        super::bosses::initialize(&db)?;
-        super::clans::initialize(&db)?;
-        super::loot::initialize(&db)?;
-        db.execute_batch(include_str!("npc_ai.sql"))?;
-        super::quests::initialize(&db)?;
+        super::database::initialize(&db)?;
         Ok(Self {
             social: Arc::new(Mutex::new(super::social::Hub::default())),
             merchants: Vec::new(),
