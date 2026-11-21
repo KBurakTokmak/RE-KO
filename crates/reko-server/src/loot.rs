@@ -693,7 +693,14 @@ pub(crate) async fn handle(
         }
         Err(e) => {
             tracing::info!(%peer,%e,"loot refused");
-            super::send_response(sock, peer, &None, &[0x26, 0], "LOOT_FAILED").await;
+            // With every bag slot occupied, the client's generic failure can
+            // write through a stale loot slot. Result 7 reports a full bag safely.
+            let status = if session.inventory.iter().all(|slot| slot.id != 0) {
+                7
+            } else {
+                0
+            };
+            super::send_response(sock, peer, &None, &[0x26, status], "LOOT_FAILED").await;
         }
     }
 }
@@ -889,6 +896,33 @@ mod tests {
         auto_tick(&mut socket, peer, &lobby, "test", &mut s, 3000).await;
         assert_eq!(book.inner.lock().unwrap().bundles[&4].items[0].1, 1);
         assert!(s.inventory.iter().all(|i| i.id == 110110001));
+
+        // Manual coin pickup after another player or Auto Loot took the gold.
+        use tokio::io::AsyncReadExt;
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        let mut stale_gold = vec![0x26];
+        stale_gold.extend(4u32.to_le_bytes());
+        stale_gold.extend(GOLD.to_le_bytes());
+        let coins = s.coins;
+        for (status, first_slot) in [(7, s.inventory[0]), (0, starter::Item::default())] {
+            s.inventory[0] = first_slot;
+            handle(&mut socket, peer, &lobby, "test", &mut s, &stale_gold).await;
+            let mut frame = [0; 8];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.read_exact(&mut frame),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(frame, [0xaa, 0x55, 2, 0, 0x26, status, 0x55, 0xaa]);
+            assert_eq!(s.coins, coins);
+            assert_eq!(s.inventory[0], first_slot);
+            assert_eq!(book.inner.lock().unwrap().bundles[&4].items[0].1, 1);
+        }
     }
     #[test]
     fn suppression_repair_preserves_other_loot_and_delivers_original_certificates_and_defense_armor()

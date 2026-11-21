@@ -147,3 +147,7 @@ reward:u32,destination:u8,fragment:u32,source:u8,effect:u8 after opcode/subcode.
 Validate/pay the selected source, not a first matching item elsewhere in the bag.
 Loot23 binds corpse:u16/bundle:u32;24 returns six(item:u32,count:u16) slots;
 26 solo success includes bag slot, item, total count and current coins.
+For a rejected pickup with a full bag, send 26/7. Original 1453's 26/0
+handler checks for a free bag slot at 004FED69 and can write through a stale
+loot slot at 004FEDBF when the bag is full. The 26/7 handler at 004FF886
+displays the full-inventory message without touching the selected loot slot.

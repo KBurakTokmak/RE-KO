@@ -21,6 +21,22 @@ The original client and supplied server both mark rogue exchanges 841
 selection dialog (SelectMsg mode 5) for one Kukry +2 or one Crossbow +2.
 Ordinary fixed-reward turn-ins retain mode 4.
 
+Verca and Telson's Shadow Seeker Hunts are quests 813 and 814 in the
+original helper and exchange tables. Each requires 20 kills of prototypes
+503 or 553. The list entries resolve to the class-specific offers. Rogues
+choose one Cleaver +3 or Horn Crossbow +3 (exchanges 889 and 893). The other
+classes receive their fixed weapon rewards. The original client replies with
+the selected reward's menu index in mode 5, including index 1 for the second
+weapon. The server offers one action per valid reward slot.
+
+The Skeleton Knight Hunts (835 and 836) require 30 kills. Priest exchanges
+1028 and 1032 list Royal Knight Pad (285002292). The item exists in the
+supplied 1453 server ITEM export, but the original English client's
+`Item_Ext_14_us.tbl` lacks extension 292. With that client catalog, the
+owner-approved reward is Priest Chitin Armor Pads +1 (285002001) and the
+dialog displays its name in a private chat message. The original item
+remains the reward when its extension is present.
+
 ## Quest journal commands
 
 In ordinary chat, type `quests` (or `quests 2` for the next page) to privately

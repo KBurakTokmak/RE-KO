@@ -96,7 +96,10 @@ fn castle_quest_greeting(npc: u16) -> Option<i32> {
 }
 
 fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper, s: &Session) -> &'a Helper {
-    if h.status == 255 && castle_quest_greeting(h.npc).is_some() {
+    if h.status == 255
+        && (castle_quest_greeting(h.npc).is_some()
+            || matches!((h.npc, h.flag), (24406, 813 | 836) | (14406, 814 | 835)))
+    {
         return all
             .iter()
             .find(|other| {
@@ -439,6 +442,17 @@ fn exchange_rule(db: &Connection, id: u32) -> anyhow::Result<serde_json::Value> 
     Ok(serde_json::from_str(&text)?)
 }
 
+fn skeleton_priest_reward(catalog: &combat::Catalog, exchange: u32) -> Option<u32> {
+    if matches!(exchange, 1028 | 1032)
+        && catalog.item(285002292).is_none_or(|(_, ext)| ext.is_none())
+    {
+        // The original English client lacks the Royal Knight Pad extension.
+        Some(285002001)
+    } else {
+        None
+    }
+}
+
 fn exchange(
     db: &Connection,
     owner: (&str, u8),
@@ -478,10 +492,13 @@ fn exchange(
     }
     let rewards: Vec<_> = (1..=5)
         .map(|i| {
-            (
-                number(&v, &format!("nExchangeItemNum{i}")) as u32,
-                number(&v, &format!("nExchangeItemCount{i}")) as u32,
-            )
+            let mut reward = number(&v, &format!("nExchangeItemNum{i}")) as u32;
+            if reward == 285002292
+                && let Some(compatible) = skeleton_priest_reward(c, id)
+            {
+                reward = compatible;
+            }
+            (reward, number(&v, &format!("nExchangeItemCount{i}")) as u32)
         })
         .collect();
     let mut seed = crate::skills::now_ms()
@@ -810,14 +827,36 @@ fn execute(
             let mut p = vec![0x55];
             p.extend(merchant.prototype.to_le_bytes());
             p.push(a[1] as u8);
-            let flag=all.iter().find(|h|h.id==st.context.helper).map_or(0,|h|h.flag);
+            let helper=all.iter().find(|h|h.id==st.context.helper);
+            let flag=helper.map_or(0,|h|h.flag);
+            if helper.is_some_and(|h|h.status!=2
+                && lobby.combat.as_ref().is_some_and(|catalog|skeleton_priest_reward(catalog,h.exchange).is_some()))
+            {
+                st.packets.push(crate::chat::packet(7,s.character.nation(),u16::MAX,"",b"Quest reward: Priest Chitin Armor Pads (+1)."));
+            }
             p.extend((if a[2]>=0 && flag>0 {i32::from(flag)} else {a[2] as i32}).to_le_bytes());
             // Asan's later dialog959 is absent from the original1453 table.
             let talk=if bifrost_script && st.context.file=="16094_Asan.lua" && a[3]==959 {4071} else {a[3] as i32};
             p.extend(talk.to_le_bytes());
+            let rewards = if a[1]==5 && a.get(6)==Some(&2147483002) {
+                Some(exchange_rule(&tx,helper.map_or(0,|h|h.exchange)).map_err(mlua::Error::external)?)
+            } else {
+                None
+            };
             for i in 0..10 {
-                p.extend((*a.get(5 + i * 2).unwrap_or(&-1) as i32).to_le_bytes());
-                st.context.choices[i] = *a.get(6 + i * 2).unwrap_or(&-1) as i32;
+                let (label,event) = if let Some(row)=&rewards {
+                    // 1453 sends the selected reward as the menu index.
+                    if i<5 && number(row,&format!("nExchangeItemNum{}",i+1))>0
+                        && number(row,&format!("nExchangeItemCount{}",i+1))>0 {
+                        (4006,2147483002)
+                    } else {
+                        (-1,-1)
+                    }
+                } else {
+                    (*a.get(5+i*2).unwrap_or(&-1) as i32,*a.get(6+i*2).unwrap_or(&-1) as i32)
+                };
+                p.extend(label.to_le_bytes());
+                st.context.choices[i]=event;
             }
             // Native dialogs read twelve menu slots before the script filename.
             for _ in 0..2 {
@@ -1262,8 +1301,10 @@ pub(crate) async fn handle(
                 let event = context.choices[index];
                 let step = if p.len() > 2 && p.len() == 4 + usize::from(p[2]) {
                     *p.last().unwrap() as i8
-                } else if p[1] >= 10 || event == 2147483002 {
+                } else if p[1] >= 10 {
                     (p[1] / 10) as i8
+                } else if event == 2147483002 {
+                    index as i8
                 } else {
                     -1
                 };
@@ -1979,6 +2020,141 @@ mod tests {
             .unwrap();
         }
     }
+    #[tokio::test]
+    async fn palace_guard_hunts_respect_native_reward_selection_and_priest_compatibility() {
+        let path = std::path::Path::new("../../reko.db");
+        if !path.exists() {
+            return;
+        }
+        let Some((mut lobby, mut s)) = setup() else {
+            return;
+        };
+        let source =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        {
+            let db = lobby.db.lock().unwrap();
+            let mut query = source
+                .prepare(
+                    "SELECT table_name,rule_id,data FROM world_reference_rules
+                 WHERE (table_name='QUEST_HELPER' AND (rule_id BETWEEN 8396 AND 8437 OR rule_id BETWEEN 8594 AND 8635))
+                    OR (table_name='QUEST_MONSTER' AND rule_id IN (813,814,835,836))
+                    OR (table_name='ITEM_EXCHANGE' AND rule_id IN (889,893,1028,1032))",
+                )
+                .unwrap();
+            let rows = query
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (table, id, data) = row.unwrap();
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES(?1,?2,?3)",
+                    params![table, id, data],
+                )
+                .unwrap();
+            }
+        }
+        let state = |lobby: &Lobby, flag: u16| {
+            lobby.db.lock().unwrap().query_row(
+                "SELECT state FROM character_quests WHERE account='test' AND slot=0 AND quest=?1",
+                [flag],
+                |row| row.get::<_, u8>(0),
+            ).unwrap()
+        };
+        let request = |helper: u32| {
+            let mut packet = vec![0x64, 7];
+            packet.extend(helper.to_le_bytes());
+            packet
+        };
+        for (nation, flag, marker, active, button, expected) in [
+            (1u16, 813, 8396, 8403, 0, 111010003),
+            (2, 814, 8417, 8424, 1, 168210003),
+            (1, 836, 8594, 8611, 0, 285002001),
+            (2, 835, 8615, 8632, 0, 285002001),
+        ] {
+            let priest = matches!(flag, 835 | 836);
+            let (npc, filename) = if nation == 1 {
+                (24406, b"24406_Guardsman.lua")
+            } else {
+                (14406, b"14406_Guardsman.lua")
+            };
+            let (monster, last_monster, kills) = if priest {
+                (1102, 1152, 30)
+            } else {
+                (503, 553, 20)
+            };
+            s.character.race = if nation == 1 { 2 } else { 12 };
+            s.character.class = nation * 100 + if priest { 12 } else { 8 };
+            s.position.zone = nation as u8;
+            lobby.merchants[0].prototype = npc;
+            lobby.merchants[0].position = s.position;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (mut socket, peer) = listener.accept().await.unwrap();
+
+            handle(&mut socket, peer, &lobby, "test", &mut s, &request(marker)).await;
+            let packets = receive_until(&mut client, 0x55).await;
+            assert_eq!(packets.last().unwrap()[3], 4);
+            if priest {
+                assert!(
+                    packets
+                        .iter()
+                        .any(|p| p.ends_with(b"Quest reward: Priest Chitin Armor Pads (+1)."))
+                );
+            }
+            handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 0, 0]).await;
+            assert_eq!(state(&lobby, flag), 1);
+            {
+                let db = lobby.db.lock().unwrap();
+                assert!(crate::quests::kill(&db, "test", 0, 602).unwrap().is_empty());
+                for _ in 1..kills {
+                    crate::quests::kill(&db, "test", 0, monster).unwrap();
+                }
+            }
+            handle(&mut socket, peer, &lobby, "test", &mut s, &request(active)).await;
+            assert_eq!(receive_until(&mut client, 0x55).await.last().unwrap()[3], 2);
+            assert!(s.inventory.iter().all(|item| item.id == 0));
+
+            crate::quests::kill(&lobby.db.lock().unwrap(), "test", 0, last_monster).unwrap();
+            handle(&mut socket, peer, &lobby, "test", &mut s, &request(active)).await;
+            let packets = receive_until(&mut client, 0x55).await;
+            let menu = packets.last().unwrap();
+            assert_eq!(menu[3], if priest { 4 } else { 5 });
+            assert_eq!(
+                &menu[16..20],
+                &(if priest { 23i32 } else { 4006i32 }).to_le_bytes()
+            );
+            let mut reply = vec![0x55, button, filename.len() as u8];
+            reply.extend(filename);
+            handle(&mut socket, peer, &lobby, "test", &mut s, &reply).await;
+            assert_eq!(state(&lobby, flag), 2);
+            assert_eq!(
+                s.inventory
+                    .iter()
+                    .filter(|item| item.id != 0)
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>(),
+                [expected]
+            );
+            handle(&mut socket, peer, &lobby, "test", &mut s, &reply).await;
+            assert_eq!(s.inventory.iter().filter(|item| item.id != 0).count(), 1);
+            lobby
+                .db
+                .lock()
+                .unwrap()
+                .execute("DELETE FROM character_inventory", [])
+                .unwrap();
+            s.inventory = [starter::Item::default(); 28];
+        }
+    }
+
     #[tokio::test]
     async fn item_progress_is_remote_read_only_reversible_and_reward_notifies_wallet_and_xp() {
         let Some((lobby, mut s)) = setup() else {
