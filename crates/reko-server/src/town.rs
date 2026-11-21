@@ -277,7 +277,7 @@ mod tests {
             expires_at: skills::now_ms() + 1000,
         });
         let mut world = Some(s);
-        let mut account = Some("test".into());
+        let account = Some("test");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap())
             .await
@@ -288,15 +288,8 @@ mod tests {
             vec![0x10, 1, 5, 0, b'/', b't', b'o', b'w', b'n'],
         ] {
             world.as_mut().unwrap().position.x = 4500;
-            crate::handle_game_payload(
-                &mut socket,
-                peer,
-                &request,
-                &lobby,
-                &mut account,
-                &mut world,
-            )
-            .await;
+            crate::handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut world)
+                .await;
             let mut frame = [0; 11];
             client.read_exact(&mut frame).await.unwrap();
             assert_eq!(
@@ -320,15 +313,8 @@ mod tests {
         }
         world.as_mut().unwrap().position.x = 4200;
         world.as_mut().unwrap().skills.hp = 49;
-        crate::handle_game_payload(
-            &mut socket,
-            peer,
-            &[0x48, 0],
-            &lobby,
-            &mut account,
-            &mut world,
-        )
-        .await;
+        crate::handle_game_payload(&mut socket, peer, &[0x48, 0], &lobby, account, &mut world)
+            .await;
         assert_eq!(
             world.as_ref().unwrap().position.x,
             4200,

@@ -85,18 +85,11 @@ async fn basic_r_uses_validated_final_stop_before_damage_without_trusting_report
     };
     let before = health();
     let mut session = Some(s);
-    let mut account = Some("admin".into());
+    let account = Some("admin");
     let attack = [0x08, 1, 1, 0x10, 0x27, 0x77, 0, 9, 0];
     for _ in 0..3 {
-        crate::handle_game_payload_inner(
-            &mut socket,
-            peer,
-            &attack,
-            &lobby,
-            &mut account,
-            &mut session,
-        )
-        .await;
+        crate::handle_game_payload_inner(&mut socket, peer, &attack, &lobby, account, &mut session)
+            .await;
         assert_eq!(
             health(),
             before,
@@ -107,41 +100,25 @@ async fn basic_r_uses_validated_final_stop_before_damage_without_trusting_report
     stop.extend(6000u16.to_le_bytes());
     stop.extend(4022u16.to_le_bytes());
     stop.extend([0; 5]);
-    crate::handle_game_payload_inner(&mut socket, peer, &stop, &lobby, &mut account, &mut session)
-        .await;
+    crate::handle_game_payload_inner(&mut socket, peer, &stop, &lobby, account, &mut session).await;
     assert_eq!(
         session.as_ref().unwrap().position.x,
         3262,
         "forged final positions still fail movement validation"
     );
     stop[1..3].copy_from_slice(&3259u16.to_le_bytes());
-    crate::handle_game_payload_inner(&mut socket, peer, &stop, &lobby, &mut account, &mut session)
-        .await;
+    crate::handle_game_payload_inner(&mut socket, peer, &stop, &lobby, account, &mut session).await;
     let saved = crate::movement::load(&lobby.db.lock().unwrap(), "admin", 0).unwrap();
     assert_eq!((saved.x, saved.z), (3259, 4022));
-    crate::handle_game_payload_inner(
-        &mut socket,
-        peer,
-        &attack,
-        &lobby,
-        &mut account,
-        &mut session,
-    )
-    .await;
+    crate::handle_game_payload_inner(&mut socket, peer, &attack, &lobby, account, &mut session)
+        .await;
     assert!(
         health() < before,
         "native movement-before-R ordering must resolve the stale-stop miss"
     );
     let hit = health();
-    crate::handle_game_payload_inner(
-        &mut socket,
-        peer,
-        &attack,
-        &lobby,
-        &mut account,
-        &mut session,
-    )
-    .await;
+    crate::handle_game_payload_inner(&mut socket, peer, &attack, &lobby, account, &mut session)
+        .await;
     assert_eq!(
         health(),
         hit,

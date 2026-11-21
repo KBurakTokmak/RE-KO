@@ -51,6 +51,7 @@ mod model_radius;
 mod monsters;
 mod movement;
 mod npc_scripts;
+mod operator_chat;
 mod party;
 mod population;
 mod priest;
@@ -364,10 +365,10 @@ async fn handle_game_payload(
     peer: SocketAddr,
     payload: &[u8],
     lobby: &lobby::Lobby,
-    account: &mut Option<String>,
+    account: Option<&str>,
     world: &mut Option<world_entry::Session>,
 ) {
-    if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+    if let (Some(account), Some(s)) = (account, world.as_mut()) {
         clan_promotion::transfer(sock, peer, lobby, s).await;
         social::synchronize(lobby, account, s);
         social::flush(sock, peer, lobby, s).await;
@@ -376,7 +377,7 @@ async fn handle_game_payload(
         sock, peer, payload, lobby, account, world,
     ))
     .await;
-    if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+    if let (Some(account), Some(s)) = (account, world.as_mut()) {
         social::synchronize(lobby, account, s);
         visuals::publish(lobby, s, packets);
         social::flush(sock, peer, lobby, s).await;
@@ -387,7 +388,7 @@ async fn handle_game_payload_inner(
     peer: SocketAddr,
     payload: &[u8],
     lobby: &lobby::Lobby,
-    account: &mut Option<String>,
+    account: Option<&str>,
     world: &mut Option<world_entry::Session>,
 ) {
     if payload.is_empty() {
@@ -475,9 +476,7 @@ async fn handle_game_payload_inner(
             }
         }
         0x3c => {
-            if let (Some(account), Some(s)) =
-                (account.as_deref(), world.as_mut().filter(|s| s.entered))
-            {
+            if let (Some(account), Some(s)) = (account, world.as_mut().filter(|s| s.entered)) {
                 clans::process(lobby, account, s, payload);
             }
         }
@@ -503,28 +502,9 @@ async fn handle_game_payload_inner(
                 tracing::error!(%peer, error = %e, "failed to send WIZ_VERSION_CHECK response");
             }
         }
-        // Opcode 0x01: WIZ_LOGIN (Game Server Account Auth)
-        0x01 => {
-            tracing::info!(%peer, "handling game server WIZ_LOGIN (0x01)");
-            // Nation zero opens selection; 0xff refuses an unauthenticated handoff.
-            if account.is_none() {
-                *account = lobby.claim_login(peer.ip());
-            }
-            let nation = account
-                .as_deref()
-                .and_then(|account| characters::nation(&lobby.db.lock().unwrap(), account).ok())
-                .unwrap_or(0xff);
-            tracing::info!(%peer, ?account, nation, "game lobby account association");
-            let response = [0x01, nation];
-            let packet = frame_packet(&response);
-            tracing::info!(%peer, dump = %format_hex(&packet), "sending WIZ_LOGIN (0x01) response");
-            if let Err(e) = sock.write_all(&packet).await {
-                tracing::error!(%peer, error = %e, "failed to send WIZ_LOGIN response");
-            }
-        }
         // Creation success is zero; the client then requests the character list.
         0x02 => {
-            let result = match (account.as_deref(), characters::Character::parse(payload)) {
+            let result = match (account, characters::Character::parse(payload)) {
                 (Some(account), Ok(character)) => {
                     if let Err(status) = lobby.rules.validate(&character) {
                         send_response(sock, peer, &None, &[0x02, status], "WIZ_NEW_CHAR").await;
@@ -565,7 +545,7 @@ async fn handle_game_payload_inner(
         }
         0x05 => {
             let result = if payload.len() == 2 {
-                account.as_deref().map(|account| {
+                account.map(|account| {
                     characters::set_nation(&lobby.db.lock().unwrap(), account, payload[1])
                 })
             } else {
@@ -582,7 +562,7 @@ async fn handle_game_payload_inner(
             send_response(sock, peer, &None, &[0x05, selected], "WIZ_NATION_SELECT").await;
         }
         0x04 => {
-            let character = match (account.as_deref(), world_entry::selected_name(payload)) {
+            let character = match (account, world_entry::selected_name(payload)) {
                 (Some(account), Some(name)) => {
                     match characters::find(&lobby.db.lock().unwrap(), account, name) {
                         Ok(character) => character,
@@ -596,9 +576,7 @@ async fn handle_game_payload_inner(
             };
             let character = character.filter(|_| {
                 !lobby.social.lock().unwrap().players.values().any(|p| {
-                    account
-                        .as_deref()
-                        .is_some_and(|a| p.account.eq_ignore_ascii_case(a))
+                    account.is_some_and(|a| p.account.eq_ignore_ascii_case(a))
                         && world
                             .as_ref()
                             .is_none_or(|current| current.player_id != p.s.player_id)
@@ -614,7 +592,7 @@ async fn handle_game_payload_inner(
             ) {
                 book.register_owner(&session.character.name, session.character.nation());
             }
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 session.clan =
                     clans::load(&lobby.db.lock().unwrap(), account, session.character.slot)
                         .unwrap_or_default();
@@ -631,7 +609,7 @@ async fn handle_game_payload_inner(
                     }
                 }
             }
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 let loaded = {
                     let db = lobby.db.lock().unwrap();
                     skills::load(&db, account, session.character.slot).and_then(|state| {
@@ -661,7 +639,7 @@ async fn handle_game_payload_inner(
                     }
                 }
             }
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 let items = {
                     let db = lobby.db.lock().unwrap();
                     starter::equipment(&db, account, session.character.slot).and_then(|equipment| {
@@ -695,7 +673,7 @@ async fn handle_game_payload_inner(
                 }
             }
             if let (Some(session), Some(account), Some(catalog)) =
-                (world.as_mut(), account.as_deref(), lobby.combat.as_ref())
+                (world.as_mut(), account, lobby.combat.as_ref())
             {
                 match catalog.calculate(&session.character, &session.progress, &session.equipment) {
                     Ok(mut stats) => {
@@ -745,7 +723,7 @@ async fn handle_game_payload_inner(
             }
             if payload[1] == 2 {
                 if session.snapshot_sent && session.entered && !session.zone_loading {
-                    social::refresh_region(lobby, account.as_deref().unwrap(), session);
+                    social::refresh_region(lobby, account.unwrap(), session);
                     tracing::info!(%peer,name=%session.character.name,"client world load completed; player regions refreshed");
                 }
                 return;
@@ -761,7 +739,7 @@ async fn handle_game_payload_inner(
             session.entered = true;
             if first_entry {
                 session.next_regen = skills::now_ms() + 6000;
-                if let Some(account) = account.as_deref() {
+                if let Some(account) = account {
                     if let Some(packet) = session.zone_ability() {
                         send_response(sock, peer, &None, &packet, "ZONE_ABILITY").await;
                     }
@@ -808,7 +786,7 @@ async fn handle_game_payload_inner(
             send_response(sock, peer, &None, &[0x6B, 0, 0], "WIZ_OPTIONAL_LIST").await;
         }
         0x06 => {
-            let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) else {
+            let (Some(session), Some(account)) = (world.as_mut(), account) else {
                 return;
             };
             if !session.entered {
@@ -872,7 +850,7 @@ async fn handle_game_payload_inner(
             }
             let target = u16::from_le_bytes([payload[3], payload[4]]);
             let now = skills::now_ms();
-            session.is_admin = account.as_deref().is_some_and(|account| {
+            session.is_admin = account.is_some_and(|account| {
                 admin::is_admin(&lobby.db.lock().unwrap(), account, session.character.slot)
                     .unwrap_or(false)
             });
@@ -906,7 +884,7 @@ async fn handle_game_payload_inner(
                     Ok(hit) => {
                         result = if hit.dead { 2 } else { 1 };
                         session.next_attack = now + session.combat.delay_ms;
-                        if let Some(account) = account.as_deref() {
+                        if let Some(account) = account {
                             durability::attack(
                                 sock,
                                 peer,
@@ -947,12 +925,12 @@ async fn handle_game_payload_inner(
             }
         }
         0x45 => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 storage::handle(sock, peer, lobby, account, session, payload).await;
             }
         }
         0x33 | 0x5b => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 if payload.first() == Some(&0x33) && travel::is_gate(lobby, session, payload) {
                     travel::handle(sock, peer, lobby, account, session, payload).await;
                 } else {
@@ -961,12 +939,12 @@ async fn handle_game_payload_inner(
             }
         }
         0x27 | 0x4b => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 travel::handle(sock, peer, lobby, account, session, payload).await;
             }
         }
         0x24 | 0x26 => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 loot::handle(sock, peer, lobby, account, session, payload).await;
             }
         }
@@ -988,20 +966,10 @@ async fn handle_game_payload_inner(
             }
         }
         0x31 => {
-            if magic::handle(
-                sock,
-                peer,
-                payload,
-                lobby,
-                account.as_deref(),
-                world.as_mut(),
-            )
-            .await
-            {
+            if magic::handle(sock, peer, payload, lobby, account, world.as_mut()).await {
                 return;
             }
-            let (Some(session), Some(account)) =
-                (world.as_mut().filter(|s| s.entered), account.as_deref())
+            let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), account)
             else {
                 return;
             };
@@ -1100,18 +1068,17 @@ async fn handle_game_payload_inner(
             }
         }
         0x20 | 0x21 | 0x3b => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 shops::handle(sock, peer, lobby, account, session, payload).await;
             }
         }
         0x28 => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 stat_points::handle(sock, peer, lobby, account, session, payload).await;
             }
         }
         0x32 => {
-            let (Some(session), Some(account)) =
-                (world.as_mut().filter(|s| s.entered), account.as_deref())
+            let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), account)
             else {
                 return;
             };
@@ -1148,7 +1115,7 @@ async fn handle_game_payload_inner(
         }
         0x48 => {
             if matches!(payload, [0x48] | [0x48, 0])
-                && let (Some(session), Some(account)) = (world.as_mut(), account.as_deref())
+                && let (Some(session), Some(account)) = (world.as_mut(), account)
             {
                 town::handle(sock, peer, lobby, account, session).await;
             }
@@ -1162,7 +1129,14 @@ async fn handle_game_payload_inner(
                 return;
             };
             if channel == 1
-                && let Some(account) = account.as_deref()
+                && let Some(account) = account
+                && let Some(reply) = operator_chat::command(lobby, account, session, text)
+            {
+                send_response(sock, peer, &None, &reply, "OPERATOR_CHAT").await;
+                return;
+            }
+            if channel == 1
+                && let Some(account) = account
                 && social::visibility_command(sock, peer, lobby, account, session, text).await
             {
                 return;
@@ -1174,34 +1148,41 @@ async fn handle_game_payload_inner(
                 return;
             }
             if channel == 1
-                && let Some(account) = account.as_deref()
+                && let Some(account) = account
                 && quest_journal::handle(sock, peer, lobby, account, session, text).await
             {
                 return;
             }
             if channel == 1
-                && let Some(account) = account.as_deref()
+                && let Some(account) = account
                 && (gm_teleport::handle(sock, peer, lobby, account, session, text).await
                     || gm_zone::handle(sock, peer, lobby, account, session, text).await)
             {
                 return;
             }
             if channel == 1
-                && let Some(account) = account.as_deref()
+                && let Some(account) = account
                 && gm_spawn::handle(sock, peer, lobby, account, session, text).await
             {
                 return;
             }
             if channel == 1 && text.eq_ignore_ascii_case(b"/town") {
-                if let Some(account) = account.as_deref() {
+                if let Some(account) = account {
                     town::handle(sock, peer, lobby, account, session).await;
                 }
                 return;
             }
             if channel == 1
-                && let Some(account) = account.as_deref()
+                && let Some(account) = account
                 && utility::training_command(sock, peer, lobby, account, session, text).await
             {
+                return;
+            }
+            if let Some(account) = account
+                && operator_chat::is_muted(&mut lobby.social.lock().unwrap(), account)
+            {
+                let packet = operator_chat::notice(b"Your chat is muted.");
+                send_response(sock, peer, &None, &packet, "CHAT_MUTED").await;
                 return;
             }
             if matches!(channel, 3 | 6)
@@ -1224,7 +1205,7 @@ async fn handle_game_payload_inner(
             } else {
                 if channel == 5 {
                     // TODO(re): Verify the original shout cost and eligibility rules.
-                    let Some(account) = account.as_deref() else {
+                    let Some(account) = account else {
                         return;
                     };
                     let result = {
@@ -1286,7 +1267,7 @@ async fn handle_game_payload_inner(
         // Opcode 0x0C: WIZ_ALLCHAR_INFO_REQ
         0x0C => {
             tracing::info!(%peer, dump = %format_hex(payload), "handling game server WIZ_ALLCHAR_INFO_REQ (0x0C)");
-            let result = characters::list_payload(&lobby.db.lock().unwrap(), account.as_deref());
+            let result = characters::list_payload(&lobby.db.lock().unwrap(), account);
             let response = match result {
                 Ok(response) => response,
                 Err(error) => {
@@ -1302,17 +1283,17 @@ async fn handle_game_payload_inner(
         }
         // Opcode 0x41: WIZ_SPEEDHACK_CHECK / Heartbeat
         0x55 | 0x64 => {
-            if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+            if let (Some(account), Some(s)) = (account, world.as_mut()) {
                 npc_scripts::handle(sock, peer, lobby, account, s, payload).await;
             }
         }
         0x12 => {
-            if let (Some(account), Some(s)) = (account.as_deref(), world.as_mut()) {
+            if let (Some(account), Some(s)) = (account, world.as_mut()) {
                 town::respawn(sock, peer, lobby, account, s, payload).await;
             }
         }
         0x1F => {
-            let response = inventory::handle(lobby, account.as_deref(), world.as_mut(), payload);
+            let response = inventory::handle(lobby, account, world.as_mut(), payload);
             let costume_changed =
                 response.get(1) == Some(&1) && payload.get(1).is_some_and(|d| matches!(d, 7 | 8));
             send_response(sock, peer, &None, &response, "ITEM_MOVE").await;
@@ -1329,14 +1310,12 @@ async fn handle_game_payload_inner(
             }
         }
         0x3F => {
-            for response in inventory::remove(lobby, account.as_deref(), world.as_mut(), payload) {
+            for response in inventory::remove(lobby, account, world.as_mut(), payload) {
                 send_response(sock, peer, &None, &response, "ITEM_REMOVE").await;
             }
         }
         0x79 => {
-            if let (Some(account), Some(s)) =
-                (account.as_deref(), world.as_ref().filter(|s| s.entered))
-            {
+            if let (Some(account), Some(s)) = (account, world.as_ref().filter(|s| s.entered)) {
                 let result = hotkeys::process(
                     &lobby.db.lock().unwrap(),
                     account,
@@ -1353,7 +1332,7 @@ async fn handle_game_payload_inner(
             }
         }
         0x70 => {
-            if let (Some(session), Some(account)) = (world.as_mut(), account.as_deref()) {
+            if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 clan_promotion::cape(sock, peer, lobby, account, session, payload).await;
             }
         }
@@ -1520,15 +1499,29 @@ async fn tick_character(
     }
 }
 
+fn enable_game_keepalive(sock: &TcpStream) -> std::io::Result<()> {
+    // A VPN drop may leave TCP half open. Let the transport probe idle clients
+    // so a dead peer cannot hold its account lease until server shutdown.
+    let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(60));
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    let keepalive = keepalive
+        .with_interval(Duration::from_secs(10))
+        .with_retries(5);
+    socket2::SockRef::from(sock).set_tcp_keepalive(&keepalive)
+}
+
 /// Handles incoming game client connection on port 15001.
 async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lobby::Lobby>) {
     tracing::info!(%peer, "game client connected to game server (15001)");
+    if let Err(error) = enable_game_keepalive(&sock) {
+        tracing::warn!(%peer, %error, "could not configure game TCP keepalive");
+    }
     let mut buf = [0u8; 4096];
     let mut decoder = framing::Decoder::default();
     let mut packet_count = 0u64;
     let mut last_opcode = None;
     let mut idle_reported = false;
-    let mut account = None;
+    let mut lease: Option<lobby::AccountLease<'_>> = None;
     let mut world: Option<world_entry::Session> = None;
     let mut social_guard = social::Guard {
         lobby: lobby.clone(),
@@ -1542,7 +1535,7 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     loop {
         let read = tokio::select! {
             _=async {social_notify.as_ref().unwrap().notified().await}, if social_notify.is_some()=> {
-                if let (Some(session),Some(account))=(world.as_mut(),account.as_deref()) {
+                if let (Some(session),Some(account))=(world.as_mut(),lease.as_ref().map(lobby::AccountLease::name)) {
                     clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
                     social::synchronize(&lobby,account,session);
                     social::flush(&mut sock,peer,&lobby,session).await;
@@ -1558,7 +1551,7 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                 continue;
             }
             _ = skill_tick.tick() => {
-                if let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), account.as_deref()) {
+                if let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), lease.as_ref().map(lobby::AccountLease::name)) {
                     clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
                     if !session.entered { continue; }
                     let packets=visuals::capture(tick_character(&mut sock,peer,&lobby,account,session,skills::now_ms())).await;
@@ -1608,12 +1601,28 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                             packet_count += 1;
                             last_opcode = payload.first().map(|opcode| format!("0x{opcode:02X}"));
                             let span = tracing::info_span!("request", packet = packet_count, opcode = %last_opcode.as_deref().unwrap_or("empty"));
+                            if payload.first() == Some(&1) {
+                                if lease.is_none() {
+                                    lease = lobby.claim_game_login(peer.ip());
+                                }
+                                let nation = lease
+                                    .as_ref()
+                                    .and_then(|lease| {
+                                        characters::nation(&lobby.db.lock().unwrap(), lease.name())
+                                            .ok()
+                                    })
+                                    .unwrap_or(0xff);
+                                send_response(&mut sock, peer, &None, &[1, nation], "WIZ_LOGIN")
+                                    .instrument(span)
+                                    .await;
+                                continue;
+                            }
                             handle_game_payload(
                                 &mut sock,
                                 peer,
                                 &payload,
                                 &lobby,
-                                &mut account,
+                                lease.as_ref().map(lobby::AccountLease::name),
                                 &mut world,
                             )
                             .instrument(span)
@@ -1812,66 +1821,26 @@ mod tests {
                 .load_population(&db, &reko_common::game_dir())
                 .unwrap();
         }
-        let mut account = Some("test".to_string());
+        let account = Some("test");
         let mut world = Some(s);
         let hp = |id| {
             let p = monsters.health(id, 21).unwrap();
             u32::from_le_bytes(p[8..12].try_into().unwrap())
         };
         let request = [8, 1, 0, 0xe0, 0x2e, 0, 0, 0, 0];
-        handle_game_payload(
-            &mut socket,
-            peer,
-            &request,
-            &lobby,
-            &mut account,
-            &mut world,
-        )
-        .await;
+        handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut world).await;
         assert_eq!(hp(12000), 45000);
-        handle_game_payload(
-            &mut socket,
-            peer,
-            &request,
-            &lobby,
-            &mut account,
-            &mut world,
-        )
-        .await;
+        handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut world).await;
         assert_eq!(hp(12000), 45000, "normal attack delay remains enforced");
         world.as_mut().unwrap().next_attack = 0;
         world.as_mut().unwrap().position.x = 5000;
-        handle_game_payload(
-            &mut socket,
-            peer,
-            &request,
-            &lobby,
-            &mut account,
-            &mut world,
-        )
-        .await;
+        handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut world).await;
         assert_eq!(hp(12000), 45000, "remote admin targets remain out of range");
         world.as_mut().unwrap().position.x = 3250;
-        handle_game_payload(
-            &mut socket,
-            peer,
-            &request,
-            &lobby,
-            &mut account,
-            &mut world,
-        )
-        .await;
+        handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut world).await;
         assert_eq!(hp(12000), 15000);
         world.as_mut().unwrap().next_attack = 0;
-        handle_game_payload(
-            &mut socket,
-            peer,
-            &request,
-            &lobby,
-            &mut account,
-            &mut world,
-        )
-        .await;
+        handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut world).await;
         assert_eq!(hp(12000), 0, "last hit clamps to remaining HP");
         lobby
             .db
@@ -1890,7 +1859,7 @@ mod tests {
             peer,
             &[8, 1, 0, 0x10, 0x27, 0, 0, 0, 0],
             &lobby,
-            &mut account,
+            account,
             &mut world,
         )
         .await;
@@ -1905,7 +1874,7 @@ mod tests {
             peer,
             &[8, 1, 0, 0x10, 0x27, 0, 0, 0, 0],
             &lobby,
-            &mut account,
+            account,
             &mut world,
         )
         .await;
@@ -1921,7 +1890,7 @@ mod tests {
         receive(client).await
     }
 
-    async fn receive(client: &mut TcpStream) -> Vec<u8> {
+    pub(super) async fn receive(client: &mut TcpStream) -> Vec<u8> {
         tokio::time::timeout(Duration::from_secs(2), async {
             let mut header = [0; 4];
             client.read_exact(&mut header).await.unwrap();
@@ -1986,13 +1955,13 @@ mod tests {
         tick_character(&mut socket, peer, &lobby, "recovery", &mut session, 0).await;
         assert_eq!(receive(&mut client).await, [0x18, 100, 0, 43, 0]);
         let mut world = Some(session);
-        let mut account = Some("recovery".into());
+        let account = Some("recovery");
         handle_game_payload(
             &mut socket,
             peer,
             &[0x29, 1, 2, 0],
             &lobby,
-            &mut account,
+            account,
             &mut world,
         )
         .await;
@@ -2015,7 +1984,7 @@ mod tests {
             peer,
             &[0x29, 1, 1, 0],
             &lobby,
-            &mut account,
+            account,
             &mut world,
         )
         .await;
@@ -2250,6 +2219,64 @@ mod tests {
         assert_eq!(exchange(&mut reconnect, &[0x0C]).await, list);
         drop(reconnect);
         reconnect_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_lease_rejects_second_game_socket_until_first_disconnects() {
+        let lobby = Arc::new(social::tests::lobby());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open = async |account| {
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (socket, peer) = listener.accept().await.unwrap();
+            lobby.record_login(peer.ip(), account).unwrap();
+            let task = tokio::spawn(handle_game_client(socket, peer, lobby.clone()));
+            let result = exchange(&mut client, &[1]).await;
+            (client, task, result)
+        };
+        let (mut original, original_task, result) = open("Tester").await;
+        assert_eq!(result, [1, 0]);
+        let (mut duplicate, duplicate_task, result) = open("TESTER").await;
+        assert_eq!(result, [1, 0xff]);
+        assert_eq!(exchange(&mut duplicate, &[5, 2]).await, [5, 0]);
+        assert_eq!(exchange(&mut original, &[5, 1]).await, [5, 1]);
+        assert_eq!(exchange(&mut original, &[1]).await, [1, 1]);
+        let (different, different_task, result) = open("Other").await;
+        assert_eq!(result, [1, 0]);
+
+        // Rejecting or closing a duplicate must leave the original lease held.
+        drop(duplicate);
+        duplicate_task.await.unwrap();
+        let (duplicate, duplicate_task, result) = open("tester").await;
+        assert_eq!(result, [1, 0xff]);
+        drop(duplicate);
+        duplicate_task.await.unwrap();
+
+        drop(original);
+        original_task.await.unwrap();
+        let (reconnected, reconnect_task, result) = open("tester").await;
+        assert_eq!(result, [1, 1]);
+        reconnect_task.abort();
+        assert!(reconnect_task.await.unwrap_err().is_cancelled());
+        let (retried, retried_task, result) = open("tester").await;
+        assert_eq!(result, [1, 1]);
+        drop(reconnected);
+        drop(retried);
+        drop(different);
+        retried_task.await.unwrap();
+        different_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn game_transport_enables_tcp_keepalive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        enable_game_keepalive(&socket).unwrap();
+        assert!(socket2::SockRef::from(&socket).keepalive().unwrap());
     }
 
     #[tokio::test]

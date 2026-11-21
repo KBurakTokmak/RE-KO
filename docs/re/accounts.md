@@ -44,9 +44,18 @@ VersionManager/User.cpp LogInReq and client GameProcLogIn_1298.cpp
 MsgRecv_GameServerLogIn corroborate this. First-login registration is the
 owner's requested policy, not copied SQL/ODBC account provisioning.
 
-The game handoff still consumes a single-use 60-second IP association; ambiguous
-same-IP sessions are refused. Recovering native token binding, duplicate live
-session handling, password recovery and stronger transport are separate work.
+The game handoff consumes a single-use 60-second IP association. Ambiguous
+same-IP handoffs are refused. A successful game login holds an exclusive account
+lease, starting with game login and lasting until the game connection
+closes. A second connection for the same account receives the existing game
+login failure response. The first connection keeps its session, and retrying
+after it disconnects requires a fresh login. Distinct accounts can play from the
+same address if each handoff is completed before the next begins.
+TCP keepalive probes detect dead game connections so a lost network link can
+release its account lease without restarting the server. On Windows, Linux and
+macOS the settings are 60 seconds idle, 10 seconds between probes and five
+unanswered probes. Healthy idle connections retain their leases.
+Native token binding, password recovery and stronger transport remain separate work.
 Passwords now validate, but the legacy protocol is not modern secure internet
 transport. Keep the server on trusted development/LAN networks.
 The server-list handoff automatically uses the local IPv4 of each accepted login

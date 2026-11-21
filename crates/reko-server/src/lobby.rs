@@ -1,6 +1,6 @@
 //! Temporary login-to-game association until the v1453 account token is recovered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +26,24 @@ pub(crate) struct Lobby {
     pub monsters: Option<std::sync::Arc<super::monsters::World>>,
     pub login_slots: Arc<tokio::sync::Semaphore>,
     pending: Mutex<HashMap<IpAddr, Vec<PendingLogin>>>,
+    active_accounts: Mutex<HashSet<String>>,
+}
+
+pub(crate) struct AccountLease<'a> {
+    account: String,
+    active: &'a Mutex<HashSet<String>>,
+}
+
+impl AccountLease<'_> {
+    pub fn name(&self) -> &str {
+        &self.account
+    }
+}
+
+impl Drop for AccountLease<'_> {
+    fn drop(&mut self) {
+        self.active.lock().unwrap().remove(&self.account);
+    }
 }
 
 impl Lobby {
@@ -49,6 +67,7 @@ impl Lobby {
             monsters: None,
             login_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             pending: Mutex::new(HashMap::new()),
+            active_accounts: Mutex::new(HashSet::new()),
         })
     }
 
@@ -88,6 +107,18 @@ impl Lobby {
         } else {
             None
         }
+    }
+
+    pub fn claim_game_login(&self, ip: IpAddr) -> Option<AccountLease<'_>> {
+        let account = self.claim_login(ip)?;
+        if !self.active_accounts.lock().unwrap().insert(account.clone()) {
+            tracing::info!(%account, "duplicate game login refused");
+            return None;
+        }
+        Some(AccountLease {
+            account,
+            active: &self.active_accounts,
+        })
     }
 
     pub fn clear_login(&self, ip: IpAddr) {

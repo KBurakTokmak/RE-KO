@@ -225,7 +225,7 @@ mod tests {
             .await
             .unwrap();
         let (mut socket, peer) = listener.accept().await.unwrap();
-        let mut account = Some("test".to_owned());
+        let account = Some("test");
         for (slot, first, native) in [(0, 508013318, 1), (1, 508011441, 4)] {
             for choice in 0..4 {
                 let id = first + choice;
@@ -246,7 +246,7 @@ mod tests {
                     peer,
                     &request(7, id, 0, native),
                     &lobby,
-                    &mut account,
+                    account,
                     &mut world,
                 )
                 .await;

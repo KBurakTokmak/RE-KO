@@ -134,17 +134,9 @@ mod tests {
         packet.extend((text.len() as u16).to_le_bytes());
         packet.extend(text);
         s.sitting = true;
-        let mut account = Some("test".to_owned());
+        let account = Some("test");
         let mut session = Some(s);
-        crate::handle_game_payload(
-            &mut socket,
-            peer,
-            &packet,
-            &lobby,
-            &mut account,
-            &mut session,
-        )
-        .await;
+        crate::handle_game_payload(&mut socket, peer, &packet, &lobby, account, &mut session).await;
         let s = session.as_mut().unwrap();
         assert_eq!(
             s.position,

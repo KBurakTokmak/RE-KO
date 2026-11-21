@@ -671,32 +671,30 @@ mod tests {
         }
         let (mut ca, mut sa, pa) = pair().await;
         let (mut cb, mut sb, pb) = pair().await;
-        let mut aa = Some("test".into());
-        let mut ab = Some("peer".into());
+        let aa = Some("test");
+        let ab = Some("peer");
         let mut wa = Some(players[0].s.clone());
         let mut wb = Some(players[1].s.clone());
         let mut req = vec![0x30, 1];
         req.extend(ids[1].to_le_bytes());
         req.push(1);
-        crate::handle_game_payload(&mut sa, pa, &req, &lobby, &mut aa, &mut wa).await;
+        crate::handle_game_payload(&mut sa, pa, &req, &lobby, aa, &mut wa).await;
         crate::social::flush(&mut sb, pb, &lobby, wb.as_ref().unwrap()).await;
-        crate::handle_game_payload(&mut sa, pa, &[0x41, 0, 0, 0, 0], &lobby, &mut aa, &mut wa)
-            .await;
+        crate::handle_game_payload(&mut sa, pa, &[0x41, 0, 0, 0, 0], &lobby, aa, &mut wa).await;
         assert!(busy(&lobby.social.lock().unwrap(), ids[0]));
         let req = receive(&mut cb, &[0x30, 1]).await;
         assert_eq!(req.len(), 4);
         assert_eq!(&req[2..], &ids[0].to_le_bytes());
-        crate::handle_game_payload(&mut sb, pb, &[0x30, 2, 1], &lobby, &mut ab, &mut wb).await;
+        crate::handle_game_payload(&mut sb, pb, &[0x30, 2, 1], &lobby, ab, &mut wb).await;
         crate::social::flush(&mut sa, pa, &lobby, wa.as_ref().unwrap()).await;
         assert_eq!(receive(&mut ca, &[0x30, 2]).await, vec![0x30, 2, 1]);
         let mut add = vec![0x30, 3, 0];
         add.extend(110110001u32.to_le_bytes());
         add.extend(1u32.to_le_bytes());
-        crate::handle_game_payload(&mut sa, pa, &add, &lobby, &mut aa, &mut wa).await;
+        crate::handle_game_payload(&mut sa, pa, &add, &lobby, aa, &mut wa).await;
         assert_eq!(receive(&mut ca, &[0x30, 3]).await, vec![0x30, 3, 1]);
         crate::social::flush(&mut sb, pb, &lobby, wb.as_ref().unwrap()).await;
-        crate::handle_game_payload(&mut sb, pb, &[0x41, 1, 0, 0, 0], &lobby, &mut ab, &mut wb)
-            .await;
+        crate::handle_game_payload(&mut sb, pb, &[0x41, 1, 0, 0, 0], &lobby, ab, &mut wb).await;
         assert!(busy(&lobby.social.lock().unwrap(), ids[1]));
         let other = receive(&mut cb, &[0x30, 4]).await;
         assert_eq!(other.len(), 16);
@@ -704,22 +702,20 @@ mod tests {
         let mut money = vec![0x30, 3, 255];
         money.extend(GOLD.to_le_bytes());
         money.extend(10000u32.to_le_bytes());
-        crate::handle_game_payload(&mut sb, pb, &money, &lobby, &mut ab, &mut wb).await;
+        crate::handle_game_payload(&mut sb, pb, &money, &lobby, ab, &mut wb).await;
         assert_eq!(receive(&mut cb, &[0x30, 3]).await, vec![0x30, 3, 1]);
         crate::social::flush(&mut sa, pa, &lobby, wa.as_ref().unwrap()).await;
         let offered_money = receive(&mut ca, &[0x30, 4]).await;
         assert_eq!(&offered_money[2..6], &GOLD.to_le_bytes());
         assert_eq!(&offered_money[6..10], &10000u32.to_le_bytes());
-        crate::handle_game_payload(&mut sb, pb, &[0x41, 3, 0, 0, 0], &lobby, &mut ab, &mut wb)
-            .await;
+        crate::handle_game_payload(&mut sb, pb, &[0x41, 3, 0, 0, 0], &lobby, ab, &mut wb).await;
         assert!(busy(&lobby.social.lock().unwrap(), ids[1]));
-        crate::handle_game_payload(&mut sa, pa, &[0x30, 5], &lobby, &mut aa, &mut wa).await;
+        crate::handle_game_payload(&mut sa, pa, &[0x30, 5], &lobby, aa, &mut wa).await;
         crate::social::flush(&mut sb, pb, &lobby, wb.as_ref().unwrap()).await;
         assert_eq!(receive(&mut cb, &[0x30, 6]).await, vec![0x30, 6]);
-        crate::handle_game_payload(&mut sa, pa, &[0x41, 2, 0, 0, 0], &lobby, &mut aa, &mut wa)
-            .await;
+        crate::handle_game_payload(&mut sa, pa, &[0x41, 2, 0, 0, 0], &lobby, aa, &mut wa).await;
         assert!(busy(&lobby.social.lock().unwrap(), ids[0]));
-        crate::handle_game_payload(&mut sb, pb, &[0x30, 5], &lobby, &mut ab, &mut wb).await;
+        crate::handle_game_payload(&mut sb, pb, &[0x30, 5], &lobby, ab, &mut wb).await;
         let done = receive(&mut cb, &[0x30, 7, 1]).await;
         assert_eq!(done.len(), 22);
         assert_eq!(&done[7..9], &1u16.to_le_bytes());

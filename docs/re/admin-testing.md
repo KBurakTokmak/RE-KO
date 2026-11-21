@@ -181,3 +181,23 @@ unchanged. The shared Town relocation path saves before native WIZ_WARP0x1E,
 clears stale cast/NPC/sitting/movement state and immediately refreshes regions.
 Supplied1453/Open-KO `User::Warp` is the packet/coordinate reference. Use bare
 commands: the original client may intercept unknown slash commands locally.
+
+
+## Chat operations
+
+A character with the database administrator role can enter these commands in All
+chat:
+
+```
+op announce Server maintenance in five minutes.
+op mute CharacterName 10
+op unmute CharacterName
+```
+
+Announcements appear as server notices to players in the world across zones and
+factions. Mute durations range from 1 to 60 minutes. Target an online character
+by name to mute or unmute their account. A mute applies to normal, shout, party,
+clan and alliance chat before any shout mana is spent. Server commands still
+work. Mutes persist across reconnects and character switches until they expire,
+an administrator removes them, or the server restarts. These are local operator
+policies using the existing chat and privilege systems.

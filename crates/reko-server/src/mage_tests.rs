@@ -296,14 +296,14 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
         session.inventory = starter::inventory(&db, "mage", 0).unwrap();
     }
     let mut world = Some(session);
-    let mut account = Some("mage".to_string());
+    let account = Some("mage");
     for (id, expected_mana, expected_hp) in [(490020, 2920, 1000), (490014, 2920, 1720)] {
         super::handle_game_payload(
             &mut sock,
             peer,
             &packet(id, player, 3),
             &lobby,
-            &mut account,
+            account,
             &mut world,
         )
         .await;
@@ -317,7 +317,7 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
         peer,
         &packet(110560, u16::MAX, 1),
         &lobby,
-        &mut account,
+        account,
         &mut world,
     )
     .await;
@@ -325,8 +325,7 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
         [0x06, 0xa4, 0x0c, 0xac, 0x0f, 0x86, 0, 0x2d, 0, 3],
         [0x06, 0x99, 0x0c, 0x6a, 0x0f, 0x86, 0, 0, 0, 0],
     ] {
-        super::handle_game_payload(&mut sock, peer, &movement, &lobby, &mut account, &mut world)
-            .await;
+        super::handle_game_payload(&mut sock, peer, &movement, &lobby, account, &mut world).await;
     }
     assert!(world.as_ref().unwrap().pending_cast.is_some());
     let before = hp(10001);
@@ -335,7 +334,7 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
         peer,
         &packet(110560, u16::MAX, 3),
         &lobby,
-        &mut account,
+        account,
         &mut world,
     )
     .await;
@@ -347,7 +346,7 @@ async fn mage_projectiles_areas_dots_staff_buffs_and_payment_are_authoritative()
             peer,
             &packet(110545, if phase == 4 { player } else { u16::MAX }, phase),
             &lobby,
-            &mut account,
+            account,
             &mut world,
         )
         .await;

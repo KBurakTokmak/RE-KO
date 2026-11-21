@@ -440,15 +440,14 @@ mod tests {
             .unwrap();
         let (mut sock, peer) = listener.accept().await.unwrap();
         let mut world = Some(s);
-        let mut account = Some("MageFixture".to_owned());
+        let account = Some("MageFixture");
         let mut movement = vec![6];
         movement.extend((position.x + 40).to_le_bytes());
         movement.extend(position.z.to_le_bytes());
         movement.extend(0i16.to_le_bytes());
         movement.extend(45i16.to_le_bytes());
         movement.push(0);
-        crate::handle_game_payload(&mut sock, peer, &movement, &lobby, &mut account, &mut world)
-            .await;
+        crate::handle_game_payload(&mut sock, peer, &movement, &lobby, account, &mut world).await;
         assert_eq!(world.as_ref().unwrap().position, position);
         let hp = || {
             let p = lobby.monsters.as_ref().unwrap().health(10000, 21).unwrap();
@@ -458,27 +457,23 @@ mod tests {
         let mut attack = vec![8, 1, 0];
         attack.extend(10000u16.to_le_bytes());
         attack.extend([0; 4]);
-        crate::handle_game_payload(&mut sock, peer, &attack, &lobby, &mut account, &mut world)
-            .await;
+        crate::handle_game_payload(&mut sock, peer, &attack, &lobby, account, &mut world).await;
         assert_eq!(hp(), before);
         assert_eq!(world.as_ref().unwrap().next_attack, 0);
         let p = packet(world.as_ref().unwrap(), 110515, 10000, 1);
-        crate::handle_game_payload(&mut sock, peer, &p, &lobby, &mut account, &mut world).await;
+        crate::handle_game_payload(&mut sock, peer, &p, &lobby, account, &mut world).await;
         assert!(world.as_ref().unwrap().pending_cast.is_none());
         let s = world.as_ref().unwrap();
         let cancel = packet(s, 110674, s.player_id, 6);
-        crate::handle_game_payload(&mut sock, peer, &cancel, &lobby, &mut account, &mut world)
-            .await;
+        crate::handle_game_payload(&mut sock, peer, &cancel, &lobby, account, &mut world).await;
         assert!(world.as_ref().unwrap().skills.buffs.contains_key(&22));
         let s = world.as_mut().unwrap();
         assert_eq!(s.skills.mana, 10000);
         s.skills.expire(skills::now_ms() + 20000);
         skills::save(&lobby.db.lock().unwrap(), "MageFixture", 0, &s.skills).unwrap();
-        crate::handle_game_payload(&mut sock, peer, &attack, &lobby, &mut account, &mut world)
-            .await;
+        crate::handle_game_payload(&mut sock, peer, &attack, &lobby, account, &mut world).await;
         assert!(hp() < before);
-        crate::handle_game_payload(&mut sock, peer, &movement, &lobby, &mut account, &mut world)
-            .await;
+        crate::handle_game_payload(&mut sock, peer, &movement, &lobby, account, &mut world).await;
         assert_eq!(world.as_ref().unwrap().position.x, position.x + 40);
     }
 

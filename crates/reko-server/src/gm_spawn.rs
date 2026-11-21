@@ -256,11 +256,11 @@ mod tests {
             .await
             .unwrap();
         let (mut socket, peer) = listener.accept().await.unwrap();
-        let mut account = Some("test".to_string());
+        let account = Some("test");
         let mut session = Some(s);
         // Exact payload captured from the owner's failed attempt.
         let p = b"\x10\x01\x09\x00spawn 803";
-        crate::handle_game_payload(&mut socket, peer, p, &lobby, &mut account, &mut session).await;
+        crate::handle_game_payload(&mut socket, peer, p, &lobby, account, &mut session).await;
         let spawn = events.try_recv().unwrap();
         assert_eq!(&spawn.packet[..2], &[0x0a, 1]);
         assert_eq!(u16::from_le_bytes([spawn.packet[4], spawn.packet[5]]), 803);

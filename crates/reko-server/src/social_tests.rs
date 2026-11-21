@@ -119,17 +119,9 @@ async fn committed_skill_and_level_visuals_reach_nearby_observers_without_gm_or_
     let id = caster.player_id;
     let request = crate::skills::effect(108725, id);
     let mana = caster.skills.mana;
-    let mut account = Some("VisualCaster".to_owned());
+    let account = Some("VisualCaster");
     let mut session = Some(caster);
-    crate::handle_game_payload(
-        &mut socket,
-        peer,
-        &request,
-        &lobby,
-        &mut account,
-        &mut session,
-    )
-    .await;
+    crate::handle_game_payload(&mut socket, peer, &request, &lobby, account, &mut session).await;
     let s = session.as_mut().unwrap();
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified())
@@ -360,12 +352,12 @@ async fn gm_visibility_filters_regions_details_and_revoked_commands() {
         p.truncate(n);
         p
     }
-    let mut account = Some("NormalUser".into());
+    let account = Some("NormalUser");
     let mut world = Some(normal.clone());
     let mut details = vec![0x16, 1, 0];
     details.extend(gm.player_id.to_le_bytes());
     lobby.social.lock().unwrap().queues.clear();
-    crate::handle_game_payload(&mut sock, peer, &details, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut sock, peer, &details, &lobby, account, &mut world).await;
     assert_eq!(read(&mut client).await, [0x16, 0, 0]);
     assert!(
         visibility_command(
@@ -428,7 +420,7 @@ async fn gm_visibility_filters_regions_details_and_revoked_commands() {
         }
         hub.queues.clear();
     }
-    crate::handle_game_payload(&mut sock, peer, &details, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut sock, peer, &details, &lobby, account, &mut world).await;
     assert_eq!(read(&mut client).await, [0x16, 0, 0]);
     visibility_command(
         &mut sock,
@@ -441,7 +433,7 @@ async fn gm_visibility_filters_regions_details_and_revoked_commands() {
     .await;
     read(&mut client).await;
     lobby.social.lock().unwrap().queues.clear();
-    crate::handle_game_payload(&mut sock, peer, &details, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut sock, peer, &details, &lobby, account, &mut world).await;
     assert_eq!(&read(&mut client).await[..3], &[0x16, 1, 0]);
     lobby
         .db
@@ -827,17 +819,17 @@ async fn three_loaded_clients_receive_complete_regions_and_can_request_each_othe
     }
     let mut start = vec![0x0d, 2, a.character.name.len() as u8];
     start.extend(a.character.name.as_bytes());
-    let mut account = Some("FirstClient".into());
+    let account = Some("FirstClient");
     let mut world = Some(a.clone());
     lobby.social.lock().unwrap().queues.clear();
-    crate::handle_game_payload(&mut server, peer, &start, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut server, peer, &start, &lobby, account, &mut world).await;
     assert!(
         lobby.social.lock().unwrap().queues.is_empty(),
         "Stage2 cannot complete before the snapshot"
     );
     a.snapshot_sent = true;
     world = Some(a.clone());
-    crate::handle_game_payload(&mut server, peer, &start, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut server, peer, &start, &lobby, account, &mut world).await;
     let region = read(&mut client).await;
     assert_eq!(&region[..3], &[0x15, 3, 0]);
     let ids: Vec<_> = region[3..]
@@ -859,15 +851,7 @@ async fn three_loaded_clients_receive_complete_regions_and_can_request_each_othe
     let mut request = vec![0x16, 2, 0];
     request.extend(b.player_id.to_le_bytes());
     request.extend(c.player_id.to_le_bytes());
-    crate::handle_game_payload(
-        &mut server,
-        peer,
-        &request,
-        &lobby,
-        &mut account,
-        &mut world,
-    )
-    .await;
+    crate::handle_game_payload(&mut server, peer, &request, &lobby, account, &mut world).await;
     let records = read(&mut client).await;
     assert_eq!(&records[..3], &[0x16, 2, 0]);
     let mut cursor = 3;
@@ -900,7 +884,7 @@ async fn three_loaded_clients_receive_complete_regions_and_can_request_each_othe
         "Native1453 consumes all records without padding or shifted zone bytes"
     );
     let before = world.as_ref().unwrap().clone();
-    crate::handle_game_payload(&mut server, peer, &start, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut server, peer, &start, &lobby, account, &mut world).await;
     assert_eq!(
         read(&mut client).await,
         region,
@@ -910,7 +894,7 @@ async fn three_loaded_clients_receive_complete_regions_and_can_request_each_othe
     assert_eq!(world.as_ref().unwrap().coins, before.coins);
     let mut forged = vec![0x16, 1, 0];
     forged.extend(distant.player_id.to_le_bytes());
-    crate::handle_game_payload(&mut server, peer, &forged, &lobby, &mut account, &mut world).await;
+    crate::handle_game_payload(&mut server, peer, &forged, &lobby, account, &mut world).await;
     assert_eq!(read(&mut client).await, [0x16, 0, 0]);
 }
 
@@ -953,13 +937,13 @@ async fn native_two_client_party_invitation_roster_chat_and_clan_creation_use_th
     lobby.social.lock().unwrap().queues.clear();
     let (mut ca, mut sa, pa) = pair().await;
     let (mut cb, mut sb, pb) = pair().await;
-    let mut aa = Some("SocketLeader".to_owned());
-    let mut ab = Some("SocketMember".to_owned());
+    let aa = Some("SocketLeader");
+    let ab = Some("SocketMember");
     let mut wa = Some(a);
     let mut wb = Some(b);
     let mut invite = vec![0x2f, 1];
     string(&mut invite, "SocketMember");
-    crate::handle_game_payload(&mut sa, pa, &invite, &lobby, &mut aa, &mut wa).await;
+    crate::handle_game_payload(&mut sa, pa, &invite, &lobby, aa, &mut wa).await;
     flush(&mut sb, pb, &lobby, wb.as_ref().unwrap()).await;
     let p = receive(&mut cb, &[0x2f, 2]).await;
     assert_eq!(
@@ -967,29 +951,227 @@ async fn native_two_client_party_invitation_roster_chat_and_clan_creation_use_th
         wa.as_ref().unwrap().player_id
     );
     assert_eq!(&p[6..], b"SocketLeader");
-    crate::handle_game_payload(&mut sb, pb, &[0x2f, 2, 1], &lobby, &mut ab, &mut wb).await;
+    crate::handle_game_payload(&mut sb, pb, &[0x2f, 2, 1], &lobby, ab, &mut wb).await;
     let member = receive(&mut cb, &[0x2f, 3]).await;
     assert_eq!(member[4], 1);
     assert_eq!(u16::from_le_bytes([member[5], member[6]]), 12);
     let mut chat = vec![0x10, 3];
     string(&mut chat, "Hello party");
-    crate::handle_game_payload(&mut sa, pa, &chat, &lobby, &mut aa, &mut wa).await;
+    crate::handle_game_payload(&mut sa, pa, &chat, &lobby, aa, &mut wa).await;
     flush(&mut sb, pb, &lobby, wb.as_ref().unwrap()).await;
     let p = receive(&mut cb, &[0x10, 3]).await;
     assert!(p.ends_with(b"Hello party"));
-    crate::handle_game_payload(
-        &mut sa,
-        pa,
-        &command(1, "SocketClan"),
-        &lobby,
-        &mut aa,
-        &mut wa,
-    )
-    .await;
+    crate::handle_game_payload(&mut sa, pa, &command(1, "SocketClan"), &lobby, aa, &mut wa).await;
     let p = receive(&mut ca, &[0x3c, 1, 1]).await;
     assert_eq!(
         u32::from_le_bytes(p[p.len() - 4..].try_into().unwrap()),
         500000
     );
     assert_eq!(wa.as_ref().unwrap().clan.name, "SocketClan");
+}
+
+#[tokio::test]
+async fn operator_chat_broadcasts_across_zones_and_mutes_before_chat_or_shout_cost() {
+    use tokio::net::{TcpListener, TcpStream};
+    let lobby = lobby();
+    let gm = player(&lobby, "Operator", 1, 80);
+    let mut target = player(&lobby, "ChatTarget", 2, 80);
+    target.position.zone = 2;
+    synchronize(&lobby, "ChatTarget", &mut target);
+    let mut loading = player(&lobby, "Loading", 1, 80);
+    loading.zone_loading = true;
+    synchronize(&lobby, "Loading", &mut loading);
+    let mana_start = target.skills.mana;
+    {
+        let db = lobby.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO character_privileges VALUES ('Operator',0,1)",
+            [],
+        )
+        .unwrap();
+        crate::skills::save(&db, "ChatTarget", 0, &target.skills).unwrap();
+    }
+    let gm_id = gm.player_id;
+    let target_id = target.player_id;
+    lobby.social.lock().unwrap().queues.clear();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut socket, peer) = listener.accept().await.unwrap();
+    let mut gm = Some(gm);
+    let mut target = Some(target);
+    let mut broadcasts = lobby.chat.subscribe();
+    let chat = |channel, message: &str| {
+        let mut p = vec![0x10, channel];
+        string(&mut p, message);
+        p
+    };
+
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op announce First test"),
+        &lobby,
+        Some("Operator"),
+        &mut gm,
+    )
+    .await;
+    {
+        let mut h = lobby.social.lock().unwrap();
+        assert!(
+            h.queues
+                .remove(&target_id)
+                .unwrap()
+                .iter()
+                .any(|p| p == &crate::operator_chat::notice(b"[Server] First test"))
+        );
+        assert!(
+            !h.queues
+                .get(&loading.player_id)
+                .is_some_and(|q| q.iter().any(|p| p.ends_with(b"First test")))
+        );
+    }
+
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op announce Unauthorized"),
+        &lobby,
+        Some("ChatTarget"),
+        &mut target,
+    )
+    .await;
+    assert!(!lobby.social.lock().unwrap().queues.contains_key(&gm_id));
+    assert!(broadcasts.try_recv().is_err());
+
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op mute chattarget 61"),
+        &lobby,
+        Some("Operator"),
+        &mut gm,
+    )
+    .await;
+    assert!(lobby.social.lock().unwrap().chat_mutes.is_empty());
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op mute chattarget 5"),
+        &lobby,
+        Some("Operator"),
+        &mut gm,
+    )
+    .await;
+    for channel in [1, 3, 5, 6, 13] {
+        crate::handle_game_payload(
+            &mut socket,
+            peer,
+            &chat(channel, "Blocked text"),
+            &lobby,
+            Some("ChatTarget"),
+            &mut target,
+        )
+        .await;
+    }
+    let muted_notice = crate::operator_chat::notice(b"Your chat is muted.");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut refusals = 0;
+        while refusals < 5 {
+            if crate::tests::receive(&mut client).await == muted_notice {
+                refusals += 1;
+            }
+        }
+    })
+    .await
+    .expect("normal, party, shout, clan and alliance must each return a mute notice");
+    assert!(broadcasts.try_recv().is_err());
+    assert_eq!(
+        crate::skills::load(&lobby.db.lock().unwrap(), "ChatTarget", 0)
+            .unwrap()
+            .mana,
+        mana_start
+    );
+    {
+        let mut h = lobby.social.lock().unwrap();
+        h.disconnect(target_id);
+        assert!(crate::operator_chat::is_muted(&mut h, "CHATTARGET"));
+    }
+    synchronize(&lobby, "ChatTarget", target.as_mut().unwrap());
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op unmute ChatTarget"),
+        &lobby,
+        Some("Operator"),
+        &mut gm,
+    )
+    .await;
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(5, "Unmuted shout"),
+        &lobby,
+        Some("ChatTarget"),
+        &mut target,
+    )
+    .await;
+    assert!(
+        broadcasts
+            .try_recv()
+            .unwrap()
+            .packet
+            .ends_with(b"Unmuted shout")
+    );
+    assert!(target.as_ref().unwrap().skills.mana < mana_start);
+
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op mute ChatTarget 1"),
+        &lobby,
+        Some("Operator"),
+        &mut gm,
+    )
+    .await;
+    lobby
+        .social
+        .lock()
+        .unwrap()
+        .chat_mutes
+        .insert("chattarget".into(), std::time::Instant::now());
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "Expired mute"),
+        &lobby,
+        Some("ChatTarget"),
+        &mut target,
+    )
+    .await;
+    assert!(
+        broadcasts
+            .try_recv()
+            .unwrap()
+            .packet
+            .ends_with(b"Expired mute")
+    );
+
+    lobby
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE character_privileges SET is_admin=0", [])
+        .unwrap();
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &chat(1, "op mute ChatTarget 1"),
+        &lobby,
+        Some("Operator"),
+        &mut gm,
+    )
+    .await;
+    assert!(lobby.social.lock().unwrap().chat_mutes.is_empty());
 }

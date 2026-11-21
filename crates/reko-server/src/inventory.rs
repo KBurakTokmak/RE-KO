@@ -638,7 +638,7 @@ mod tests {
             .await
             .unwrap();
         let (mut socket, peer) = listener.accept().await.unwrap();
-        let mut account = Some("test".into());
+        let account = Some("test");
         let mut world = Some(s);
         use tokio::io::AsyncReadExt;
         for (id, source, dest) in [
@@ -649,8 +649,7 @@ mod tests {
             let mut p = vec![0x1f, 1];
             p.extend(id.to_le_bytes());
             p.extend([source, dest]);
-            crate::handle_game_payload(&mut socket, peer, &p, &lobby, &mut account, &mut world)
-                .await;
+            crate::handle_game_payload(&mut socket, peer, &p, &lobby, account, &mut world).await;
             let mut ack = [0u8; 40];
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),

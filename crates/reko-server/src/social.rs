@@ -18,6 +18,7 @@ pub(crate) struct Hub {
     pub parties: HashMap<u16, Vec<u16>>,
     pub party_invites: HashMap<u16, (u16, u64)>,
     pub clan_invites: HashMap<u16, (u16, u16, u64)>,
+    pub chat_mutes: HashMap<String, std::time::Instant>,
     queues: HashMap<u16, Vec<Vec<u8>>>,
     pub refresh: HashSet<u16>,
     pub skill_refresh: HashSet<u16>,

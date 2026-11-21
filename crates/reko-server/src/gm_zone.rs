@@ -257,21 +257,13 @@ mod tests {
             .unwrap()
             .execute_batch("DROP TRIGGER no_save;")
             .unwrap();
-        let mut account = Some("test".to_owned());
+        let account = Some("test");
         let mut session = Some(s);
         let text = b"zonechange 71";
         let mut packet = vec![0x10, 1];
         packet.extend((text.len() as u16).to_le_bytes());
         packet.extend(text);
-        crate::handle_game_payload(
-            &mut socket,
-            peer,
-            &packet,
-            &lobby,
-            &mut account,
-            &mut session,
-        )
-        .await;
+        crate::handle_game_payload(&mut socket, peer, &packet, &lobby, account, &mut session).await;
         let s = session.as_mut().unwrap();
         assert_eq!(
             (s.position.zone, s.position.x, s.position.z),
