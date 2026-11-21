@@ -6,6 +6,16 @@ QUEST_MONSTER requirements/rewards. States are0/unset,1/accepted,2/completed,
 actions. Rewards, costs, items and progression commit atomically; replaying a
 completed menu cannot pay again. Specialist quests remain partial.
 
+## Capital quest lists
+
+Luferson's Melverick (24427) and Shymer (24435), and El Morad's Zalk (14427)
+and Clark (14435), open the native quest list through their imported 1453
+greeting event 165. The later Lua scripts use a different greeting event.
+When the client selects a status-255 list entry, the server resolves it to
+the matching eligible 1453 offer and uses the standard quest acceptance and
+reward handlers. The guards' ordinary offers begin at level 18 and the
+merchants' at level 31, subject to the imported experience requirements.
+
 ## Quest journal commands
 
 In ordinary chat, type `quests` (or `quests 2` for the next page) to privately

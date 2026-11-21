@@ -86,7 +86,28 @@ fn open_state(status: u8, state: u8) -> bool {
         _ => false,
     }
 }
-fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper) -> &'a Helper {
+fn castle_quest_greeting(npc: u16) -> Option<i32> {
+    match npc {
+        14427 | 24427 => Some(8060),
+        14435 => Some(4937),
+        24435 => Some(8258),
+        _ => None,
+    }
+}
+
+fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper, s: &Session) -> &'a Helper {
+    if h.status == 255 && castle_quest_greeting(h.npc).is_some() {
+        return all
+            .iter()
+            .find(|other| {
+                other.npc == h.npc
+                    && other.flag == h.flag
+                    && other.nation == h.nation
+                    && other.status == 0
+                    && eligible(other, s)
+            })
+            .unwrap_or(h);
+    }
     if h.status == 255 && matches!(h.npc, 11510 | 21510) && matches!(h.flag, 603 | 605) {
         all.iter()
             .find(|other| {
@@ -104,6 +125,28 @@ fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper) -> &'a Helper {
 
 fn database_quest_script(all: &[Helper], context: &Context) -> Option<Vec<u8>> {
     let h = all.iter().find(|h| h.id == context.helper)?;
+    if h.flag == 0
+        && h.status == 0
+        && h.event == 165
+        && let Some(talk) = castle_quest_greeting(h.npc)
+    {
+        // The greeting opens the native list for this prototype.
+        return Some(
+            format!(
+                r#"
+if EVENT==165 then
+    if SearchQuest(UID,{npc})>0 then
+        NpcMsg(UID,{talk},{npc})
+    else
+        SelectMsg(UID,2,-1,{talk},{npc},10,2147483003)
+    end
+end
+"#,
+                npc = h.npc
+            )
+            .into_bytes(),
+        );
+    }
     if h.npc == 18004 && (h.flag == 406 || h.flag == 0 && h.event == 100) {
         let done = all
             .iter()
@@ -731,11 +774,13 @@ fn execute(
         function!("SearchQuest", |_, a: Variadic<i64>| {
             let npc = *a.get(1).unwrap_or(&0) as u16;
             let st = state.borrow();
+            let castle_quests = castle_quest_greeting(npc).is_some();
             Ok(
                 if all.iter().any(|h| {
                     h.npc == npc
                         && h.flag > 0
                         && h.status < 5 && h.status != 2
+                        && (!castle_quests || h.exchange != 0 && h.talk > 0)
                         && h.level <= s.progress.level
                         && eligible(h, s)
                         && open_state(h.status, *st.quests.get(&h.flag).unwrap_or(&0))
@@ -1159,7 +1204,7 @@ pub(crate) async fn handle(
                             }
                     })
                     .ok_or_else(|| anyhow::anyhow!("no compatible NPC event"))?;
-                let h = entry_helper(&all, h);
+                let h = entry_helper(&all, h, s);
                 if requested != 0 && h.flag != 0 {
                     let state=lobby.db.lock().unwrap().query_row("SELECT COALESCE((SELECT state FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3),0)",params![account,s.character.slot,h.flag],|r|r.get::<_,u8>(0))?;
                     anyhow::ensure!(open_state(h.status, state), "quest state mismatch");
@@ -1221,7 +1266,7 @@ pub(crate) async fn handle(
                     .iter()
                     .find(|h| h.id == id && h.level <= s.progress.level && eligible(h, s))
                     .ok_or_else(|| anyhow::anyhow!("invalid quest helper"))?;
-                let h = entry_helper(&all, h);
+                let h = entry_helper(&all, h, s);
                 let merchant = lobby
                     .merchants
                     .iter()
@@ -1814,6 +1859,116 @@ mod tests {
         })
         .await
         .expect("expected immediate native update packet")
+    }
+
+    #[tokio::test]
+    async fn castle_npcs_open_native_quest_lists_and_accept_the_correct_nation_and_class() {
+        let path = std::path::Path::new("../../reko.db");
+        if !path.exists() {
+            return;
+        }
+        let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let source =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        {
+            let db = lobby.db.lock().unwrap();
+            let mut query = source
+                .prepare("SELECT rule_id,data FROM world_reference_rules WHERE table_name='QUEST_HELPER' AND CAST(json_extract(data,'$.sNpcId') AS INTEGER) IN (14427,24427,14435,24435)")
+                .unwrap();
+            for row in query
+                .query_map([], |row| {
+                    Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+            {
+                let (id, data) = row.unwrap();
+                db.execute(
+                    "INSERT INTO world_reference_rules VALUES('QUEST_HELPER',?1,?2)",
+                    params![id, data],
+                )
+                .unwrap();
+            }
+        }
+        lobby.merchants = crate::shops::load_population(&source, &reko_common::game_dir()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        let all = helpers(&lobby.db.lock().unwrap()).unwrap();
+
+        for (npc, nation, marker, flag, talk) in [
+            (24427u16, 1, 482u32, 224u16, 8060u32),
+            (14427, 2, 307, 124, 8060),
+            (24435, 1, 9957, 559, 8258),
+            (14435, 2, 9963, 559, 4937),
+        ] {
+            let merchant = lobby.merchants.iter().find(|m| m.prototype == npc).unwrap();
+            s.position = merchant.position;
+            s.character.race = if nation == 1 { 2 } else { 12 };
+            s.character.class = nation * 100 + 8;
+            s.progress.level = 1;
+            let mut click = vec![0x20];
+            click.extend(merchant.id.to_le_bytes());
+            handle(&mut socket, peer, &lobby, "test", &mut s, &click).await;
+            let packets = receive_until(&mut client, 0x55).await;
+            assert_eq!(&packets.last().unwrap()[1..3], &npc.to_le_bytes());
+
+            let mut select = vec![0x64, 7];
+            select.extend(marker.to_le_bytes());
+            handle(&mut socket, peer, &lobby, "test", &mut s, &select).await;
+            assert!(
+                !s.npc_dialog
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.choices[0] == 2147483001)
+            );
+
+            s.progress.level = 80;
+            handle(&mut socket, peer, &lobby, "test", &mut s, &click).await;
+            let packets = receive_until(&mut client, 0x64).await;
+            let mut menu = vec![0x64, 7];
+            menu.extend(talk.to_le_bytes());
+            menu.extend(npc.to_le_bytes());
+            // A plain greeting also sends the ordinary quest-counter snapshot.
+            let packets = if packets.last() == Some(&menu) {
+                packets
+            } else {
+                receive_until(&mut client, 0x64).await
+            };
+            assert_eq!(packets.last(), Some(&menu));
+
+            handle(&mut socket, peer, &lobby, "test", &mut s, &select).await;
+            let packets = receive_until(&mut client, 0x55).await;
+            assert_eq!(
+                &packets.last().unwrap()[4..8],
+                &i32::from(flag).to_le_bytes()
+            );
+            let context = s.npc_dialog.as_ref().unwrap();
+            assert_eq!(context.choices[0], 2147483001);
+            let offered = all.iter().find(|h| h.id == context.helper).unwrap();
+            assert_eq!(offered.class, if npc % 100 == 27 { 2 } else { 5 });
+            assert_eq!(u16::from(offered.nation), nation);
+
+            let mut accept = vec![0x64, 6];
+            accept.extend(marker.to_le_bytes());
+            handle(&mut socket, peer, &lobby, "test", &mut s, &accept).await;
+            let db = lobby.db.lock().unwrap();
+            let state = db
+                .query_row(
+                    "SELECT state FROM character_quests WHERE account='test' AND slot=0 AND quest=?1",
+                    [flag],
+                    |row| row.get::<_, u8>(0),
+                )
+                .unwrap();
+            assert_eq!(state, 1);
+            db.execute(
+                "DELETE FROM character_quests WHERE account='test' AND slot=0",
+                [],
+            )
+            .unwrap();
+        }
     }
     #[tokio::test]
     async fn item_progress_is_remote_read_only_reversible_and_reward_notifies_wallet_and_xp() {
