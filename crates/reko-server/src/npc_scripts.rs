@@ -232,7 +232,7 @@ elseif EVENT~=2147483003 then
         SelectMsg(UID,4,{flag},{talk},{npc},22,2147483001,23,2147483003)
     elseif status==1 or status==3 then
         if CheckQuestExchange(UID,{exchange}) then
-            SelectMsg(UID,4,{flag},{talk},{npc},4006,2147483002,23,2147483003)
+            SelectMsg(UID,QuestRewardMenu(UID,{exchange}),{flag},{talk},{npc},4006,2147483002,23,2147483003)
         else
             {incomplete}
         end
@@ -430,6 +430,15 @@ fn check_progress(
     tx.commit()?;
     Ok(packets)
 }
+fn exchange_rule(db: &Connection, id: u32) -> anyhow::Result<serde_json::Value> {
+    let text: String = db.query_row(
+        "SELECT data FROM world_reference_rules WHERE table_name='ITEM_EXCHANGE' AND rule_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(serde_json::from_str(&text)?)
+}
+
 fn exchange(
     db: &Connection,
     owner: (&str, u8),
@@ -439,12 +448,7 @@ fn exchange(
     preview: bool,
     selection: Option<i8>,
 ) -> anyhow::Result<ExchangeResult> {
-    let text: String = db.query_row(
-        "SELECT data FROM world_reference_rules WHERE table_name='ITEM_EXCHANGE' AND rule_id=?1",
-        [id],
-        |r| r.get(0),
-    )?;
-    let v: serde_json::Value = serde_json::from_str(&text)?;
+    let v = exchange_rule(db, id)?;
     let mut next = Changes {
         travel: None,
         rewards: state.rewards.clone(),
@@ -963,9 +967,13 @@ fn execute(
             let Some(c)=lobby.combat.as_ref() else {return Ok(false);};
             Ok(exchange(&tx,(account,s.character.slot),c,&state.borrow(),*a.get(1).unwrap_or(&0) as u32,true,Some(-1)).is_ok())
         });
+        function!("QuestRewardMenu", |_,a:Variadic<i64>| {
+            let row=exchange_rule(&tx,*a.get(1).unwrap_or(&0) as u32).map_err(mlua::Error::external)?;
+            Ok(if number(&row,"bRandomFlag")==12 {5} else {4})
+        });
         function!("RunQuestExchange", |_,a:Variadic<i64>| {
             let c=lobby.combat.as_ref().ok_or_else(||mlua::Error::runtime("item catalog unavailable"))?;
-            let (bag,coins,rewards)=exchange(&tx,(account,s.character.slot),c,&state.borrow(),*a.get(1).unwrap_or(&0) as u32,false,Some(action.1.max(0))).map_err(mlua::Error::external)?;
+            let (bag,coins,rewards)=exchange(&tx,(account,s.character.slot),c,&state.borrow(),*a.get(1).unwrap_or(&0) as u32,false,Some(action.1)).map_err(mlua::Error::external)?;
             let mut st=state.borrow_mut();st.bag=bag;st.coins=coins;st.rewards=rewards;Ok(true)
         });
         let filename = state.borrow().context.file.clone();
@@ -1235,8 +1243,7 @@ pub(crate) async fn handle(
                         .iter()
                         .find(|h| h.id == context.helper)
                         .ok_or_else(|| anyhow::anyhow!("invalid quest helper"))?;
-                    let text:String=lobby.db.lock().unwrap().query_row("SELECT data FROM world_reference_rules WHERE table_name='ITEM_EXCHANGE' AND rule_id=?1",[h.exchange],|r|r.get(0))?;
-                    let row: serde_json::Value = serde_json::from_str(&text)?;
+                    let row = exchange_rule(&lobby.db.lock().unwrap(), h.exchange)?;
                     anyhow::ensure!(
                         number(&row, "bRandomFlag") == 12
                             && p[1] / 10 < 5
@@ -1255,8 +1262,10 @@ pub(crate) async fn handle(
                 let event = context.choices[index];
                 let step = if p.len() > 2 && p.len() == 4 + usize::from(p[2]) {
                     *p.last().unwrap() as i8
+                } else if p[1] >= 10 || event == 2147483002 {
+                    (p[1] / 10) as i8
                 } else {
-                    if p[1] >= 10 { (p[1] / 10) as i8 } else { -1 }
+                    -1
                 };
                 (context, event, step)
             }
@@ -2445,7 +2454,7 @@ mod tests {
             crate::shops::load_population(&lobby.db.lock().unwrap(), &reko_common::game_dir())
                 .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let _client = TcpStream::connect(listener.local_addr().unwrap())
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
             .await
             .unwrap();
         let (mut socket, peer) = listener.accept().await.unwrap();
@@ -2458,6 +2467,7 @@ mod tests {
             &[0x64, 7, 52, 0, 0, 0],
         )
         .await;
+        receive_until(&mut client, 0x55).await;
         assert_eq!(s.npc_dialog.as_ref().unwrap().choices[0], 2147483001);
         handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 0, 0]).await;
         let state = || {
@@ -2510,6 +2520,7 @@ mod tests {
         )
         .await;
         assert_eq!(s.npc_dialog.as_ref().unwrap().choices[0], 2147483002);
+        assert_eq!(receive_until(&mut client, 0x55).await.last().unwrap()[3], 4);
         handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 0, 0]).await;
         assert_eq!(state(), 2);
         assert_eq!(s.coins, 1000000);
@@ -2533,7 +2544,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            db.execute("UPDATE world_reference_rules SET data=?1 WHERE table_name='ITEM_EXCHANGE' AND rule_id=5",[r#"{"bRandomFlag":"12","nExchangeItemNum1":"110110001","nExchangeItemCount1":"1","nExchangeItemNum2":"160100001","nExchangeItemCount2":"1"}"#]).unwrap();
+            db.execute("UPDATE world_reference_rules SET data=?1 WHERE table_name='ITEM_EXCHANGE' AND rule_id=5",[r#"{"bRandomFlag":"12","nExchangeItemNum1":"110910002","nExchangeItemCount1":"1","nExchangeItemNum2":"168110002","nExchangeItemCount2":"1"}"#]).unwrap();
         }
         handle(
             &mut socket,
@@ -2544,6 +2555,18 @@ mod tests {
             &[0x64, 7, 49, 0, 0, 0],
         )
         .await;
+        assert_eq!(receive_until(&mut client, 0x55).await.last().unwrap()[3], 5);
+        handle(
+            &mut socket,
+            peer,
+            &lobby,
+            "test",
+            &mut s,
+            &[0x55, 0, 0, 255],
+        )
+        .await;
+        assert_eq!(state(), 1);
+        assert!(s.inventory.iter().all(|item| item.id == 0));
         handle(&mut socket, peer, &lobby, "test", &mut s, &[0x55, 50, 0]).await;
         assert_eq!(state(), 1);
         assert!(s.inventory.iter().all(|item| item.id == 0));
@@ -2562,11 +2585,11 @@ mod tests {
         assert_eq!(
             s.inventory
                 .iter()
-                .filter(|item| item.id == 160100001)
+                .filter(|item| item.id == 168110002)
                 .count(),
             1
         );
-        assert!(!s.inventory.iter().any(|item| item.id == 110110001));
+        assert!(!s.inventory.iter().any(|item| item.id == 110910002));
     }
     fn setup() -> Option<(Lobby, Session)> {
         let (mut l, s) = crate::world_service_tests::setup()?;

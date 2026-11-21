@@ -105,10 +105,12 @@ pub(crate) async fn handle(
     }
     let mut id = u32::from_le_bytes(payload[2..6].try_into().unwrap());
     let mut recovered;
-    let payload = if id == 0
-        && matches!(payload[1], 3 | 4)
-        && u16::from_le_bytes([payload[6], payload[7]]) == session.player_id
-    {
+    let caster = u16::from_le_bytes([payload[6], payload[7]]);
+    let payload = if id == 0 && matches!(payload[1], 3 | 4) {
+        // Nearby clients may report a visible projectile fired by another player.
+        if caster != session.player_id {
+            return true;
+        }
         let Some(resolved) = crate::archery::resolve(lobby, session, payload) else {
             return true;
         };
@@ -122,7 +124,6 @@ pub(crate) async fn handle(
     let Some(spell) = catalog.spells.get(&id) else {
         return false;
     };
-    let caster = u16::from_le_bytes([payload[6], payload[7]]);
     let target = u16::from_le_bytes([payload[8], payload[9]]);
     let now = skills::now_ms();
     if payload[1] == 6 && target == caster && caster == session.player_id {
@@ -621,10 +622,31 @@ mod tests {
         session.skills.set_limits(2690, 4110);
         skills::save(&lobby.db.lock().unwrap(), "admin", 0, &session.skills).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let _client = TcpStream::connect(listener.local_addr().unwrap())
+        let client = TcpStream::connect(listener.local_addr().unwrap())
             .await
             .unwrap();
         let (mut socket, peer) = listener.accept().await.unwrap();
+        for stage in [3, 4] {
+            let mut foreign = skills::effect(0, session.player_id.wrapping_add(1));
+            foreign[1] = stage;
+            foreign[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+            assert!(
+                handle(
+                    &mut socket,
+                    peer,
+                    &foreign,
+                    &lobby,
+                    Some("admin"),
+                    Some(&mut session)
+                )
+                .await
+            );
+        }
+        assert_eq!(session.skills.mana, 4110);
+        assert_eq!(
+            client.try_read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         let request = |id, target, stage| {
             let mut p = skills::effect(id, session.player_id);
             p[1] = stage;

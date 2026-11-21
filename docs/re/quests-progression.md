@@ -16,6 +16,11 @@ the matching eligible 1453 offer and uses the standard quest acceptance and
 reward handlers. The guards' ordinary offers begin at level 18 and the
 merchants' at level 31, subject to the imported experience requirements.
 
+The original client and supplied server both mark rogue exchanges 841
+(Melverick) and 845 (Zalk) as type 12. The turn-in opens a native reward
+selection dialog (SelectMsg mode 5) for one Kukry +2 or one Crossbow +2.
+Ordinary fixed-reward turn-ins retain mode 4.
+
 ## Quest journal commands
 
 In ordinary chat, type `quests` (or `quests 2` for the next page) to privately

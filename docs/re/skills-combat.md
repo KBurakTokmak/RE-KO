@@ -294,8 +294,10 @@ the client's skill mapping while the other base arrow is still in flight. Cleanu
 is acknowledged after that index's quota is exhausted. A stale-map skillID0 impact
 or cleanup is resolved only to an unambiguous, same-zone, unexpired paid index;
 unbound ID0 completions are ignored without a false learning-error notice. They
-cannot launch or purchase a new volley. A later impact cannot reuse an exhausted
-side index to consume a different arrow. Unmatched/exhausted/expired impact
+cannot launch or purchase a new volley. Zero-ID collisions and cleanup reported
+by nearby clients for another player's volley are ignored before skill validation.
+A later impact cannot reuse an exhausted side index to consume a different
+arrow. Unmatched/exhausted/expired impact
 reports are logged and ignored without a chat failure or damage. Captured side
 arrows can travel onward to terrain beyond the five-second paid hit window;
 that harmless late collision must not become a player-facing resource error.
