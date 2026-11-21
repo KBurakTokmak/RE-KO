@@ -34,6 +34,7 @@ renderer/client and an in-process game host have not been implemented.
   player resource/control effects in combat zones; full PvP remains incomplete.
 - HP/MP potions, natural regeneration, weapon durability and recovery updates.
 - Eight-member parties with invitations, chat, shared XP/quest kills and loot routing.
+- Private messages with the client’s whisper target and block controls.
 - Persistent nation-specific clans: creation, invitations, member roles and clan chat.
 - Source-based clan grades, Caitharos knight promotion and persistent cape purchases.
 - Private quest journal chat commands to list, inspect and abandon active quests.

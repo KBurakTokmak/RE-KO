@@ -19,6 +19,8 @@ pub(crate) struct Hub {
     pub party_invites: HashMap<u16, (u16, u64)>,
     pub clan_invites: HashMap<u16, (u16, u16, u64)>,
     pub chat_mutes: HashMap<String, std::time::Instant>,
+    whisper_targets: HashMap<u16, u16>,
+    whisper_blocked: HashSet<u16>,
     queues: HashMap<u16, Vec<Vec<u8>>>,
     pub refresh: HashSet<u16>,
     pub skill_refresh: HashSet<u16>,
@@ -153,6 +155,9 @@ impl Hub {
         self.notifiers.remove(&id);
         self.targets
             .retain(|viewer, target| *viewer != id && *target != id);
+        self.whisper_targets
+            .retain(|sender, recipient| *sender != id && *recipient != id);
+        self.whisper_blocked.remove(&id);
         self.gm_public.remove(&id);
         self.skill_refresh.remove(&id);
         self.skill_notice.remove(&id);
@@ -356,6 +361,69 @@ impl Hub {
         p.push(s.position.zone);
         p
     }
+    fn whisper_endpoint(&self, sender: u16, recipient: u16) -> Option<&Session> {
+        let target = &self.players.get(&recipient)?.s;
+        (sender != recipient
+            && target.entered
+            && !target.zone_loading
+            && self.can_see(sender, recipient))
+        .then_some(target)
+    }
+
+    pub fn select_whisper(&mut self, sender: u16, name: Option<&str>) -> Vec<u8> {
+        // The client can send selection and message back to back. Failed selection
+        // must never route the new message to the previous recipient.
+        self.whisper_targets.remove(&sender);
+        let mut reply = vec![0x35, 1];
+        let recipient = name.and_then(|name| self.named(name));
+        let target = recipient.and_then(|id| self.whisper_endpoint(sender, id));
+        let blocked = recipient.is_some_and(|id| self.whisper_blocked.contains(&id));
+        let status: i16 = match target {
+            Some(_) if blocked => -1,
+            Some(_) => 1,
+            None => 0,
+        };
+        reply.extend(status.to_le_bytes());
+        string(&mut reply, target.map_or("", |s| &s.character.name));
+        if status == 1
+            && let Some(recipient) = recipient
+        {
+            self.whisper_targets.insert(sender, recipient);
+        }
+        reply
+    }
+
+    pub fn whisper(&mut self, sender: u16, text: &[u8]) -> bool {
+        let Some(&recipient) = self.whisper_targets.get(&sender) else {
+            return false;
+        };
+        if self.whisper_endpoint(sender, recipient).is_none()
+            || self.whisper_blocked.contains(&recipient)
+        {
+            return false;
+        }
+        let Some(source) = self.players.get(&sender).map(|p| &p.s) else {
+            return false;
+        };
+        let packet = crate::chat::packet(
+            2,
+            source.character.nation(),
+            sender,
+            &source.character.name,
+            text,
+        );
+        self.send(recipient, packet);
+        true
+    }
+
+    pub fn set_whisper_block(&mut self, id: u16, blocked: bool) {
+        if blocked {
+            self.whisper_blocked.insert(id);
+        } else {
+            self.whisper_blocked.remove(&id);
+        }
+    }
+
     pub fn chat(&mut self, id: u16, channel: u8, text: &[u8]) -> bool {
         let s = &self.players[&id].s;
         let members = if channel == 3 {

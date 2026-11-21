@@ -197,7 +197,11 @@ async fn send_response(
         payload.to_vec()
     };
     let packet = frame_packet(&body);
-    tracing::info!(%peer, name, dump = %format_hex(&packet), "sending response packet");
+    if payload.starts_with(&[0x10, 2]) {
+        tracing::info!(%peer, name, bytes = packet.len(), "sending private chat packet");
+    } else {
+        tracing::info!(%peer, name, dump = %format_hex(&packet), "sending response packet");
+    }
     if let Err(e) = sock.write_all(&packet).await {
         tracing::error!(%peer, error = %e, "failed to send response packet");
     }
@@ -1120,6 +1124,31 @@ async fn handle_game_payload_inner(
                 town::handle(sock, peer, lobby, account, session).await;
             }
         }
+        0x35 => {
+            if let Some(session) = world.as_ref().filter(|s| s.entered && !s.zone_loading)
+                && account.is_some()
+            {
+                match payload {
+                    [0x35, 1, rest @ ..] => {
+                        let recipient = social::name(rest);
+                        let reply = lobby
+                            .social
+                            .lock()
+                            .unwrap()
+                            .select_whisper(session.player_id, recipient);
+                        send_response(sock, peer, &None, &reply, "CHAT_TARGET").await;
+                    }
+                    [0x35, 2, blocked @ (0 | 1)] => {
+                        lobby
+                            .social
+                            .lock()
+                            .unwrap()
+                            .set_whisper_block(session.player_id, *blocked == 1);
+                    }
+                    _ => {}
+                }
+            }
+        }
         0x10 => {
             let Some(session) = world.as_mut().filter(|session| session.entered) else {
                 return;
@@ -1130,16 +1159,25 @@ async fn handle_game_payload_inner(
             };
             if channel == 1
                 && let Some(account) = account
-                && let Some(reply) = operator_chat::command(lobby, account, session, text)
             {
-                send_response(sock, peer, &None, &reply, "OPERATOR_CHAT").await;
-                return;
-            }
-            if channel == 1
-                && let Some(account) = account
-                && social::visibility_command(sock, peer, lobby, account, session, text).await
-            {
-                return;
+                let can_use_admin_chat =
+                    admin::is_admin(&lobby.db.lock().unwrap(), account, session.character.slot)
+                        .unwrap_or(false);
+                if can_use_admin_chat {
+                    if let Some(reply) = operator_chat::command(lobby, account, session, text) {
+                        send_response(sock, peer, &None, &reply, "OPERATOR_CHAT").await;
+                        return;
+                    }
+                    if social::visibility_command(sock, peer, lobby, account, session, text).await
+                        || gm_teleport::handle(sock, peer, lobby, account, session, text).await
+                        || gm_zone::handle(sock, peer, lobby, account, session, text).await
+                        || gm_spawn::handle(sock, peer, lobby, account, session, text).await
+                        || utility::training_command(sock, peer, lobby, account, session, text)
+                            .await
+                    {
+                        return;
+                    }
+                }
             }
             if channel == 1
                 && let Some(packet) = loot::command(session, text)
@@ -1153,29 +1191,10 @@ async fn handle_game_payload_inner(
             {
                 return;
             }
-            if channel == 1
-                && let Some(account) = account
-                && (gm_teleport::handle(sock, peer, lobby, account, session, text).await
-                    || gm_zone::handle(sock, peer, lobby, account, session, text).await)
-            {
-                return;
-            }
-            if channel == 1
-                && let Some(account) = account
-                && gm_spawn::handle(sock, peer, lobby, account, session, text).await
-            {
-                return;
-            }
             if channel == 1 && text.eq_ignore_ascii_case(b"/town") {
                 if let Some(account) = account {
                     town::handle(sock, peer, lobby, account, session).await;
                 }
-                return;
-            }
-            if channel == 1
-                && let Some(account) = account
-                && utility::training_command(sock, peer, lobby, account, session, text).await
-            {
                 return;
             }
             if let Some(account) = account
@@ -1183,6 +1202,19 @@ async fn handle_game_payload_inner(
             {
                 let packet = operator_chat::notice(b"Your chat is muted.");
                 send_response(sock, peer, &None, &packet, "CHAT_MUTED").await;
+                return;
+            }
+            if channel == 2 {
+                let sent = account.is_some()
+                    && lobby
+                        .social
+                        .lock()
+                        .unwrap()
+                        .whisper(session.player_id, text);
+                if !sent {
+                    let reply = operator_chat::notice(b"Whisper recipient is unavailable.");
+                    send_response(sock, peer, &None, &reply, "CHAT_NOTICE").await;
+                }
                 return;
             }
             if matches!(channel, 3 | 6)
@@ -1595,7 +1627,9 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                 loop {
                     match decoder.next() {
                         Ok(Some(payload)) => {
-                            if payload.first() != Some(&1) {
+                            if payload.starts_with(&[0x10, 2]) {
+                                tracing::info!(%peer, bytes = payload.len(), "received private chat packet");
+                            } else if payload.first() != Some(&1) {
                                 tracing::info!(%peer,dump=%format_hex(&payload),"received game request");
                             }
                             packet_count += 1;

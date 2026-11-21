@@ -1043,7 +1043,9 @@ async fn operator_chat_broadcasts_across_zones_and_mutes_before_chat_or_shout_co
     )
     .await;
     assert!(!lobby.social.lock().unwrap().queues.contains_key(&gm_id));
-    assert!(broadcasts.try_recv().is_err());
+    let ordinary = broadcasts.try_recv().unwrap();
+    assert_eq!(ordinary.channel, 1);
+    assert!(ordinary.packet.ends_with(b"op announce Unauthorized"));
 
     crate::handle_game_payload(
         &mut socket,
@@ -1064,7 +1066,7 @@ async fn operator_chat_broadcasts_across_zones_and_mutes_before_chat_or_shout_co
         &mut gm,
     )
     .await;
-    for channel in [1, 3, 5, 6, 13] {
+    for channel in [1, 2, 3, 5, 6, 13] {
         crate::handle_game_payload(
             &mut socket,
             peer,
@@ -1078,14 +1080,14 @@ async fn operator_chat_broadcasts_across_zones_and_mutes_before_chat_or_shout_co
     let muted_notice = crate::operator_chat::notice(b"Your chat is muted.");
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut refusals = 0;
-        while refusals < 5 {
+        while refusals < 6 {
             if crate::tests::receive(&mut client).await == muted_notice {
                 refusals += 1;
             }
         }
     })
     .await
-    .expect("normal, party, shout, clan and alliance must each return a mute notice");
+    .expect("normal, private, party, shout, clan and alliance must each return a mute notice");
     assert!(broadcasts.try_recv().is_err());
     assert_eq!(
         crate::skills::load(&lobby.db.lock().unwrap(), "ChatTarget", 0)
@@ -1174,4 +1176,232 @@ async fn operator_chat_broadcasts_across_zones_and_mutes_before_chat_or_shout_co
     )
     .await;
     assert!(lobby.social.lock().unwrap().chat_mutes.is_empty());
+}
+
+#[tokio::test]
+async fn regular_player_admin_words_stay_in_all_chat_even_with_stale_admin_flag() {
+    use tokio::net::{TcpListener, TcpStream};
+    let lobby = lobby();
+    let mut speaker = player(&lobby, "Speaker", 1, 80);
+    let nearby = player(&lobby, "Listener", 1, 80);
+    speaker.is_admin = true;
+    let start = speaker.position;
+    let hp = speaker.skills.hp;
+    let mut world = Some(speaker);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut socket, peer) = listener.accept().await.unwrap();
+    let mut receiver = lobby.chat.subscribe();
+    for text in [
+        "tp",
+        "TP 445 555",
+        "zonechange",
+        "spawn 803",
+        "gmvisible on",
+        "hurt 10",
+        "op announce hello",
+    ] {
+        let mut packet = vec![0x10, 1];
+        string(&mut packet, text);
+        crate::handle_game_payload(
+            &mut socket,
+            peer,
+            &packet,
+            &lobby,
+            Some("Speaker"),
+            &mut world,
+        )
+        .await;
+        let message = receiver.try_recv().unwrap();
+        assert_eq!(message.channel, 1);
+        assert!(message.visible_to(&nearby));
+        assert!(message.packet.ends_with(text.as_bytes()));
+    }
+    let speaker = world.unwrap();
+    assert_eq!(speaker.position, start);
+    assert_eq!(speaker.skills.hp, hp);
+}
+
+#[tokio::test]
+async fn whisper_routes_only_to_selected_visible_session_and_never_reuses_failed_selection() {
+    use tokio::net::{TcpListener, TcpStream};
+    let lobby = lobby();
+    let sender = player(&lobby, "WhisperSender", 1, 80);
+    let mut recipient = player(&lobby, "WhisperPeer", 1, 80);
+    recipient.position.zone = 2;
+    synchronize(&lobby, "WhisperPeer", &mut recipient);
+    let bystander = player(&lobby, "WhisperBystander", 1, 80);
+    let mut hidden = player(&lobby, "WhisperHidden", 1, 80);
+    hidden.is_admin = true;
+    synchronize(&lobby, "WhisperHidden", &mut hidden);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut socket, peer) = listener.accept().await.unwrap();
+    let mut sender = Some(sender);
+    let mut broadcasts = lobby.chat.subscribe();
+    lobby.social.lock().unwrap().queues.clear();
+    let selection = |name: &str| {
+        let mut packet = vec![0x35, 1];
+        string(&mut packet, name);
+        packet
+    };
+    let mut message = vec![0x10, 2];
+    string(&mut message, "secret");
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &selection("whisperpeer"),
+        &lobby,
+        Some("WhisperSender"),
+        &mut sender,
+    )
+    .await;
+    let mut expected = vec![0x35, 1, 1, 0];
+    string(&mut expected, "WhisperPeer");
+    assert_eq!(crate::tests::receive(&mut client).await, expected);
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &message,
+        &lobby,
+        Some("WhisperSender"),
+        &mut sender,
+    )
+    .await;
+    let id = sender.as_ref().unwrap().player_id;
+    let private = crate::chat::packet(2, 1, id, "WhisperSender", b"secret");
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        assert_eq!(
+            hub.queues.remove(&recipient.player_id),
+            Some(vec![private.clone()])
+        );
+        assert!(
+            !hub.queues
+                .get(&bystander.player_id)
+                .is_some_and(|q| q.contains(&private))
+        );
+    }
+    let target_id = recipient.player_id;
+    let mut recipient = Some(recipient);
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &[0x35, 2, 1],
+        &lobby,
+        Some("WhisperPeer"),
+        &mut recipient,
+    )
+    .await;
+    assert!(
+        lobby
+            .social
+            .lock()
+            .unwrap()
+            .whisper_blocked
+            .contains(&target_id)
+    );
+    // A peer opting out after selection must block subsequent private messages.
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &message,
+        &lobby,
+        Some("WhisperSender"),
+        &mut sender,
+    )
+    .await;
+    assert!(
+        crate::tests::receive(&mut client)
+            .await
+            .ends_with(b"recipient is unavailable.")
+    );
+    for (name, status) in [
+        ("WhisperPeer", -1i16),
+        ("WhisperHidden", 0),
+        ("WhisperSender", 0),
+        ("Missing", 0),
+    ] {
+        // Establish a different valid target before attempting a failed selection.
+        crate::handle_game_payload(
+            &mut socket,
+            peer,
+            &selection("WhisperBystander"),
+            &lobby,
+            Some("WhisperSender"),
+            &mut sender,
+        )
+        .await;
+        assert_eq!(
+            &crate::tests::receive(&mut client).await[..4],
+            &[0x35, 1, 1, 0]
+        );
+        crate::handle_game_payload(
+            &mut socket,
+            peer,
+            &selection(name),
+            &lobby,
+            Some("WhisperSender"),
+            &mut sender,
+        )
+        .await;
+        let response = crate::tests::receive(&mut client).await;
+        assert_eq!(&response[2..4], &status.to_le_bytes());
+        if status == 0 {
+            assert_eq!(&response[4..], &[0, 0]);
+        }
+        crate::handle_game_payload(
+            &mut socket,
+            peer,
+            &message,
+            &lobby,
+            Some("WhisperSender"),
+            &mut sender,
+        )
+        .await;
+        assert!(
+            crate::tests::receive(&mut client)
+                .await
+                .ends_with(b"recipient is unavailable.")
+        );
+    }
+    crate::handle_game_payload(
+        &mut socket,
+        peer,
+        &[0x35, 2, 0],
+        &lobby,
+        Some("WhisperPeer"),
+        &mut recipient,
+    )
+    .await;
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        assert!(!hub.whisper_blocked.contains(&target_id));
+        assert!(
+            !hub.queues
+                .get(&bystander.player_id)
+                .is_some_and(|q| q.contains(&private))
+        );
+        assert_eq!(
+            &hub.select_whisper(id, Some("WhisperPeer"))[..4],
+            &[0x35, 1, 1, 0]
+        );
+    }
+    let mut recipient = recipient.unwrap();
+    let mut destination = recipient.position;
+    destination.zone = 21;
+    crate::travel::begin(&lobby, &mut recipient, destination);
+    assert!(!lobby.social.lock().unwrap().whisper(id, b"during loading"));
+    {
+        let mut hub = lobby.social.lock().unwrap();
+        hub.disconnect(recipient.player_id);
+        assert!(!hub.whisper_targets.contains_key(&id));
+        assert!(!hub.whisper_blocked.contains(&recipient.player_id));
+    }
+    assert!(broadcasts.try_recv().is_err());
 }

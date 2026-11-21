@@ -28,7 +28,7 @@ impl Message {
 }
 
 pub(crate) fn parse(payload: &[u8]) -> Option<(u8, &[u8])> {
-    if payload.len() < 4 || payload[0] != 0x10 || !matches!(payload[1], 1 | 3 | 5 | 6 | 13) {
+    if payload.len() < 4 || payload[0] != 0x10 || !matches!(payload[1], 1 | 2 | 3 | 5 | 6 | 13) {
         return None;
     }
     let len = u16::from_le_bytes([payload[2], payload[3]]) as usize;

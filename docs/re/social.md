@@ -88,6 +88,29 @@ revokes their server permissions nor grants privileges to other clients.
 General player-target combat and PvP remain
 separate from this presence and social implementation.
 
+## Private chat
+
+Select a player with the client's Whisper control, then send a private message.
+The server selects characters by name regardless of zone. It delivers channel 2
+only to the selected live session. The client applies its own language rules
+across factions. Hidden GMs are unavailable to players who cannot see them.
+Failed selections clear the previous recipient, and the server checks
+availability again at send time. Recipients changing zones are unavailable
+until they finish loading. Disconnects clear selections referencing the
+departing session, so a reconnect requires selecting that character again.
+
+The client's block-whisper toggle stops incoming private messages for the
+current character session. It takes effect even for senders who already
+selected the recipient. Staff chat mutes also block outgoing whispers. Server
+packet tracing records lengths for private messages and omits their text.
+
+Original 1453 senders at `0069ED14` and `0069ED8A` confirm `35 01` with
+a 16-bit name length and `35 02` with a one-byte block flag. The selection
+receiver at `0069C92B` reads a subtype, signed 16-bit status and 16-bit-length
+name. Supplied 1453 `ChatHandler.cpp` defines success 1 and blocked -1,
+and Open-KO's chat and target senders corroborate selection and channel 2.
+Unavailable selections use status 0 and an empty name.
+
 ## Player trading
 
 Native0x30 supports request1, consent2, add3/other-add4, confirm5/other-confirm6,

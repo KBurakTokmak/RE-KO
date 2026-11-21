@@ -186,7 +186,9 @@ commands: the original client may intercept unknown slash commands locally.
 ## Chat operations
 
 A character with the database administrator role can enter these commands in All
-chat:
+chat. The dispatcher checks the database role before interpreting staff commands.
+For other characters, text such as `tp`, `spawn 803` or `op announce hello`
+follows normal All chat routing.
 
 ```
 op announce Server maintenance in five minutes.
@@ -196,7 +198,7 @@ op unmute CharacterName
 
 Announcements appear as server notices to players in the world across zones and
 factions. Mute durations range from 1 to 60 minutes. Target an online character
-by name to mute or unmute their account. A mute applies to normal, shout, party,
+by name to mute or unmute their account. A mute applies to normal, private, shout, party,
 clan and alliance chat before any shout mana is spent. Server commands still
 work. Mutes persist across reconnects and character switches until they expire,
 an administrator removes them, or the server restarts. These are local operator

@@ -210,6 +210,10 @@ pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position
         let mut hub = lobby.social.lock().unwrap();
         if !same_zone {
             crate::party::zone_leave(&mut hub, s.player_id);
+            if let Some(player) = hub.players.get_mut(&s.player_id) {
+                player.s.zone_loading = true;
+                player.s.entered = false;
+            }
         }
         crate::trade::cancel(&mut hub, s.player_id, "Trade cancelled: teleport.");
         hub.reset_view(s.player_id);
