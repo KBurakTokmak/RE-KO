@@ -7,6 +7,10 @@ use std::{collections::HashMap, net::SocketAddr, sync::Mutex};
 use tokio::net::TcpStream;
 
 const GOLD: u32 = 900000000;
+const NORMAL_REACH_SQUARED: u64 = 24_200;
+// Coordinates are in tenths of a meter.
+const AUTOLOOT_REACH_SQUARED: u64 = 600 * 600;
+
 pub(crate) fn command(s: &mut Session, text: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(text)
         .ok()?
@@ -18,22 +22,24 @@ pub(crate) fn command(s: &mut Session, text: &[u8]) -> Option<Vec<u8>> {
     }
     let argument = words.next();
     let message = if words.next().is_some() {
-        "Usage: /autoloot [on|off]"
+        "Usage: /autoloot [on|off|ranged]"
     } else if argument.is_none() {
         s.autoloot = if s.autoloot.is_some() { None } else { Some(0) };
         if s.autoloot.is_some() {
-            "Autoloot enabled."
+            "Auto Loot enabled."
         } else {
-            "Autoloot disabled."
+            "Auto Loot disabled."
         }
-    } else if argument.is_some_and(|a| a.eq_ignore_ascii_case("on")) {
+    } else if argument
+        .is_some_and(|a| a.eq_ignore_ascii_case("on") || a.eq_ignore_ascii_case("ranged"))
+    {
         s.autoloot = Some(0);
-        "Autoloot enabled."
+        "Auto Loot enabled."
     } else if argument.is_some_and(|a| a.eq_ignore_ascii_case("off")) {
         s.autoloot = None;
-        "Autoloot disabled."
+        "Auto Loot disabled."
     } else {
-        "Usage: /autoloot [on|off]"
+        "Usage: /autoloot [on|off|ranged]"
     };
     Some(crate::chat::packet(
         7,
@@ -73,7 +79,7 @@ pub(crate) async fn auto_tick(
         let mut entries: Vec<_> = inner
             .bundles
             .iter()
-            .filter(|(_, b)| allowed(b, s))
+            .filter(|(_, b)| allowed_with_range(b, s, AUTOLOOT_REACH_SQUARED))
             .flat_map(|(&id, b)| {
                 b.items
                     .iter()
@@ -87,7 +93,16 @@ pub(crate) async fn auto_tick(
     };
     let mut collected = false;
     for (id, item) in candidates {
-        if let Ok((response, changed)) = pickup_routed(book, lobby, account, s, peer, id, item) {
+        let result = pickup_routed(
+            book,
+            lobby,
+            account,
+            s,
+            (peer, AUTOLOOT_REACH_SQUARED),
+            id,
+            item,
+        );
+        if let Ok((response, changed)) = result {
             super::send_response(sock, peer, &None, &response, "AUTOLOOT_GET").await;
             if !changed.is_empty() {
                 super::send_response(
@@ -327,6 +342,10 @@ impl Book {
     }
 }
 fn allowed(bundle: &Bundle, session: &Session) -> bool {
+    allowed_with_range(bundle, session, NORMAL_REACH_SQUARED)
+}
+
+fn allowed_with_range(bundle: &Bundle, session: &Session, limit: u64) -> bool {
     session.entered
         && session.skills.hp > 0
         && bundle
@@ -336,7 +355,7 @@ fn allowed(bundle: &Bundle, session: &Session) -> bool {
         && bundle.position.zone == session.position.zone
         && u64::from(bundle.position.x.abs_diff(session.position.x)).pow(2)
             + u64::from(bundle.position.z.abs_diff(session.position.z)).pow(2)
-            <= 24200
+            <= limit
 }
 type Pickup = (Vec<u8>, Vec<(usize, starter::Item)>);
 fn pickup(
@@ -344,7 +363,7 @@ fn pickup(
     lobby: &Lobby,
     account: &str,
     session: &mut Session,
-    peer: SocketAddr,
+    (peer, reach_squared): (SocketAddr, u64),
     id: u32,
     item: u32,
 ) -> anyhow::Result<Pickup> {
@@ -353,7 +372,10 @@ fn pickup(
         .bundles
         .get_mut(&id)
         .ok_or_else(|| anyhow::anyhow!("unknown bundle"))?;
-    anyhow::ensure!(allowed(b, session), "loot ownership/range/life mismatch");
+    anyhow::ensure!(
+        allowed_with_range(b, session, reach_squared),
+        "loot ownership/range/life mismatch"
+    );
     let index = b
         .items
         .iter()
@@ -381,7 +403,7 @@ fn pickup(
             let tx = db.unchecked_transaction()?;
             let mut updates = Vec::new();
             for (id, player) in group {
-                if !allowed(b, &player.s) {
+                if !allowed_with_range(b, &player.s, reach_squared) {
                     continue;
                 }
                 let amount = u32::from(count) * u32::from(player.s.progress.level) / total_levels;
@@ -519,12 +541,12 @@ fn pickup_routed(
     lobby: &Lobby,
     account: &str,
     s: &mut Session,
-    peer: SocketAddr,
+    (peer, reach_squared): (SocketAddr, u64),
     id: u32,
     item: u32,
 ) -> anyhow::Result<Pickup> {
     if item == GOLD {
-        return pickup(book, lobby, account, s, peer, id, item);
+        return pickup(book, lobby, account, s, (peer, reach_squared), id, item);
     }
     let owners = {
         let inner = book.inner.lock().unwrap();
@@ -532,7 +554,10 @@ fn pickup_routed(
             .bundles
             .get(&id)
             .ok_or_else(|| anyhow::anyhow!("unknown bundle"))?;
-        anyhow::ensure!(allowed(bundle, s), "loot ownership/range/life mismatch");
+        anyhow::ensure!(
+            allowed_with_range(bundle, s, reach_squared),
+            "loot ownership/range/life mismatch"
+        );
         bundle.owners.clone()
     };
     let group = {
@@ -542,7 +567,7 @@ fn pickup_routed(
             .filter(|leader| h.parties[leader].len() > 1)
         else {
             drop(h);
-            return pickup(book, lobby, account, s, peer, id, item);
+            return pickup(book, lobby, account, s, (peer, reach_squared), id, item);
         };
         let mut ids = h.group(s.player_id);
         let offset = *h.loot_rotation.entry(leader).or_default() % ids.len();
@@ -557,7 +582,15 @@ fn pickup_routed(
             .collect::<Vec<_>>()
     };
     for (leader, target, mut player) in group {
-        match pickup(book, lobby, &player.account, &mut player.s, peer, id, item) {
+        match pickup(
+            book,
+            lobby,
+            &player.account,
+            &mut player.s,
+            (peer, reach_squared),
+            id,
+            item,
+        ) {
             Ok((mut response, changed)) => {
                 let mut h = lobby.social.lock().unwrap();
                 if let Some(index) = h
@@ -631,7 +664,15 @@ pub(crate) async fn handle(
         return;
     }
     let item = u32::from_le_bytes(p[5..9].try_into().unwrap());
-    let result = pickup_routed(book, lobby, account, session, peer, id, item);
+    let result = pickup_routed(
+        book,
+        lobby,
+        account,
+        session,
+        (peer, NORMAL_REACH_SQUARED),
+        id,
+        item,
+    );
     match result {
         Ok((response, changed)) => {
             super::send_response(sock, peer, &None, &response, "LOOT_GET").await;
@@ -749,6 +790,9 @@ mod tests {
                 (1, s.character.name.as_str(), 0, 389014000),
                 (2, "SomeoneElse", 0, 389014000),
                 (3, s.character.name.as_str(), 1000, 389014000),
+                (5, s.character.name.as_str(), 600, 389014000),
+                (6, s.character.name.as_str(), 601, 389014000),
+                (7, "SomeoneElse", 300, 389014000),
             ] {
                 let mut position = s.position;
                 position.x += offset;
@@ -761,6 +805,26 @@ mod tests {
                     },
                 );
             }
+            let distant = inner.bundles[&5].position;
+            inner.bundles.insert(
+                8,
+                Bundle {
+                    owners: vec![s.character.name.clone(), "PartyMate".into()],
+                    position: distant,
+                    items: vec![(389014000, 1)],
+                },
+            );
+            inner.bundles.insert(
+                9,
+                Bundle {
+                    owners: vec![s.character.name.clone()],
+                    position: crate::movement::Position {
+                        zone: s.position.zone.wrapping_add(1),
+                        ..distant
+                    },
+                    items: vec![(389014000, 1)],
+                },
+            );
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let _client = TcpStream::connect(listener.local_addr().unwrap())
@@ -769,13 +833,34 @@ mod tests {
         let (mut socket, peer) = listener.accept().await.unwrap();
         auto_tick(&mut socket, peer, &lobby, "test", &mut s, 1000).await;
         assert!(s.inventory.iter().all(|i| i.id == 0));
-        assert!(command(&mut s, b"/autoloot").is_some());
-        auto_tick(&mut socket, peer, &lobby, "test", &mut s, 1000).await;
+        let remote_peer = "192.0.2.1:1234".parse().unwrap();
+        assert!(
+            pickup_routed(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (remote_peer, NORMAL_REACH_SQUARED),
+                5,
+                389014000
+            )
+            .is_err()
+        );
+        let reply = command(&mut s, b"/autoloot").unwrap();
+        assert!(reply.ends_with(b"Auto Loot enabled."));
+        auto_tick(&mut socket, remote_peer, &lobby, "test", &mut s, 1000).await;
         assert_eq!(s.inventory[0].id, 389014000);
-        auto_tick(&mut socket, peer, &lobby, "test", &mut s, 2000).await;
-        assert_eq!(s.inventory[0].count, 1);
-        assert_eq!(book.inner.lock().unwrap().bundles[&2].items[0].1, 1);
-        assert_eq!(book.inner.lock().unwrap().bundles[&3].items[0].1, 1);
+        auto_tick(&mut socket, remote_peer, &lobby, "test", &mut s, 2000).await;
+        assert_eq!(s.inventory[0].count, 3);
+        {
+            let inner = book.inner.lock().unwrap();
+            for id in [1, 5, 8] {
+                assert!(!inner.bundles.contains_key(&id));
+            }
+            for id in [2, 3, 6, 7, 9] {
+                assert_eq!(inner.bundles[&id].items[0].1, 1);
+            }
+        }
         command(&mut s, b"autoloot off");
         assert!(s.autoloot.is_none());
         command(&mut s, b"autoloot on extra");
@@ -953,9 +1038,27 @@ mod tests {
                     .contains(&(certificate, 1))
             );
             if matches!(prototype, 7005..=7008) {
-                pickup_routed(&book, &lobby, "test", &mut s, peer, id, certificate).unwrap();
+                pickup_routed(
+                    &book,
+                    &lobby,
+                    "test",
+                    &mut s,
+                    (peer, NORMAL_REACH_SQUARED),
+                    id,
+                    certificate,
+                )
+                .unwrap();
                 assert!(
-                    pickup_routed(&book, &lobby, "test", &mut s, peer, id, certificate).is_err()
+                    pickup_routed(
+                        &book,
+                        &lobby,
+                        "test",
+                        &mut s,
+                        (peer, NORMAL_REACH_SQUARED),
+                        id,
+                        certificate
+                    )
+                    .is_err()
                 );
             }
         }
@@ -989,13 +1092,33 @@ mod tests {
         }
         let id =
             helmet.expect("fixed source RNG sequence must produce a rogue dagger-defense helmet");
-        pickup_routed(&book, &lobby, "test", &mut s, peer, id, 245003541).unwrap();
+        pickup_routed(
+            &book,
+            &lobby,
+            "test",
+            &mut s,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            245003541,
+        )
+        .unwrap();
         assert!(
             s.inventory
                 .iter()
                 .any(|i| i.id == 245003541 && i.count == 1)
         );
-        assert!(pickup_routed(&book, &lobby, "test", &mut s, peer, id, 245003541).is_err());
+        assert!(
+            pickup_routed(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                245003541
+            )
+            .is_err()
+        );
         // A conflicting owner customization is rejected without partial certificate/group edits.
         db.execute(
             "UPDATE world_drop_rules SET item=379021000 WHERE drop_id=7005 AND slot=0",
@@ -1074,11 +1197,40 @@ mod tests {
         assert!(!book.visible(id, &member.character.name));
         let peer = "127.0.0.1:1".parse().unwrap();
         assert!(
-            pickup_routed(&book, &lobby, "TrialMate", &mut member, peer, id, 910045000).is_err()
+            pickup_routed(
+                &book,
+                &lobby,
+                "TrialMate",
+                &mut member,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                910045000
+            )
+            .is_err()
         );
-        pickup_routed(&book, &lobby, "test", &mut chief, peer, id, 910045000).unwrap();
+        pickup_routed(
+            &book,
+            &lobby,
+            "test",
+            &mut chief,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            910045000,
+        )
+        .unwrap();
         assert_eq!(chief.inventory[0].id, 910045000);
-        assert!(pickup_routed(&book, &lobby, "test", &mut chief, peer, id, 910045000).is_err());
+        assert!(
+            pickup_routed(
+                &book,
+                &lobby,
+                "test",
+                &mut chief,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                910045000
+            )
+            .is_err()
+        );
     }
     #[test]
     fn party_loot_is_owned_atomic_level_weighted_and_rotates_items_without_touching_solo_rules() {
@@ -1116,10 +1268,30 @@ mod tests {
         let count = book.inner.lock().unwrap().bundles[&id].items[0].1;
         let peer = "127.0.0.1:1".parse().unwrap();
         assert!(
-            pickup_routed(&book, &lobby, "LootOutsider", &mut outsider, peer, id, GOLD).is_err()
+            pickup_routed(
+                &book,
+                &lobby,
+                "LootOutsider",
+                &mut outsider,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                GOLD
+            )
+            .is_err()
         );
         lobby.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_party_coin BEFORE UPDATE ON character_wallets WHEN NEW.account='LootMate' BEGIN SELECT RAISE(ABORT,'test');END;").unwrap();
-        assert!(pickup_routed(&book, &lobby, "test", &mut a, peer, id, GOLD).is_err());
+        assert!(
+            pickup_routed(
+                &book,
+                &lobby,
+                "test",
+                &mut a,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                GOLD
+            )
+            .is_err()
+        );
         assert_eq!(
             starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
             1000000
@@ -1131,23 +1303,80 @@ mod tests {
             .unwrap()
             .execute_batch("DROP TRIGGER fail_party_coin;")
             .unwrap();
-        pickup_routed(&book, &lobby, "test", &mut a, peer, id, GOLD).unwrap();
+        pickup_routed(
+            &book,
+            &lobby,
+            "test",
+            &mut a,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            GOLD,
+        )
+        .unwrap();
         crate::social::synchronize(&lobby, "LootMate", &mut b);
         assert_eq!(a.coins, 1000000 + u32::from(count) / 2);
         assert_eq!(b.coins, a.coins);
-        pickup_routed(&book, &lobby, "test", &mut a, peer, id, 389014000).unwrap();
+        pickup_routed(
+            &book,
+            &lobby,
+            "test",
+            &mut a,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            389014000,
+        )
+        .unwrap();
         assert_eq!(a.inventory[0].id, 389014000);
         let packet = book
             .create(100, 12000, a.position, &a.character.name)
             .unwrap();
         let next = u32::from_le_bytes(packet[3..7].try_into().unwrap());
-        let (reply, _) =
-            pickup_routed(&book, &lobby, "test", &mut a, peer, next, 389014000).unwrap();
+        book.inner
+            .lock()
+            .unwrap()
+            .bundles
+            .get_mut(&next)
+            .unwrap()
+            .position
+            .x += 600;
+        assert!(
+            pickup_routed(
+                &book,
+                &lobby,
+                "test",
+                &mut a,
+                (peer, NORMAL_REACH_SQUARED),
+                next,
+                389014000
+            )
+            .is_err()
+        );
+        let (reply, _) = pickup_routed(
+            &book,
+            &lobby,
+            "test",
+            &mut a,
+            (peer, AUTOLOOT_REACH_SQUARED),
+            next,
+            389014000,
+        )
+        .unwrap();
         assert_eq!(reply, [0x26, 4]);
         crate::social::synchronize(&lobby, "LootMate", &mut b);
         assert_eq!(b.inventory[0].id, 389014000);
         assert_eq!(a.inventory[0].count, 1);
-        assert!(pickup_routed(&book, &lobby, "LootMate", &mut b, peer, next, 389014000).is_err());
+        assert!(
+            pickup_routed(
+                &book,
+                &lobby,
+                "LootMate",
+                &mut b,
+                (peer, NORMAL_REACH_SQUARED),
+                next,
+                389014000
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1181,7 +1410,16 @@ mod tests {
         let base = book.inner.lock().unwrap().bundles[&id].items[0].1;
         let expected = u32::from(base) * 109 / 100;
         let peer = "127.0.0.1:1".parse().unwrap();
-        let (reply, _) = pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).unwrap();
+        let (reply, _) = pickup(
+            &book,
+            &lobby,
+            "test",
+            &mut s,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            GOLD,
+        )
+        .unwrap();
         assert_eq!(s.coins, 1000000 + expected);
         assert_eq!(
             u16::from_le_bytes(reply[7..9].try_into().unwrap()) as u32,
@@ -1191,7 +1429,18 @@ mod tests {
             starter::coins(&lobby.db.lock().unwrap(), "test", 0).unwrap(),
             s.coins
         );
-        assert!(pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).is_err());
+        assert!(
+            pickup(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                GOLD
+            )
+            .is_err()
+        );
         assert_eq!(s.coins, 1000000 + expected);
     }
     #[test]
@@ -1220,15 +1469,57 @@ mod tests {
         assert_eq!(book.inner.lock().unwrap().bundles[&id].items.len(), 2);
         let peer = "127.0.0.1:1".parse().unwrap();
         s.character.name = "Thief".into();
-        assert!(pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).is_err());
+        assert!(
+            pickup(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                GOLD
+            )
+            .is_err()
+        );
         s.character.name = "ServiceTest".into();
         s.position.x += 200;
-        assert!(pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).is_err());
+        assert!(
+            pickup(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                GOLD
+            )
+            .is_err()
+        );
         s.position.x -= 200;
-        let (reply, _) = pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).unwrap();
+        let (reply, _) = pickup(
+            &book,
+            &lobby,
+            "test",
+            &mut s,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            GOLD,
+        )
+        .unwrap();
         assert_eq!(reply.len(), 13);
         assert_eq!(s.coins, 1000000 + u32::from(money));
-        assert!(pickup(&book, &lobby, "test", &mut s, peer, id, GOLD).is_err());
+        assert!(
+            pickup(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                GOLD
+            )
+            .is_err()
+        );
         {
             let db = lobby.db.lock().unwrap();
             for pos in 0..28 {
@@ -1239,7 +1530,18 @@ mod tests {
                 .unwrap();
             }
         }
-        assert!(pickup(&book, &lobby, "test", &mut s, peer, id, 389014000).is_err());
+        assert!(
+            pickup(
+                &book,
+                &lobby,
+                "test",
+                &mut s,
+                (peer, NORMAL_REACH_SQUARED),
+                id,
+                389014000
+            )
+            .is_err()
+        );
         assert_eq!(
             book.inner.lock().unwrap().bundles[&id].items,
             vec![(389014000, 1)]
@@ -1250,7 +1552,16 @@ mod tests {
             .unwrap()
             .execute("DELETE FROM character_inventory WHERE inventory_slot=0", [])
             .unwrap();
-        let (reply, _) = pickup(&book, &lobby, "test", &mut s, peer, id, 389014000).unwrap();
+        let (reply, _) = pickup(
+            &book,
+            &lobby,
+            "test",
+            &mut s,
+            (peer, NORMAL_REACH_SQUARED),
+            id,
+            389014000,
+        )
+        .unwrap();
         assert_eq!(reply.len(), 13);
         assert!(!book.visible(id, &s.character.name));
         assert_eq!(

@@ -160,13 +160,15 @@ also works if a client intercepts unknown slash commands. The isolated verified
 client profile forwards this exact slash command through ordinary chat; other
 native slash commands retain their original dispatch.
 
-Once per second, up to32 nearby owned bundle entries pass through the same
-transactional pickup/party-routing path as manual loot. Existing life, zone,
-approximately15.56m distance, ownership, coin cap, capacity, weight and stack
-checks remain authoritative. Failed/full-bag pickups leave the drop available;
+Once per second, automatic pickup processes up to 32 owned bundle entries within
+60 m for both solo and party players. It uses the same transactional pickup and
+party routing as manual loot. Manual loot keeps its approximately 15.56 m range.
+Life, zone, ownership, coin cap, capacity, weight and stack checks still apply. Failed/full-bag pickups leave the drop available;
 there is no direct grant or repeated payout. Pickup pauses while near an active
 NPC service/anvil context to avoid changing icons owned by that window; moving
 away resumes it. The command and its status reply are private.
+
+The former opt-in command `autoloot ranged` is an alias for `autoloot on`.
 
 Supplied AIServer/Npc.cpp GiveNpcHaveItem/ItemProdution and GameServer delivery
 handlers are the reference. Each death generates once; the largest credited
