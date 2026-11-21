@@ -1562,6 +1562,7 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     if let Err(error) = enable_game_keepalive(&sock) {
         tracing::warn!(%peer, %error, "could not configure game TCP keepalive");
     }
+    let mut disconnect_socket = None;
     let mut buf = [0u8; 4096];
     let mut decoder = framing::Decoder::default();
     let mut packet_count = 0u64;
@@ -1578,9 +1579,15 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     let mut skill_tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_received = tokio::time::Instant::now();
     let mut social_notify: Option<Arc<tokio::sync::Notify>> = None;
-    loop {
+    let kicked = 'connection: loop {
+        if social_guard.disconnect_requested() {
+            break true;
+        }
         let read = tokio::select! {
             _=async {social_notify.as_ref().unwrap().notified().await}, if social_notify.is_some()=> {
+                if social_guard.disconnect_requested() {
+                    break true;
+                }
                 if let (Some(session),Some(account))=(world.as_mut(),lease.as_ref().map(lobby::AccountLease::name)) {
                     clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
                     social::synchronize(&lobby,account,session);
@@ -1629,7 +1636,7 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
         match read {
             Ok(0) => {
                 tracing::info!(%peer, packet_count, pending_bytes = decoder.pending(), "game client disconnected (EOF)");
-                break;
+                break false;
             }
             Ok(n) => {
                 let data = &buf[..n];
@@ -1641,6 +1648,9 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                 loop {
                     match decoder.next() {
                         Ok(Some(payload)) => {
+                            if social_guard.disconnect_requested() {
+                                break 'connection true;
+                            }
                             if payload.starts_with(&[0x10, 2]) {
                                 tracing::info!(%peer, bytes = payload.len(), "received private chat packet");
                             } else if payload.first() != Some(&1) {
@@ -1680,12 +1690,21 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                                 .filter(|s| s.entered || s.zone_loading)
                                 .map(|s| s.player_id);
                             if social_guard.id != current {
-                                if let Some(old) = social_guard.id {
-                                    lobby.social.lock().unwrap().disconnect(old);
+                                if current.is_some() && disconnect_socket.is_none() {
+                                    disconnect_socket = match socket2::SockRef::from(&sock)
+                                        .try_clone()
+                                    {
+                                        Ok(socket) => Some(Arc::new(socket)),
+                                        Err(error) => {
+                                            tracing::warn!(%peer, %error, "could not clone socket for operator disconnect");
+                                            None
+                                        }
+                                    };
                                 }
-                                social_guard.id = current;
-                                social_notify =
-                                    current.map(|id| lobby.social.lock().unwrap().notifier(id));
+                                match social_guard.track(current, disconnect_socket.clone()) {
+                                    Ok(notify) => social_notify = notify,
+                                    Err(()) => break 'connection true,
+                                }
                             }
                         }
                         Ok(None) => break,
@@ -1698,9 +1717,12 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
             }
             Err(e) => {
                 tracing::error!(%peer, error = %e, "game client read error");
-                break;
+                break false;
             }
         }
+    };
+    if kicked {
+        tracing::info!(%peer, "closing game connection at operator request");
     }
     if let (Some(world), Some(registry)) = (world.as_ref(), lobby.monsters.as_ref()) {
         registry.take_experience(&world.character.name);
@@ -2314,6 +2336,151 @@ mod tests {
         drop(different);
         retried_task.await.unwrap();
         different_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn operator_roster_and_kick_use_real_game_connections_and_release_the_account() {
+        async fn matching(client: &mut TcpStream, prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let packet = receive(client).await;
+                    if packet.starts_with(prefix) && packet.ends_with(suffix) {
+                        return packet;
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+
+        let lobby = Arc::new(social::tests::lobby());
+        for name in ["Operator", "KickTarget"] {
+            let session = social::tests::player(&lobby, name, 1, 80);
+            lobby.social.lock().unwrap().disconnect(session.player_id);
+        }
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO character_privileges VALUES ('Operator',0,1)",
+                [],
+            )
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open = async |name: &str| {
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (socket, peer) = listener.accept().await.unwrap();
+            lobby.record_login(peer.ip(), name).unwrap();
+            let task = tokio::spawn(handle_game_client(socket, peer, lobby.clone()));
+            assert_eq!(exchange(&mut client, &[1]).await, [1, 1]);
+            let mut select = vec![4, 0, 0];
+            social::string(&mut select, name);
+            select.extend([1, 21]);
+            assert!(exchange(&mut client, &select).await.starts_with(&[4, 1]));
+            let mut start = vec![0x0D, 1, name.len() as u8];
+            start.extend(name.as_bytes());
+            let snapshot = exchange(&mut client, &start).await;
+            assert_eq!(snapshot[0], 0x0E);
+            let id = u16::from_le_bytes([snapshot[1], snapshot[2]]);
+            start[1] = 2;
+            client.write_all(&frame_packet(&start)).await.unwrap();
+            client.write_all(&frame_packet(&[0x6B])).await.unwrap();
+            matching(&mut client, &[0x6B, 0, 0], &[]).await;
+            (client, task, id)
+        };
+        let chat = |message: &str| {
+            let mut packet = vec![0x10, 1];
+            social::string(&mut packet, message);
+            frame_packet(&packet)
+        };
+
+        let (mut operator, operator_task, operator_id) = open("Operator").await;
+        let (mut target, target_task, target_id) = open("KickTarget").await;
+        target.write_all(&chat("op kick Operator")).await.unwrap();
+        matching(&mut target, &[0x10, 1], b"op kick Operator").await;
+        assert!(!operator_task.is_finished());
+        operator.write_all(&chat("op players")).await.unwrap();
+        matching(
+            &mut operator,
+            &[0x10, 7],
+            b"KickTarget [zone 21] | Operator [zone 21]",
+        )
+        .await;
+
+        operator.write_all(&chat("op kick Operator")).await.unwrap();
+        matching(&mut operator, &[0x10, 7], b"log out of your own session.").await;
+        {
+            let mut hub = lobby.social.lock().unwrap();
+            hub.parties
+                .insert(operator_id, vec![operator_id, target_id]);
+        }
+        operator
+            .write_all(&chat("op kick kicktarget"))
+            .await
+            .unwrap();
+        matching(
+            &mut operator,
+            &[0x10, 7],
+            b"Disconnect requested for KickTarget.",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(3), target_task)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let hub = lobby.social.lock().unwrap();
+            assert!(!hub.players.contains_key(&target_id));
+            assert!(hub.party(operator_id).is_none());
+        }
+
+        let (reconnected, reconnect_task, new_id) = open("KickTarget").await;
+        assert_ne!(target_id, new_id);
+        assert!(lobby.social.lock().unwrap().players.contains_key(&new_id));
+        drop(reconnected);
+        drop(operator);
+        reconnect_task.await.unwrap();
+        operator_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn operator_shutdown_unblocks_a_stalled_tcp_write() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        let socket = socket2::SockRef::from(&server).try_clone().unwrap();
+        socket.set_send_buffer_size(4096).unwrap();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let bytes = vec![0; 1024 * 1024];
+            let mut write = std::pin::pin!(server.write_all(&bytes));
+            let mut started = Some(started);
+            std::future::poll_fn(|cx| {
+                let status = write.as_mut().poll(cx);
+                if status.is_pending()
+                    && let Some(ready) = started.take()
+                {
+                    ready.send(()).unwrap();
+                }
+                status
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        socket.shutdown(std::net::Shutdown::Both).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
     }
 
     #[tokio::test]

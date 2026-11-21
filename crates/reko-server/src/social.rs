@@ -23,6 +23,8 @@ pub(crate) struct Hub {
     pub chat_mutes: HashMap<String, std::time::Instant>,
     whisper_targets: HashMap<u16, u16>,
     whisper_blocked: HashSet<u16>,
+    disconnect_requests: HashSet<u16>,
+    disconnect_sockets: HashMap<u16, std::sync::Arc<socket2::Socket>>,
     queues: HashMap<u16, Vec<Vec<u8>>>,
     pub refresh: HashSet<u16>,
     pub skill_refresh: HashSet<u16>,
@@ -56,6 +58,37 @@ pub(crate) fn name(p: &[u8]) -> Option<&str> {
 impl Hub {
     pub fn notifier(&mut self, id: u16) -> std::sync::Arc<tokio::sync::Notify> {
         self.notifiers.entry(id).or_default().clone()
+    }
+    pub fn register_connection(
+        &mut self,
+        id: u16,
+        socket: Option<std::sync::Arc<socket2::Socket>>,
+    ) -> std::sync::Arc<tokio::sync::Notify> {
+        if let Some(socket) = socket {
+            self.disconnect_sockets.insert(id, socket);
+        }
+        self.notifier(id)
+    }
+
+    pub fn request_disconnect(&mut self, id: u16) -> std::io::Result<bool> {
+        if self.disconnect_requests.contains(&id) {
+            return Ok(false);
+        }
+        let Some(socket) = self.disconnect_sockets.get(&id) else {
+            return Ok(false);
+        };
+        // The duplicate shares the original TCP socket. Shutting it down also
+        // releases an in-flight write, so the handler can finish its state changes.
+        if let Err(error) = socket.shutdown(std::net::Shutdown::Both)
+            && error.kind() != std::io::ErrorKind::NotConnected
+        {
+            return Err(error);
+        }
+        self.disconnect_requests.insert(id);
+        if let Some(wake) = self.notifiers.get(&id) {
+            wake.notify_one();
+        }
+        Ok(true)
     }
     pub fn watch_target(&mut self, viewer: u16, target: u16) {
         self.targets.insert(viewer, target);
@@ -157,6 +190,8 @@ impl Hub {
         crate::trade::cancel(self, id, "Trade cancelled: player disconnected.");
         crate::merchant::close(self, id);
         self.notifiers.remove(&id);
+        self.disconnect_requests.remove(&id);
+        self.disconnect_sockets.remove(&id);
         self.targets
             .retain(|viewer, target| *viewer != id && *target != id);
         self.whisper_targets
@@ -639,6 +674,39 @@ pub(crate) async fn flush(sock: &mut TcpStream, peer: SocketAddr, lobby: &Lobby,
 pub(crate) struct Guard {
     pub lobby: std::sync::Arc<Lobby>,
     pub id: Option<u16>,
+}
+impl Guard {
+    pub fn disconnect_requested(&self) -> bool {
+        self.id.is_some_and(|id| {
+            self.lobby
+                .social
+                .lock()
+                .unwrap()
+                .disconnect_requests
+                .contains(&id)
+        })
+    }
+
+    pub fn track(
+        &mut self,
+        current: Option<u16>,
+        socket: Option<std::sync::Arc<socket2::Socket>>,
+    ) -> Result<Option<std::sync::Arc<tokio::sync::Notify>>, ()> {
+        let mut hub = self.lobby.social.lock().unwrap();
+        if let Some(old) = self.id {
+            if hub.disconnect_requests.contains(&old) {
+                if let Some(current) = current
+                    && current != old
+                {
+                    hub.disconnect(current);
+                }
+                return Err(());
+            }
+            hub.disconnect(old);
+        }
+        self.id = current;
+        Ok(current.map(|id| hub.register_connection(id, socket)))
+    }
 }
 impl Drop for Guard {
     fn drop(&mut self) {

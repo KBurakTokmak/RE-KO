@@ -2,6 +2,7 @@ use crate::{admin, chat, lobby::Lobby, social::Hub, world_entry::Session};
 use std::time::{Duration, Instant};
 
 const MAX_MUTE_MINUTES: u64 = 60;
+const PLAYERS_PER_PAGE: usize = 5;
 
 pub(crate) fn notice(text: &[u8]) -> Vec<u8> {
     chat::packet(7, 0, u16::MAX, "", text)
@@ -40,6 +41,36 @@ pub(crate) fn command(
     let command = words.next().unwrap_or_default();
     let args = words.next().unwrap_or_default().trim_ascii();
     let mut hub = lobby.social.lock().unwrap();
+    if command.eq_ignore_ascii_case(b"players") {
+        return Some(players(&hub, args));
+    }
+    if command.eq_ignore_ascii_case(b"kick") {
+        let Ok(name) = std::str::from_utf8(args) else {
+            return Some(usage());
+        };
+        if name.is_empty() || name.contains(' ') {
+            return Some(usage());
+        }
+        let Some(id) = hub.named(name) else {
+            return Some(notice(b"That character is not online."));
+        };
+        if id == actor.player_id {
+            return Some(notice(b"Use the game menu to log out of your own session."));
+        }
+        let name = hub.players[&id].s.character.name.clone();
+        match hub.request_disconnect(id) {
+            Ok(true) => {}
+            Ok(false) => return Some(notice(b"That session is unavailable for disconnect.")),
+            Err(error) => {
+                tracing::warn!(%error, target=%name, "operator disconnect failed");
+                return Some(notice(b"The server could not disconnect that session."));
+            }
+        }
+        tracing::info!(operator=%actor.character.name, target=%name, "operator requested disconnect");
+        return Some(notice(
+            format!("Disconnect requested for {name}.").as_bytes(),
+        ));
+    }
     if command.eq_ignore_ascii_case(b"announce") && !args.is_empty() {
         let recipients: Vec<_> = hub
             .players
@@ -108,7 +139,69 @@ pub(crate) fn command(
 }
 
 fn usage() -> Vec<u8> {
-    notice(
-        b"Use op announce <message>, op mute <character> <1-60 minutes>, or op unmute <character>.",
-    )
+    notice(b"Use op players [page], op kick <character>, op announce <message>, op mute <character> <1-60 minutes>, or op unmute <character>.")
+}
+
+fn players(hub: &Hub, args: &[u8]) -> Vec<u8> {
+    let page = if args.is_empty() {
+        Some(1)
+    } else {
+        std::str::from_utf8(args)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+    };
+    let mut players: Vec<_> = hub.players.values().map(|player| &player.s).collect();
+    let pages = players.len().div_ceil(PLAYERS_PER_PAGE).max(1);
+    let Some(page) = page.filter(|number| (1..=pages).contains(number)) else {
+        return notice(format!("Use op players <page> from 1 to {pages}.").as_bytes());
+    };
+    if players.is_empty() {
+        return notice(b"No characters are online.");
+    }
+    players.sort_by_cached_key(|s| s.character.name.to_ascii_lowercase());
+    let mut message = format!("Online {} (page {page}/{pages}): ", players.len());
+    for (index, player) in players
+        .into_iter()
+        .skip((page - 1) * PLAYERS_PER_PAGE)
+        .take(PLAYERS_PER_PAGE)
+        .enumerate()
+    {
+        if index > 0 {
+            message.push_str(" | ");
+        }
+        message.push_str(&player.character.name);
+        if player.zone_loading {
+            message.push_str(" [loading]");
+        } else {
+            use std::fmt::Write;
+            let _ = write!(message, " [zone {}]", player.position.zone);
+        }
+    }
+    notice(message.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roster_pages_are_bounded_and_loading_characters_have_no_stale_zone() {
+        let lobby = crate::social::tests::lobby();
+        for name in ["Charlie", "Echo", "Alpha", "Delta", "Bravo", "Foxtrot"] {
+            let mut s = crate::social::tests::player(&lobby, name, 1, 80);
+            if name == "Foxtrot" {
+                s.zone_loading = true;
+                s.entered = false;
+                lobby.social.lock().unwrap().synchronize(name, &s);
+            }
+        }
+        let hub = lobby.social.lock().unwrap();
+        assert!(players(&hub, b"").ends_with(
+            b"Online 6 (page 1/2): Alpha [zone 21] | Bravo [zone 21] | Charlie [zone 21] | Delta [zone 21] | Echo [zone 21]"
+        ));
+        assert!(players(&hub, b"2").ends_with(b"Online 6 (page 2/2): Foxtrot [loading]"));
+        for page in [b"0".as_slice(), b"3", b"-1", b"18446744073709551616"] {
+            assert!(players(&hub, page).ends_with(b"from 1 to 2."));
+        }
+    }
 }

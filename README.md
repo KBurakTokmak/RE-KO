@@ -41,7 +41,8 @@ renderer/client and an in-process game host have not been implemented.
 - Nearby player presence, movement/equipment, skill/attack/level-up visuals and target HP bars.
 - Native player trading with two-party confirmation, inventory/weight checks and atomic item/Noah exchange.
 - Administrative test fixtures, server announcements, temporary chat mutes,
-  packet capture and a local-client startup profile.
+  an online roster, targeted disconnects, packet capture and a local-client
+  startup profile.
 - Admin-only 30,000-damage basic attacks, monster protection and native GM
   collision bypass, monster summoning by ID/name, coordinate and zone teleport;
   per-character skillbar save/load.

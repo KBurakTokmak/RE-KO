@@ -191,10 +191,25 @@ For other characters, text such as `tp`, `spawn 803` or `op announce hello`
 follows normal All chat routing.
 
 ```
+op players
+op players 2
+op kick CharacterName
 op announce Server maintenance in five minutes.
 op mute CharacterName 10
 op unmute CharacterName
 ```
+
+The roster is private to the operator. It shows the number of online characters
+and up to five names per page, each with their zone ID or loading status.
+`op kick` closes the named character's game connection and runs normal session
+cleanup. That account can sign in again. Use the native logout menu for
+voluntary exits so the client can send its final skillbar save.
+
+The supplied 1453 console implements name-based disconnect and online counts in
+`ChatHandler.cpp` through `HandleKillUserCommand` and `HandleCountCommand`.
+Open-KO's `User.cpp::CountConcurrentUser` corroborates the count concept. The
+paged roster and the in-game operator commands are local tools using the
+existing staff role and system notices.
 
 Announcements appear as server notices to players in the world across zones and
 factions. Mute durations range from 1 to 60 minutes. Target an online character
