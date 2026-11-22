@@ -1,6 +1,8 @@
-//! Authoritative, persisted weapon wear after successful physical attacks.
+//! Authoritative equipment wear and repair.
 
-use crate::{combat, inventory, lobby::Lobby, starter, utility, world_entry::Session};
+use crate::{
+    combat, inventory, lobby::Lobby, resources, skills, starter, utility, world_entry::Session,
+};
 use rusqlite::params;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -71,6 +73,86 @@ pub(crate) async fn attack(
         }
         Err(error) => tracing::error!(%peer,%error,"weapon wear persistence failed"),
     }
+}
+
+pub(crate) async fn hammer(
+    sock: &mut TcpStream,
+    peer: SocketAddr,
+    lobby: &Lobby,
+    account: &str,
+    session: &mut Session,
+    spell: &skills::Spell,
+) -> Option<Result<(), &'static str>> {
+    let effect = lobby.skills.as_ref()?.effects.get(&(3, spell.id))?;
+    if spell.types != [3, 0]
+        || spell.skill_group != 0
+        || spell.use_item == 0
+        || combat::integer(effect, 2) != 4
+        || combat::integer(effect, 3) <= 0
+    {
+        return None;
+    }
+    let Some(catalog) = lobby.combat.as_ref() else {
+        return Some(Err("The repair item catalog is unavailable."));
+    };
+    let result = (|| {
+        let db = lobby.db.lock().unwrap();
+        let tx = db
+            .unchecked_transaction()
+            .map_err(|_| "Unable to start repair.")?;
+        let slot = session.character.slot;
+        let paid = resources::commit_in(&tx, account, slot, spell, 1, Some(catalog), |_| Ok(()))?;
+        let mut gear =
+            starter::equipment(&tx, account, slot).map_err(|_| "Unable to load equipped items.")?;
+        let mut repaired = Vec::new();
+        for (position, item) in gear.iter_mut().enumerate() {
+            let Some((base, Some(extension))) = catalog.item(item.id) else {
+                continue;
+            };
+            if combat::integer(base, 10) == 255 {
+                continue;
+            }
+            let maximum = u16::try_from(combat::integer(base, 19) + combat::integer(extension, 12))
+                .map_err(|_| "Invalid maximum durability.")?;
+            if maximum <= 1 || item.durability >= maximum {
+                continue;
+            }
+            let updated = tx.execute(
+                "UPDATE character_equipment SET durability=?4 WHERE account=?1 AND slot=?2 AND equipment_slot=?3 AND item_id=?5",
+                params![account, slot, position, maximum, item.id],
+            ).map_err(|_| "Unable to save repaired equipment.")?;
+            if updated != 1 {
+                return Err("An equipped item changed during repair.");
+            }
+            item.durability = maximum;
+            repaired.push((position as u8, maximum));
+        }
+        tx.commit()
+            .map_err(|_| "Unable to commit Magic Hammer repair.")?;
+        Ok((paid, gear, repaired))
+    })();
+    let (paid, gear, repaired) = match result {
+        Ok(result) => result,
+        Err(reason) => return Some(Err(reason)),
+    };
+    session.equipment = gear;
+    resources::sync(sock, peer, lobby, account, session, paid).await;
+    for (position, maximum) in repaired {
+        let mut packet = vec![0x38, position];
+        packet.extend(maximum.to_le_bytes());
+        super::send_response(sock, peer, &None, &packet, "ITEM_DURABILITY").await;
+    }
+    refresh(session, catalog, lobby.skills.as_ref());
+    attributes(sock, peer, session).await;
+    super::send_response(
+        sock,
+        peer,
+        &None,
+        &skills::effect(spell.id, session.player_id),
+        "MAGIC_HAMMER",
+    )
+    .await;
+    Some(Ok(()))
 }
 
 pub(crate) fn refresh(

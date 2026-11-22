@@ -315,6 +315,14 @@ pub(crate) async fn handle(
     // TODO(re): Validate animation completion against original class/weapon clips.
     session.pending_cast = None;
     if let Some(result) =
+        crate::durability::hammer(sock, peer, lobby, account, session, spell).await
+    {
+        if let Err(reason) = result {
+            refused(sock, peer, session, id, reason).await;
+        }
+        return true;
+    }
+    if let Some(result) =
         crate::friendly::handle(sock, peer, lobby, account, session, spell, target).await
     {
         if let Err(reason) = result {

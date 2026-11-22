@@ -103,6 +103,11 @@ account-shared storage:192slots, eight pages of24, with validated deposit,
 withdrawal, stack/bag moves and bank coins. All transactions check ownership,
 quantity, range, capacity, weight and applicable coin caps before commit.
 
+Magic Hammer uses the positive type-3 repair effect in the original skill
+tables. It consumes one use and restores worn or broken equipped items to
+their original maximum durability in one transaction. Each repaired slot
+receives a native durability update, and equipment stats are recalculated.
+
 Owner-defined economy defaults live in `config/item-balance.json` and migration
 `007-potion-balance`, persisted as ITEM_ECONOMY rules. The ten shop HP/MP potions
 have half their original weight. Seven cost20percent of original price; Water of

@@ -106,6 +106,67 @@ fn failed(packets: &[Vec<u8>]) -> bool {
 }
 
 #[tokio::test]
+async fn magic_hammer_repairs_equipped_items_and_consumes_one_use_atomically() {
+    let Some((lobby, mut s, mut sock, mut client, peer)) = setup().await else {
+        return;
+    };
+    const HAMMER: u32 = 379099000;
+    const SKILL: u32 = 490202;
+    give(&lobby, &mut s, HAMMER, 2);
+    let gear = [(4, 244001286, 17), (6, 110110001, 0), (8, 170150001, 20)];
+    {
+        let db = lobby.db.lock().unwrap();
+        for (position, id, durability) in gear {
+            db.execute(
+                "INSERT INTO character_equipment VALUES('test',0,?1,?2,?3)",
+                rusqlite::params![position, id, durability],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO character_inventory VALUES('test',0,1,110110001,11,1)",
+            [],
+        )
+        .unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_repair BEFORE UPDATE OF durability ON character_equipment
+            WHEN OLD.equipment_slot=8 BEGIN SELECT RAISE(ABORT,'test repair failure'); END;",
+        )
+        .unwrap();
+        s.equipment = starter::equipment(&db, "test", 0).unwrap();
+        s.inventory = starter::inventory(&db, "test", 0).unwrap();
+    }
+    let worn = s.equipment;
+    let refused = cast(&lobby, &mut s, &mut sock, &mut client, peer, SKILL, 3).await;
+    assert!(failed(&refused));
+    {
+        let db = lobby.db.lock().unwrap();
+        assert_eq!(starter::equipment(&db, "test", 0).unwrap(), worn);
+        assert_eq!(starter::inventory(&db, "test", 0).unwrap()[0].count, 2);
+        db.execute_batch("DROP TRIGGER reject_repair").unwrap();
+    }
+    let packets = cast(&lobby, &mut s, &mut sock, &mut client, peer, SKILL, 3).await;
+    assert!(!failed(&packets));
+    assert!(packets.contains(&skills::effect(SKILL, s.player_id)));
+    let catalog = lobby.combat.as_ref().unwrap();
+    for (position, id, _) in gear {
+        let (base, extension) = catalog.item(id).unwrap();
+        let maximum = (combat::integer(base, 19) + combat::integer(extension.unwrap(), 12)) as u16;
+        let item = s.equipment[position as usize];
+        assert_eq!((item.id, item.durability), (id, maximum));
+        let mut update = vec![0x38, position as u8];
+        update.extend(maximum.to_le_bytes());
+        assert!(packets.contains(&update));
+    }
+    assert_eq!(uses(&lobby, &s), 1);
+    assert_eq!(s.inventory[1].durability, 11);
+    assert_eq!(s.coins, 1000000);
+    let db = lobby.db.lock().unwrap();
+    assert_eq!(starter::equipment(&db, "test", 0).unwrap(), s.equipment);
+    assert_eq!(starter::inventory(&db, "test", 0).unwrap(), s.inventory);
+}
+
+#[tokio::test]
 async fn zone_loading_restores_pus_buffs_with_remaining_time_without_recharging_or_consuming() {
     let Some((lobby, mut s, mut sock, mut client, peer)) = setup().await else {
         return;
