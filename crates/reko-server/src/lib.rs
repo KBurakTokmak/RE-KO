@@ -471,6 +471,10 @@ async fn handle_game_payload_inner(
         }
         0x30 => {
             if let Some(s) = world.as_ref().filter(|s| s.entered && !s.zone_loading) {
+                if matches!(payload, [0x30, 1, _, _] | [0x30, 1, _, _, 1]) {
+                    // Give the sender time to release the shared trade dialog asset.
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
                 trade::process(lobby, s.player_id, payload);
             }
         }

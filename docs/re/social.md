@@ -155,6 +155,10 @@ the current item model. Ordinary nearby trade requests accept source four-byte
 form or the native five-byte form with near-mode1; remote trade-board mode is
 not implemented.
 
+Local 1453 clients sharing one installation can miss the invitation dialog
+while the sender reads the same UI asset. The server defers forwarding nearby
+invitations by 150 ms. Other trade operations use immediate dispatch.
+
 ## Parties
 
 Use the client's party controls to invite by player name. Native0x2F supports
