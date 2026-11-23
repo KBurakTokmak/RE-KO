@@ -61,6 +61,10 @@ padding, as original0069C1D0/006A3D60 requires. Supplied custom GetRegionUserIn
 prepends a zero byte that this original parser does not consume; do not copy it.
 The three-client socket regression covers same/opposite nations in Moradon,
 distant-player exclusion, stage ordering/replay and exact record consumption.
+Remote equipment records contain chest, legs, head, gloves, boots, cape, right
+hand and left hand, followed by the two costume entries. The native glove and
+boot entries take equipment slots 12 and 13, as in supplied1453
+`CharacterMovementHandler.cpp::GetUserInfo` and Open-KO `MsgRecv_UserIn`.
 
 Native1453 parsers: player IN006A3D60, party006B47C0, clans006B8580, clan
 creation006BB810, join006BC1C0, invite006BD3E0, member list005A3920 and loot

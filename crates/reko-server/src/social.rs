@@ -356,7 +356,8 @@ impl Hub {
         p.extend([1, 1, u8::from(self.party(id) == Some(id)), 0, 0]);
         p.extend(0u16.to_le_bytes());
         p.extend([0; 4]);
-        for slot in [4, 10, 1, 7, 12, 5, 6, 8] {
+        // Native remote appearance order: chest, legs, head, gloves, boots, cape, hands.
+        for slot in [4, 10, 1, 12, 13, 5, 6, 8] {
             let item = s.equipment[slot];
             p.extend(item.id.to_le_bytes());
             p.extend(item.durability.to_le_bytes());

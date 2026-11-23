@@ -798,7 +798,18 @@ async fn three_loaded_clients_receive_complete_regions_and_can_request_each_othe
     use tokio::{io::AsyncReadExt, net::TcpListener};
     let lobby = lobby();
     let mut a = player(&lobby, "FirstClient", 1, 80);
-    let b = player(&lobby, "SecondClient", 1, 80);
+    let mut b = player(&lobby, "SecondClient", 1, 80);
+    b.equipment[12] = crate::starter::Item {
+        id: 245004290,
+        durability: 100,
+        count: 1,
+    };
+    b.equipment[13] = crate::starter::Item {
+        id: 243005282,
+        durability: 200,
+        count: 1,
+    };
+    synchronize(&lobby, "SecondClient", &mut b);
     let c = player(&lobby, "ThirdClient", 2, 80);
     let mut distant = player(&lobby, "DistantClient", 1, 80);
     distant.position.zone = 1;
@@ -874,7 +885,14 @@ async fn three_loaded_clients_receive_complete_regions_and_can_request_each_othe
         cursor += 1 + clan_length;
         cursor += 1 + 1 + 2 + 2;
         assert_eq!(&records[cursor..cursor + 2], &[80, other.character.race]);
-        cursor += 2 + 2 + 6 + 3 + 4 + 5 + 2 + 4 + 10 * 7;
+        cursor += 2 + 2 + 6 + 3 + 4 + 5 + 2 + 4;
+        for (appearance_slot, inventory_slot) in [(3, 12), (4, 13)] {
+            let at = cursor + appearance_slot * 7;
+            let item = other.equipment[inventory_slot];
+            assert_eq!(&records[at..at + 4], &item.id.to_le_bytes());
+            assert_eq!(&records[at + 4..at + 6], &item.durability.to_le_bytes());
+        }
+        cursor += 10 * 7;
         assert_eq!(records[cursor], other.position.zone);
         cursor += 1;
     }
