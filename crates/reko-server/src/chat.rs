@@ -2,6 +2,8 @@
 
 use crate::{movement::Position, world_entry::Session};
 
+pub(crate) const MERCHANT_CHANNEL: u8 = 14;
+
 #[derive(Clone)]
 pub(crate) struct Message {
     pub channel: u8,
@@ -28,7 +30,10 @@ impl Message {
 }
 
 pub(crate) fn parse(payload: &[u8]) -> Option<(u8, &[u8])> {
-    if payload.len() < 4 || payload[0] != 0x10 || !matches!(payload[1], 1 | 2 | 3 | 5 | 6 | 13) {
+    if payload.len() < 4
+        || payload[0] != 0x10
+        || !matches!(payload[1], 1 | 2 | 3 | 5 | 6 | 13 | MERCHANT_CHANNEL)
+    {
         return None;
     }
     let len = u16::from_le_bytes([payload[2], payload[3]]) as usize;
@@ -66,5 +71,13 @@ mod tests {
         for end in 0..request.len() {
             assert!(parse(&request[..end]).is_none());
         }
+    }
+
+    #[test]
+    fn parses_native_merchant_advert_with_coordinates() {
+        assert_eq!(
+            parse(b"\x10\x0e\x17\x00test(Location:992,1051)"),
+            Some((MERCHANT_CHANNEL, b"test(Location:992,1051)".as_slice()))
+        );
     }
 }

@@ -47,6 +47,7 @@ mod mage_special;
 #[cfg(test)]
 mod mage_tests;
 mod magic;
+mod merchant;
 mod model_radius;
 mod monsters;
 mod movement;
@@ -400,7 +401,9 @@ async fn handle_game_payload_inner(
     }
     let opcode = payload[0];
     if let Some(s) = world.as_ref() {
-        trade::before_action(&mut lobby.social.lock().unwrap(), s.player_id, opcode);
+        let mut hub = lobby.social.lock().unwrap();
+        trade::before_action(&mut hub, s.player_id, opcode);
+        merchant::before_action(&mut hub, s.player_id, opcode);
     }
     if let Some(s) = world.as_ref().filter(|s| s.entered) {
         let frozen = s
@@ -476,6 +479,11 @@ async fn handle_game_payload_inner(
                     tokio::time::sleep(Duration::from_millis(150)).await;
                 }
                 trade::process(lobby, s.player_id, payload);
+            }
+        }
+        0x68 => {
+            if let Some(s) = world.as_ref().filter(|s| s.entered && !s.zone_loading) {
+                merchant::process(lobby, s.player_id, payload);
             }
         }
         0x2f => {
@@ -1206,6 +1214,10 @@ async fn handle_game_payload_inner(
             {
                 let packet = operator_chat::notice(b"Your chat is muted.");
                 send_response(sock, peer, &None, &packet, "CHAT_MUTED").await;
+                return;
+            }
+            if channel == chat::MERCHANT_CHANNEL {
+                merchant::announce(&mut lobby.social.lock().unwrap(), session.player_id, text);
                 return;
             }
             if channel == 2 {

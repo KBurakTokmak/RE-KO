@@ -159,6 +159,24 @@ Local 1453 clients sharing one installation can miss the invitation dialog
 while the sender reads the same UI asset. The server defers forwarding nearby
 invitations by 150 ms. Other trade operations use immediate dispatch.
 
+## Player selling merchants
+
+Use the native Merchant control at level 20 or higher in Moradon, Luferson or
+El Morad. A seller can advertise up to twelve listings with an optional
+merchant message. The client sends the advert with its coordinates on chat
+channel 14 after publishing the stall. The server relays it within the seller's
+visible region. Nearby players select the stall and pay Noah per unit.
+A sale preserves item durability and commits
+both inventories and wallets together. Closing a stall, leaving the area or
+disconnecting releases its reservations. Unsold stock stays in the seller's
+saved inventory throughout.
+
+Protocol evidence comes from the original 1453 capture and client receivers
+`006C5670` and `006C6530`, with the supplied `GameServer/MerchantHandler.cpp`
+as reference. Native `68/3` adds an item with the item ID, quantity, unit
+price, relative bag slot and listing slot. Its request ends at the listing
+slot. Normal stalls show the first four item icons over the character.
+
 ## Parties
 
 Use the client's party controls to invite by player name. Native0x2F supports

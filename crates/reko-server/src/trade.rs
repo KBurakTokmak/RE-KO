@@ -8,7 +8,7 @@ use crate::{
 use rusqlite::{Connection, params};
 
 const GOLD: u32 = 900000000;
-const COIN_MAX: u32 = 2100000000;
+pub(crate) const COIN_MAX: u32 = 2100000000;
 #[derive(Clone)]
 struct Line {
     slot: usize,
@@ -120,7 +120,7 @@ pub(crate) fn before_action(h: &mut Hub, id: u16, opcode: u8) {
         );
     }
 }
-fn tradable(c: &combat::Catalog, id: u32) -> anyhow::Result<bool> {
+pub(crate) fn tradable(c: &combat::Catalog, id: u32) -> anyhow::Result<bool> {
     let (r, e) = c
         .item(id)
         .ok_or_else(|| anyhow::anyhow!("Unknown trade item"))?;
@@ -130,7 +130,7 @@ fn tradable(c: &combat::Catalog, id: u32) -> anyhow::Result<bool> {
     );
     Ok(matches!(combat::integer(r, 23), 1 | 3))
 }
-fn stack_limit(c: &combat::Catalog, id: u32) -> u16 {
+pub(crate) fn stack_limit(c: &combat::Catalog, id: u32) -> u16 {
     if c.item(id).is_some_and(|(r, _)| combat::integer(r, 23) == 3) {
         500
     } else {
@@ -398,7 +398,12 @@ pub(crate) fn process(lobby: &Lobby, id: u16, payload: &[u8]) {
     }
     if op == 1 && (payload.len() == 4 || payload.len() == 5 && payload[4] == 1) {
         let other = u16::from_le_bytes([payload[2], payload[3]]);
-        if id == other || busy(&h, id) || busy(&h, other) || !available(&h, [id, other]) {
+        if id == other
+            || busy(&h, id)
+            || busy(&h, other)
+            || crate::merchant::busy(&h, other)
+            || !available(&h, [id, other])
+        {
             if key(&h, id).is_none() {
                 h.send(id, vec![0x30, 8]);
             }

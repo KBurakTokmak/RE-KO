@@ -15,6 +15,8 @@ pub(crate) struct Player {
 pub(crate) struct Hub {
     pub players: HashMap<u16, Player>,
     pub exchanges: HashMap<u16, crate::trade::Exchange>,
+    pub stalls: HashMap<u16, crate::merchant::Stall>,
+    pub merchant_views: HashMap<u16, u16>,
     pub parties: HashMap<u16, Vec<u16>>,
     pub party_invites: HashMap<u16, (u16, u64)>,
     pub clan_invites: HashMap<u16, (u16, u16, u64)>,
@@ -92,6 +94,7 @@ impl Hub {
     }
 
     pub fn reset_view(&mut self, id: u16) {
+        crate::merchant::close(self, id);
         if let Some(old) = self.visible.remove(&id) {
             for other in old {
                 let mut p = vec![7, 2];
@@ -152,6 +155,7 @@ impl Hub {
     }
     pub fn disconnect(&mut self, id: u16) {
         crate::trade::cancel(self, id, "Trade cancelled: player disconnected.");
+        crate::merchant::close(self, id);
         self.notifiers.remove(&id);
         self.targets
             .retain(|viewer, target| *viewer != id && *target != id);
@@ -194,6 +198,7 @@ impl Hub {
             },
         );
         crate::trade::maintain(self, id);
+        crate::merchant::maintain(self, id);
         let ids: Vec<_> = self.players.keys().copied().collect();
         for viewer in ids {
             let now: HashSet<_> = self
@@ -241,7 +246,11 @@ impl Hub {
                     self.send(viewer, p);
                     let p = self.user_in(id);
                     self.send(viewer, p);
+                    crate::merchant::show_region(self, viewer, std::iter::once(id));
                 }
+            }
+            if old != now {
+                crate::merchant::show_region(self, viewer, now.difference(&old).copied());
             }
         }
         if let Some(prior) = prior {
