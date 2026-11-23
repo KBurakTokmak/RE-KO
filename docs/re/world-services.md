@@ -63,6 +63,10 @@ AIServer scheduling. Native-interpolation regression covers walk/run speeds,
 arrival, basic-melee visual distance and no overshoot beyond packet rounding.
 Player observations use the validated forecast's elapsed current point rather
 than making monsters chase a position up to1.5seconds in the future.
+Monster melee reach includes at most half a coordinate cell diagonally
+(about 0.071 m). This lets a creature attack when its final rounded chase
+step stops just outside the nominal range, as observed with Apes at 2.138 m
+from a 2.10 m target.
 
 Movement1/2 performs bounded idle roaming;0/4 do not. Terrain pathfinding,
 movement3 patrol, family assistance and monster spells remain incomplete.

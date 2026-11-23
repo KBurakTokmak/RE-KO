@@ -416,7 +416,10 @@ impl Brain {
                     1.0f32.min(rule.range)
                 } + bulk;
                 let dist = distance(mob.position, target.position);
-                if dist > reach && s.move_type != 4 {
+                // Positions round to 0.1 m per axis. The final diagonal step
+                // can land just outside reach with no further representable move.
+                let in_reach = dist <= reach + std::f32::consts::FRAC_1_SQRT_2 / 10.0;
+                if !in_reach && s.move_type != 4 {
                     if let Some(e) = move_toward(
                         mob,
                         target.position,
@@ -426,7 +429,7 @@ impl Brain {
                     ) {
                         events.push(e);
                     }
-                } else if dist <= reach && now >= agent.next_attack {
+                } else if in_reach && now >= agent.next_attack {
                     agent.next_attack = now.saturating_add(rule.delay.max(1));
                     let percent = mob
                         .modifiers
@@ -1158,6 +1161,39 @@ mod tests {
         mob.damage_by.clear();
         brain.tick(&mut mobs.mobs, 3000);
         assert_eq!(brain.agents[&12000].home, respawn);
+        brain.take(1);
+        let size = f32::from(mobs.mobs[&12000].definition.as_ref().unwrap().size);
+        let rule = brain.rules.get_mut(&100).unwrap();
+        rule.direct = 0;
+        rule.bulk = 110.0 / size;
+        player.position = Position {
+            x: respawn.x + 21,
+            z: respawn.z + 4,
+            ..respawn
+        };
+        player.at = 3250;
+        brain.players.insert(1, player.clone());
+        mobs.mobs
+            .get_mut(&12000)
+            .unwrap()
+            .damage_by
+            .insert(player.name.clone(), 1);
+        brain.tick(&mut mobs.mobs, 3250);
+        assert_eq!(mobs.mobs[&12000].position, respawn);
+        assert_eq!(
+            brain.take(1).len(),
+            1,
+            "the final rounded diagonal step must allow a strike"
+        );
+
+        player.position.x += 1;
+        player.at = 4250;
+        brain.players.insert(1, player.clone());
+        brain.tick(&mut mobs.mobs, 4250);
+        assert!(
+            brain.take(1).is_empty(),
+            "a player beyond rounding tolerance still requires chase movement"
+        );
         brain.remove(1);
         assert!(!brain.players.contains_key(&1));
     }
