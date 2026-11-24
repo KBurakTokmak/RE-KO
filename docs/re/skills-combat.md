@@ -150,11 +150,13 @@ has party moral4 in the original table; the supported path affects the caster
 PUS targets are refused. Unimplemented categories/services still fail without
 charging; this is not blanket support for every Power-Up Store product.
 
-Active buffs restore at login and after the native zone-load completion27/2,
-matching supplied1453 CharacterMovementHandler.cpp::RecvZoneChange calling
-InitType4/RecastSavedMagic after ZoneChangeLoaded.
-The client receives its current attributes/vitals and each unexpired effect with
-remaining seconds from the original persisted deadline. This does not consume
+Cross-zone travel clears ordinary skill buffs, curses and periodic effects in
+the same transaction as the new position. Item-backed Type4 buffs and supported
+scroll transformations retain their original deadlines. Same-zone teleports
+leave effects alone. Supplied1453 `CharacterMovementHandler.cpp::ZoneChange`
+clears Type3/Type4, and `RecvZoneChange` recasts saved magic after loading.
+At native zone-load completion27/2, the client receives its current
+attributes/vitals and the remaining seconds of eligible effects. This does not consume
 another scroll, restart its duration/cooldown, heal/refill resources or change
 ordinary recast exclusion. The transformation/visibility refresh retains existing
 zone restrictions. Restore occurs after loading, not at the earlier27/1 stage

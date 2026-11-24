@@ -70,7 +70,14 @@ pub(crate) fn tick(
     if now >= deadline {
         let db = lobby.db.lock().unwrap();
         let position = home(&db, s.character.nation())?;
-        crate::movement::save(&db, account, s.character.slot, position)?;
+        crate::travel::save_destination(
+            &db,
+            account,
+            s.character.slot,
+            s.position.zone,
+            position,
+            lobby.skills.as_ref(),
+        )?;
         drop(db);
         return Ok(vec![crate::travel::begin(lobby, s, position)]);
     }

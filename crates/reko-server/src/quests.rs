@@ -188,7 +188,11 @@ pub(crate) fn cancel_at(
     account: &str,
     slot: u8,
     quest: u16,
-    destination: Option<crate::movement::Position>,
+    destination: Option<(
+        u8,
+        crate::movement::Position,
+        Option<&crate::skills::Catalog>,
+    )>,
 ) -> rusqlite::Result<()> {
     let tx = db.unchecked_transaction()?;
     let state = tx
@@ -207,8 +211,8 @@ pub(crate) fn cancel_at(
     if monster && matches!(state, 1 | 3) {
         reset_counts(&tx, account, slot, quest)?;
     }
-    if let Some(position) = destination {
-        crate::movement::save(&tx, account, slot, position)?;
+    if let Some((source_zone, position, catalog)) = destination {
+        crate::travel::save_destination(&tx, account, slot, source_zone, position, catalog)?;
     }
     tx.commit()
 }

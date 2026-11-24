@@ -113,11 +113,25 @@ fn start(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8
         }
         let membership = clans::load(&tx, &player.account, player.s.character.slot)?;
         if membership.id == info.id {
-            crate::movement::save(&tx, &player.account, player.s.character.slot, destination)?;
+            crate::travel::save_destination(
+                &tx,
+                &player.account,
+                player.s.character.slot,
+                player.s.position.zone,
+                destination,
+                lobby.skills.as_ref(),
+            )?;
             targets.push(id);
         }
     }
-    crate::movement::save(&tx, account, s.character.slot, destination)?;
+    crate::travel::save_destination(
+        &tx,
+        account,
+        s.character.slot,
+        s.position.zone,
+        destination,
+        lobby.skills.as_ref(),
+    )?;
     tx.commit()?;
     for id in targets {
         hub.transfers.insert(id, destination);
@@ -168,7 +182,14 @@ fn home(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8>
             .ok_or_else(|| anyhow::anyhow!("Invalid home coordinates."))?,
         y: 0,
     };
-    crate::movement::save(&db, account, s.character.slot, destination)?;
+    crate::travel::save_destination(
+        &db,
+        account,
+        s.character.slot,
+        s.position.zone,
+        destination,
+        lobby.skills.as_ref(),
+    )?;
     drop(db);
     Ok(crate::travel::begin(lobby, s, destination))
 }

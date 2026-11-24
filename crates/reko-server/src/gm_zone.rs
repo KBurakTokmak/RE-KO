@@ -158,11 +158,13 @@ pub(crate) async fn handle(
     })();
     let notices = match result {
         Ok((Some(position), _)) => {
-            let save = movement::save(
+            let save = travel::save_destination(
                 &lobby.db.lock().unwrap(),
                 account,
                 s.character.slot,
+                s.position.zone,
                 position,
+                lobby.skills.as_ref(),
             );
             match save {
                 Ok(()) => {

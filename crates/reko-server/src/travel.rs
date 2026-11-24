@@ -1,6 +1,6 @@
 //! Map-object gate lists and the native zone-loading handshake.
-use crate::{lobby::Lobby, movement, world_entry::Session};
-use rusqlite::params;
+use crate::{lobby::Lobby, movement, skills, world_entry::Session};
+use rusqlite::{Connection, params};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
@@ -190,7 +190,14 @@ fn select(
         )? == 1,
         "wallet missing"
     );
-    movement::save(&tx, account, s.character.slot, position)?;
+    save_destination(
+        &tx,
+        account,
+        s.character.slot,
+        s.position.zone,
+        position,
+        lobby.skills.as_ref(),
+    )?;
     tx.commit()?;
     tracing::info!(
         account,
@@ -202,6 +209,61 @@ fn select(
     );
     s.coins = coins - w.coins;
     Ok((begin(lobby, s, position), w.coins))
+}
+
+fn clear_zone_effects(state: &mut skills::State, catalog: Option<&skills::Catalog>) {
+    let now = skills::now_ms();
+    state.buffs.retain(|kind, buff| {
+        now < buff.until
+            && (*kind == crate::transformation::CATEGORY
+                || catalog.map_or(buff.skill > 500000, |catalog| {
+                    catalog.spells.get(&buff.skill).is_some_and(|spell| {
+                        spell.skill_group == 0 && spell.use_item != 0 && spell.types == [4, 0]
+                    })
+                }))
+    });
+    state.periodic.clear();
+}
+
+pub(crate) fn save_destination(
+    db: &Connection,
+    account: &str,
+    slot: u8,
+    source_zone: u8,
+    position: movement::Position,
+    catalog: Option<&skills::Catalog>,
+) -> rusqlite::Result<()> {
+    if source_zone == position.zone {
+        return movement::save(db, account, slot, position);
+    }
+    // A disconnect during loading must not restore effects from the previous map.
+    let transaction = db
+        .is_autocommit()
+        .then(|| db.unchecked_transaction())
+        .transpose()?;
+    let mut state = skills::load(db, account, slot)?;
+    clear_zone_effects(&mut state, catalog);
+    skills::save_in(db, account, slot, &state)?;
+    movement::save(db, account, slot, position)?;
+    if let Some(transaction) = transaction {
+        transaction.commit()?;
+    }
+    Ok(())
+}
+
+fn finish_effects(lobby: &Lobby, account: &str, s: &mut Session) -> rusqlite::Result<()> {
+    let db = lobby.db.lock().unwrap();
+    let mut state = skills::load(&db, account, s.character.slot)?;
+    clear_zone_effects(&mut state, lobby.skills.as_ref());
+    let stats = crate::utility::effective(s, &state, lobby.skills.as_ref(), lobby.combat.as_ref());
+    state.max_hp = stats.hp;
+    state.max_mana = stats.mp;
+    state.hp = state.hp.min(state.max_hp);
+    state.mana = state.mana.min(state.max_mana);
+    skills::save(&db, account, s.character.slot, &state)?;
+    s.skills = state;
+    s.combat = stats;
+    Ok(())
 }
 
 pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position) -> Vec<u8> {
@@ -219,6 +281,9 @@ pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position
         hub.reset_view(s.player_id);
     }
     s.suppression_notice = None;
+    if !same_zone {
+        clear_zone_effects(&mut s.skills, lobby.skills.as_ref());
+    }
     if !same_zone
         && (s.transformation_visual != 1
             || s.skills
@@ -380,11 +445,13 @@ pub(crate) async fn movement_event(
 ) -> bool {
     let result = movement_destination(lobby, s, from).and_then(|position| {
         if let Some(position) = position {
-            movement::save(
+            save_destination(
                 &lobby.db.lock().unwrap(),
                 account,
                 s.character.slot,
+                from.zone,
                 position,
+                lobby.skills.as_ref(),
             )?;
         }
         Ok(position)
@@ -429,6 +496,10 @@ pub(crate) async fn handle(
         Some(0x4b) => select(lobby, account, s, p),
         Some(0x27) if s.zone_loading && p == [0x27, 1] => Ok((vec![0x27, 2], 0)),
         Some(0x27) if s.zone_loading && p == [0x27, 2] => {
+            if let Err(error) = finish_effects(lobby, account, s) {
+                tracing::error!(%peer, %error, "zone effect refresh failed");
+                return;
+            }
             s.zone_loading = false;
             s.entered = true;
             crate::utility::restore_after_zone(sock, peer, lobby, account, s).await;

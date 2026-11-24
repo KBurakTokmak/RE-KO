@@ -719,7 +719,9 @@ fn execute(
                 let mut st=state.borrow_mut();
                 if st.travel.is_some() {return Err(mlua::Error::runtime("Abyss travel already selected"));}
                 for player in &party {
-                    crate::movement::save(&tx,&player.account,player.s.character.slot,destination).map_err(mlua::Error::external)?;
+                    if player.s.player_id != s.player_id {
+                        crate::travel::save_destination(&tx,&player.account,player.s.character.slot,player.s.position.zone,destination,lobby.skills.as_ref()).map_err(mlua::Error::external)?;
+                    }
                 }
                 st.travel=Some(destination);
                 *party_travel.borrow_mut()=Some(destination);
@@ -1070,9 +1072,6 @@ fn execute(
     for (quest, status) in &result.quests {
         tx.execute("INSERT INTO character_quests VALUES (?1,?2,?3,?4) ON CONFLICT(account,slot,quest) DO UPDATE SET state=excluded.state",params![account,s.character.slot,quest,status])?;
     }
-    if let Some(position) = result.travel {
-        crate::movement::save(&tx, account, s.character.slot, position)?;
-    }
     if result.rewards != before.3 {
         result.rewards.save(&tx, account, s.character.slot)?;
     }
@@ -1100,6 +1099,16 @@ fn execute(
         }
         crate::skills::save_in(&tx, account, s.character.slot, &next.skills)?;
         result.level_state = Some((next.base_combat, next.combat, next.skills));
+    }
+    if let Some(position) = result.travel {
+        crate::travel::save_destination(
+            &tx,
+            account,
+            s.character.slot,
+            s.position.zone,
+            position,
+            lobby.skills.as_ref(),
+        )?;
     }
     tx.commit()?;
     if let Some(hub) = abyss_hub.as_mut() {
@@ -1192,7 +1201,13 @@ pub(crate) async fn handle(
                 None
             };
             if destination.is_some() {
-                crate::quests::cancel_at(&db, account, s.character.slot, h.flag, destination)?;
+                crate::quests::cancel_at(
+                    &db,
+                    account,
+                    s.character.slot,
+                    h.flag,
+                    destination.map(|position| (s.position.zone, position, lobby.skills.as_ref())),
+                )?;
             } else {
                 crate::quests::cancel(&db, account, s.character.slot, h.flag)?;
             }

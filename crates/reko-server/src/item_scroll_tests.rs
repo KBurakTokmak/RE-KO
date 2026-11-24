@@ -167,7 +167,7 @@ async fn magic_hammer_repairs_equipped_items_and_consumes_one_use_atomically() {
 }
 
 #[tokio::test]
-async fn zone_loading_restores_pus_buffs_with_remaining_time_without_recharging_or_consuming() {
+async fn cross_zone_loading_only_restores_scroll_buffs_with_their_original_deadlines() {
     let Some((lobby, mut s, mut sock, mut client, peer)) = setup().await else {
         return;
     };
@@ -180,8 +180,24 @@ async fn zone_loading_restores_pus_buffs_with_remaining_time_without_recharging_
     }
     let now = skills::now_ms();
     s.skills.buffs.get_mut(&6).unwrap().until = now + 25 * 60 * 1000;
+    s.skills.buffs.insert(
+        4,
+        skills::Buff {
+            skill: 108030,
+            until: now + 60_000,
+        },
+    );
+    s.skills.periodic.insert(
+        112575,
+        skills::Periodic {
+            amount: 30,
+            next: now + 2000,
+            until: now + 60_000,
+        },
+    );
     skills::save(&lobby.db.lock().unwrap(), "test", 0, &s.skills).unwrap();
-    let before = s.skills.buffs.clone();
+    let mut before = s.skills.buffs.clone();
+    before.remove(&4);
     let cooldowns = s.skills.cooldowns.clone();
     let inventory = s.inventory;
     let limits = (
@@ -196,7 +212,39 @@ async fn zone_loading_restores_pus_buffs_with_remaining_time_without_recharging_
         z: 16100,
         y: 0,
     };
-    crate::movement::save(&lobby.db.lock().unwrap(), "test", 0, position).unwrap();
+    let same_zone = crate::movement::Position {
+        x: s.position.x + 10,
+        ..s.position
+    };
+    {
+        let db = lobby.db.lock().unwrap();
+        let save = |position| {
+            crate::travel::save_destination(
+                &db,
+                "test",
+                0,
+                same_zone.zone,
+                position,
+                lobby.skills.as_ref(),
+            )
+        };
+        save(same_zone).unwrap();
+        let saved = skills::load(&db, "test", 0).unwrap();
+        assert!(saved.buffs.contains_key(&4) && saved.periodic.contains_key(&112575));
+        db.execute_batch(
+            "CREATE TRIGGER reject_zone BEFORE UPDATE ON character_positions
+            WHEN NEW.zone <> OLD.zone BEGIN SELECT RAISE(ABORT, 'test rollback'); END;",
+        )
+        .unwrap();
+        assert!(save(position).is_err());
+        assert!(skills::load(&db, "test", 0).unwrap().buffs.contains_key(&4));
+        db.execute_batch("DROP TRIGGER reject_zone").unwrap();
+        save(position).unwrap();
+        let saved = skills::load(&db, "test", 0).unwrap();
+        assert!(!saved.buffs.contains_key(&4) && saved.periodic.is_empty());
+    }
+    assert_eq!(crate::travel::begin(&lobby, &mut s, same_zone)[0], 0x1e);
+    assert!(s.skills.buffs.contains_key(&4) && s.skills.periodic.contains_key(&112575));
     let begin = crate::travel::begin(&lobby, &mut s, position);
     assert_eq!(&begin[..4], &[0x27, 3, 1, 0]);
     crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 1]).await;
@@ -209,6 +257,12 @@ async fn zone_loading_restores_pus_buffs_with_remaining_time_without_recharging_
     crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 2]).await;
     let packets = drain(&mut client).await;
     assert!(s.entered && !s.zone_loading);
+    assert!(!s.skills.buffs.contains_key(&4) && s.skills.periodic.is_empty());
+    assert!(
+        !packets
+            .iter()
+            .any(|p| p.starts_with(&skills::effect(108030, s.player_id)[..6]))
+    );
     for id in [500035, 500033, 500030] {
         assert_eq!(
             packets
