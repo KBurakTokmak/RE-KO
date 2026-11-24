@@ -128,7 +128,13 @@ mod tests {
             count: 1,
         };
         let actual = catalog
-            .calculate_bonuses(&character, &progress, &gear, [1, 2, 3, 4, 5])
+            .calculate_bonuses(
+                &character,
+                &progress,
+                &gear,
+                [1, 2, 3, 4, 5],
+                Enchantments::default(),
+            )
             .unwrap();
         assert_eq!(actual.bonus_stats, [11, 22, 33, 44, 55]);
         character.stats = [71, 82, 93, 104, 115];
@@ -207,7 +213,13 @@ mod tests {
         assert!(two_rings.attack > one_ring.attack && one_ring.attack > stats.attack);
         assert!(two_rings.hit_rate > one_ring.hit_rate);
         let buffed = catalog
-            .calculate_bonuses(&character, &progress, &gear, [0, 0, 15, 0, 0])
+            .calculate_bonuses(
+                &character,
+                &progress,
+                &gear,
+                [0, 0, 15, 0, 0],
+                Enchantments::default(),
+            )
             .unwrap();
         assert_eq!(buffed.bonus_stats[2], 31);
         assert!(buffed.attack > two_rings.attack);
@@ -280,6 +292,12 @@ impl Default for Stats {
             bonus_stats: [0; 5],
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Enchantments {
+    pub weapon_damage: i32,
+    pub armor: i32,
 }
 
 pub(crate) struct Catalog {
@@ -528,7 +546,7 @@ impl Catalog {
         progress: &Progress,
         gear: &[Item; 14],
     ) -> anyhow::Result<Stats> {
-        self.calculate_bonuses(character, progress, gear, [0; 5])
+        self.calculate_bonuses(character, progress, gear, [0; 5], Enchantments::default())
     }
 
     pub fn calculate_bonuses(
@@ -537,6 +555,7 @@ impl Catalog {
         progress: &Progress,
         gear: &[Item; 14],
         mut bonuses: [u16; 5],
+        enchantments: Enchantments,
     ) -> anyhow::Result<Stats> {
         let c = self
             .coefficients
@@ -571,7 +590,7 @@ impl Catalog {
         let rogue = matches!(character.class % 100, 2 | 7 | 8);
         let mut damage = 0;
         let mut kind = 0;
-        let mut armor = 0;
+        let mut armor = enchantments.armor;
         let mut weight = 0;
         let mut delay_ms = 1100;
         let mut range = 2.0;
@@ -584,7 +603,9 @@ impl Catalog {
             let condition = if item.durability == 0 { 2 } else { 1 };
             armor += (integer(base, 22).max(0) + extra(14).max(0)) / condition;
             if matches!(slot, 6 | 8) {
-                let attack = (integer(base, 15).max(0) + extra(8).max(0)) / condition;
+                let attack =
+                    (integer(base, 15).max(0) + extra(8).max(0) + enchantments.weapon_damage)
+                        / condition;
                 let weapon_kind = integer(base, 10) as u8;
                 let bow = matches!(weapon_kind / 10, 7 | 8 | 10);
                 if slot == 6 || bow {

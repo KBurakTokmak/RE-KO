@@ -64,28 +64,38 @@ pub(crate) fn effective(
 ) -> combat::Stats {
     let mut result = session.base_combat;
     let mut bonuses = [0; 5];
-    if let Some(row) = state
-        .buffs
-        .get(&7)
-        .filter(|b| skills::now_ms() < b.until)
-        .and_then(|b| catalog.and_then(|c| c.effects.get(&(4, b.skill))))
-    {
+    let now = skills::now_ms();
+    let effect = |kind| {
+        state
+            .buffs
+            .get(&kind)
+            .filter(|b| now < b.until)
+            .and_then(|b| catalog.and_then(|c| c.effects.get(&(4, b.skill))))
+    };
+    let stats_buff = effect(7);
+    let enchantments = combat::Enchantments {
+        weapon_damage: effect(13).map_or(0, |row| combat::integer(row, 8).max(0)),
+        armor: effect(14).map_or(0, |row| combat::integer(row, 6).max(0)),
+    };
+    if let Some(row) = stats_buff {
         for (value, col) in bonuses.iter_mut().zip(14..19) {
             *value = combat::integer(row, col).max(0) as u16;
         }
-        if let Some(items) = items
-            && let Ok(mut stats) = items.calculate_bonuses(
-                &session.character,
-                &session.progress,
-                &session.equipment,
-                bonuses,
-            )
-        {
-            stats.weight = stats
-                .weight
-                .saturating_add(items.bag_weight(&session.inventory));
-            result = stats;
-        }
+    }
+    if (stats_buff.is_some() || enchantments.weapon_damage != 0 || enchantments.armor != 0)
+        && let Some(items) = items
+        && let Ok(mut stats) = items.calculate_bonuses(
+            &session.character,
+            &session.progress,
+            &session.equipment,
+            bonuses,
+            enchantments,
+        )
+    {
+        stats.weight = stats
+            .weight
+            .saturating_add(items.bag_weight(&session.inventory));
+        result = stats;
     }
     crate::costumes::apply(&mut result, &session.costumes);
     if session.character.class % 100 == 8
@@ -558,7 +568,7 @@ pub(crate) async fn handle(
         || cure.is_some()
         || category.is_some_and(|kind| {
             matches!(kind, 1 | 2 | 4 | 5 | 7 | 8 | 10 | 18 | 19 | 23 | 28 | 31)
-                || kind == 6 && spell.skill_group == 0
+                || matches!(kind, 6 | 13 | 14) && spell.skill_group == 0
                 || kind == 25
                     && matches!(session.character.class % 100, 3 | 9 | 10)
                     && (5..=7).contains(&(spell.skill_group % 10))

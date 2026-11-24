@@ -502,6 +502,7 @@ pub(crate) async fn handle(
             }
             s.zone_loading = false;
             s.entered = true;
+            super::send_response(sock, peer, &None, &s.zone_ability(), "ZONE_ABILITY").await;
             crate::utility::restore_after_zone(sock, peer, lobby, account, s).await;
             crate::population::refresh(sock, peer, lobby, s).await;
             if let Some(world) = &lobby.monsters {

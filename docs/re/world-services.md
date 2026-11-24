@@ -343,6 +343,13 @@ appearance/location remain intact; only its runtime service kind/group is adapte
 
 ### Town and zone gates
 
+Login and cross-zone loading send the destination's native zone ability
+packet `5E/1`. Moradon uses neutral NPCs and permits cross-nation trade and
+chat. The client can select an opposite-nation NPC without opening its service
+if it still has the previous map's hostility setting. The server refreshes
+this setting before sending the destination's NPCs. The ability flags follow
+the supplied1453 `SetZoneAbilityChange` and map rules.
+
 Town via menu and `/town` share source eligibility and persisted travel.
 Clickable nation gates use historical SMD warp data; Eslant walkthrough triggers
 combine source EVENT actions with terrain tiles. Test movement crossing a trigger

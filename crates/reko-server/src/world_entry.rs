@@ -134,12 +134,19 @@ impl Session {
         packet
     }
 
-    pub fn zone_ability(&self) -> Option<[u8; 7]> {
-        match self.position.zone {
-            21 => Some([0x5e, 1, 1, 0, 1, 10, 0]),
-            // TODO(re): Load trade, hostility and tariff rules for other zones.
-            _ => None,
-        }
+    pub fn zone_ability(&self) -> [u8; 7] {
+        // The client retains these flags until the server explicitly replaces them.
+        let [trade, hostility, talk, tariff] = match self.position.zone {
+            21 => [1, 0, 1, 10],                    // Moradon
+            30 => [1, 6, 1, 0],                     // Delos with siege disabled
+            31 | 87 | 92 => [0, 8, 0, 0],           // PvP with neutral NPCs
+            32..=34 | 75 | 93 | 94 => [0, 8, 1, 0], // Abyss and neutral-NPC war zones
+            48 => [0, 0, 1, 0],                     // Arena
+            51..=53 | 55 => [1, 0, 1, 0],           // Neutral arenas and Forgotten Temple
+            54 => [0, 7, 1, 0],                     // Caitharos Arena
+            _ => [0, 1, 0, 0],
+        };
+        [0x5e, 1, trade, hostility, talk, tariff, 0]
     }
 
     pub fn my_info(&self, bootstrap: &Bootstrap) -> Vec<u8> {

@@ -150,6 +150,13 @@ has party moral4 in the original table; the supported path affects the caster
 PUS targets are refused. Unimplemented categories/services still fail without
 charging; this is not blanket support for every Power-Up Store product.
 
+Weapon Enchant Scroll skills 500049/500051 and Armor Enchant Scroll skills
+500050/500052 use native Type4 categories 13 and 14. Both last 1800 seconds.
+The client tables add 5 damage to equipped weapons and 30 armor before the
+normal attack and defence formulas. The two enchantments have separate
+categories and can coexist with attack and defence buffs. Ordinary stacks
+consume one item, and charged packs consume one use.
+
 Cross-zone travel clears ordinary skill buffs, curses and periodic effects in
 the same transaction as the new position. Item-backed Type4 buffs and supported
 scroll transformations retain their original deadlines. Same-zone teleports

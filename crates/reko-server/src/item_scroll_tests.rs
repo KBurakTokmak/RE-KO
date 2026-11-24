@@ -257,6 +257,7 @@ async fn cross_zone_loading_only_restores_scroll_buffs_with_their_original_deadl
     crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 2]).await;
     let packets = drain(&mut client).await;
     assert!(s.entered && !s.zone_loading);
+    assert_eq!(packets[0], [0x5e, 1, 0, 1, 0, 0, 0]);
     assert!(!s.skills.buffs.contains_key(&4) && s.skills.periodic.is_empty());
     assert!(
         !packets
@@ -301,6 +302,80 @@ async fn cross_zone_loading_only_restores_scroll_buffs_with_their_original_deadl
         assert_eq!(
             (saved.buffs[&category].skill, saved.buffs[&category].until),
             (buff.skill, buff.until)
+        );
+    }
+    let moradon = crate::movement::Position {
+        zone: 21,
+        ..s.position
+    };
+    crate::travel::save_destination(
+        &lobby.db.lock().unwrap(),
+        "test",
+        0,
+        1,
+        moradon,
+        lobby.skills.as_ref(),
+    )
+    .unwrap();
+    crate::travel::begin(&lobby, &mut s, moradon);
+    crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 1]).await;
+    assert_eq!(drain(&mut client).await, [vec![0x27, 2]]);
+    crate::travel::handle(&mut sock, peer, &lobby, "test", &mut s, &[0x27, 2]).await;
+    assert_eq!(drain(&mut client).await[0], [0x5e, 1, 1, 0, 1, 10, 0]);
+}
+
+#[tokio::test]
+async fn enchant_scroll_variants_apply_equipment_bonuses_and_consume_one_use() {
+    let Some((lobby, mut s, mut sock, mut client, peer)) = setup().await else {
+        return;
+    };
+    s.equipment[6] = starter::Item {
+        id: 110110001,
+        durability: 4000,
+        count: 1,
+    };
+    let items = lobby.combat.as_ref().unwrap();
+    let catalog = lobby.skills.as_ref().unwrap();
+    for (weapon, armor) in [(500049, 500050), (500051, 500052)] {
+        s.skills.buffs.clear();
+        skills::save(&lobby.db.lock().unwrap(), "test", 0, &s.skills).unwrap();
+        crate::durability::refresh(&mut s, items, Some(catalog));
+        let base = s.combat;
+        for (skill, kind) in [(weapon, 13), (armor, 14)] {
+            let item = catalog.spells[&skill].use_item;
+            give(&lobby, &mut s, item, 2);
+            let now = skills::now_ms();
+            let packets = cast(&lobby, &mut s, &mut sock, &mut client, peer, skill, 3).await;
+            assert!(!failed(&packets), "enchant skill {skill}: {packets:?}");
+            assert!(
+                packets
+                    .iter()
+                    .any(|packet| packet.starts_with(&skills::effect(skill, s.player_id)[..6]))
+            );
+            assert_eq!(uses(&lobby, &s), 1);
+            let buff = skills::load(&lobby.db.lock().unwrap(), "test", 0)
+                .unwrap()
+                .buffs[&kind];
+            assert_eq!(buff.skill, skill);
+            assert!((1_800_000..=1_805_000).contains(&(buff.until - now)));
+            assert!(failed(
+                &cast(&lobby, &mut s, &mut sock, &mut client, peer, skill, 3).await
+            ));
+            assert_eq!(uses(&lobby, &s), 1);
+        }
+        assert!(s.combat.attack > base.attack && s.combat.defence > base.defence);
+        let enchanted_defence = s.combat.defence;
+        s.skills.buffs.get_mut(&13).unwrap().until = 0;
+        utility::refresh(&mut s, Some(catalog), Some(items));
+        assert_eq!(
+            (s.combat.attack, s.combat.defence),
+            (base.attack, enchanted_defence)
+        );
+        s.skills.buffs.get_mut(&14).unwrap().until = 0;
+        utility::refresh(&mut s, Some(catalog), Some(items));
+        assert_eq!(
+            (s.combat.attack, s.combat.defence),
+            (base.attack, base.defence)
         );
     }
 }

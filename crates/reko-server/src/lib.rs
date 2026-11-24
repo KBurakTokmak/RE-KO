@@ -756,9 +756,7 @@ async fn handle_game_payload_inner(
             if first_entry {
                 session.next_regen = skills::now_ms() + 6000;
                 if let Some(account) = account {
-                    if let Some(packet) = session.zone_ability() {
-                        send_response(sock, peer, &None, &packet, "ZONE_ABILITY").await;
-                    }
+                    send_response(sock, peer, &None, &session.zone_ability(), "ZONE_ABILITY").await;
                     let packet = quests::snapshot(
                         &lobby.db.lock().unwrap(),
                         account,
