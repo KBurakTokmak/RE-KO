@@ -27,6 +27,7 @@ mod costumes;
 pub mod crypto;
 pub mod database;
 mod durability;
+mod environment;
 mod framing;
 mod friendly;
 mod gm_spawn;
@@ -791,6 +792,7 @@ async fn handle_game_payload_inner(
                 magic::visibility(lobby, session, true);
             }
             if first_entry {
+                environment::sync(sock, peer, lobby, session, true, chrono::Local::now).await;
                 population::refresh(sock, peer, lobby, session).await;
             }
             tracing::info!(%peer, name = %session.character.name, "world bootstrap acknowledged; awaiting client follow-up");
@@ -1607,6 +1609,7 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                 if let (Some(session), Some(account)) = (world.as_mut().filter(|s| s.entered), lease.as_ref().map(lobby::AccountLease::name)) {
                     clan_promotion::transfer(&mut sock,peer,&lobby,session).await;
                     if !session.entered { continue; }
+                    environment::sync(&mut sock,peer,&lobby,session,false, chrono::Local::now).await;
                     let packets=visuals::capture(tick_character(&mut sock,peer,&lobby,account,session,skills::now_ms())).await;
                     social::synchronize(&lobby,account,session);
                     visuals::publish(&lobby,session,packets);
@@ -2131,6 +2134,10 @@ mod tests {
         assert_eq!(receive(&mut client).await, [0x5e, 1, 1, 0, 1, 10, 0]);
         assert_eq!(receive(&mut client).await, [0x64, 1, 1, 0, 0xf4, 1, 2]);
         assert_eq!(receive(&mut client).await, [0x64, 9, 1, 0, 0, 0, 0, 0, 0]);
+        let time = receive(&mut client).await;
+        assert_eq!((time[0], time.len()), (0x13, 11));
+        let weather = receive(&mut client).await;
+        assert_eq!((weather[0], weather.len()), (0x14, 4));
         assert_eq!(exchange(&mut client, &start).await, [0x0D]);
         assert_eq!(exchange(&mut client, &[0x6B]).await, [0x6B, 0, 0]);
         let normal = exchange(&mut client, b"\x10\x01\x04\x00test").await;

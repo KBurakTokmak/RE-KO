@@ -14,6 +14,7 @@ struct PendingLogin {
 
 pub(crate) struct Lobby {
     pub advertised_ip: Option<std::net::Ipv4Addr>,
+    pub sky: Mutex<crate::environment::Sky>,
     pub social: Arc<Mutex<super::social::Hub>>,
     pub merchants: Vec<super::shops::Merchant>,
     pub db: Mutex<Connection>,
@@ -55,6 +56,7 @@ impl Lobby {
         super::database::initialize(&db)?;
         Ok(Self {
             advertised_ip: None,
+            sky: Mutex::default(),
             social: Arc::new(Mutex::new(super::social::Hub::default())),
             merchants: Vec::new(),
             db: Mutex::new(db),

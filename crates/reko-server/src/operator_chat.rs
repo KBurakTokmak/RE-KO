@@ -40,6 +40,15 @@ pub(crate) fn command(
     }
     let command = words.next().unwrap_or_default();
     let args = words.next().unwrap_or_default().trim_ascii();
+    if command.eq_ignore_ascii_case(b"weather") {
+        return Some(notice(
+            lobby
+                .sky
+                .lock()
+                .unwrap()
+                .set_weather(args, &chrono::Local::now()),
+        ));
+    }
     let mut hub = lobby.social.lock().unwrap();
     if command.eq_ignore_ascii_case(b"players") {
         return Some(players(&hub, args));
@@ -139,7 +148,7 @@ pub(crate) fn command(
 }
 
 fn usage() -> Vec<u8> {
-    notice(b"Use op players [page], op kick <character>, op announce <message>, op mute <character> <1-60 minutes>, or op unmute <character>.")
+    notice(b"Use op players [page], op kick <character>, op announce <message>, op mute <character> <1-60 minutes>, op unmute <character>, or op weather clear|rain|snow <0-100>.")
 }
 
 fn players(hub: &Hub, args: &[u8]) -> Vec<u8> {

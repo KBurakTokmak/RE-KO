@@ -43,6 +43,7 @@ impl Bootstrap {
 
 #[derive(Clone)]
 pub(crate) struct Session {
+    pub sky: crate::environment::View,
     pub transformation_visual: u32,
     pub autoloot: Option<u64>,
     pub suppression_notice: Option<(u8, u64, u64)>,
@@ -87,6 +88,7 @@ impl Session {
             return None;
         }
         Some(Self {
+            sky: Default::default(),
             transformation_visual: 1,
             autoloot: None,
             suppression_notice: None,
@@ -303,6 +305,7 @@ mod tests {
 
     fn session() -> Session {
         Session {
+            sky: Default::default(),
             transformation_visual: 1,
             autoloot: None,
             suppression_notice: None,

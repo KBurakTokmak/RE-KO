@@ -438,7 +438,7 @@ Supplementary2086 magic damage at00940640 uses charisma/186,
 230/(resistance+250),0.85base+0.30random, the charisma-above86 bonus and staff
 contribution0.8*staffDamage+trunc(staffDamage*level/60). Non-mages use reference
 magic power60. Do not claim these supplementary formulas prove untouched1453
-retail equivalence. Weather and full elemental equipment effects remain gaps.
+retail equivalence. The supplied server discards its weather damage adjustment. Full elemental equipment effects remain incomplete.
 
 Successful physical hits wear equipped non-shield weapons by
 trunc(sqrt(damage/10)), corroborated by Open-KO User::ItemWoreOut and2086.

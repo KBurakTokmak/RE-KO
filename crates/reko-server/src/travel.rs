@@ -503,6 +503,7 @@ pub(crate) async fn handle(
             s.zone_loading = false;
             s.entered = true;
             super::send_response(sock, peer, &None, &s.zone_ability(), "ZONE_ABILITY").await;
+            crate::environment::sync(sock, peer, lobby, s, true, chrono::Local::now).await;
             crate::utility::restore_after_zone(sock, peer, lobby, account, s).await;
             crate::population::refresh(sock, peer, lobby, s).await;
             if let Some(world) = &lobby.monsters {
@@ -866,6 +867,11 @@ mod tests {
         assert_eq!(reply, crate::frame_packet(&[0x27, 2]).as_slice());
         handle(&mut server, peer, &lobby, "test", &mut s, &[0x27, 2]).await;
         assert!(s.entered && !s.zone_loading);
+        assert_eq!(crate::tests::receive(&mut client).await, s.zone_ability());
+        let time = crate::tests::receive(&mut client).await;
+        assert_eq!((time[0], time.len()), (0x13, 11));
+        let weather = crate::tests::receive(&mut client).await;
+        assert_eq!((weather[0], weather.len()), (0x14, 4));
         s.position = movement::Position {
             zone: 21,
             x: 2820,

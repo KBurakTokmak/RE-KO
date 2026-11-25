@@ -1,5 +1,13 @@
 # World, inventory and NPC services
 
+## World clock and weather
+
+Login and completed zone transfers send the host’s local calendar and current sky. The client then advances its own sky clock. Loaded clients receive changed weather on a six-second check. Everyone shares one hourly roll. The supplied 1453 server rolls 0–100 inclusive, with 0–1 for snow, 2–6 for rain and the rest for clear skies. Clear weather keeps half of intensity above 70 and otherwise uses zero. Zones 32, 33 and 48 receive clear weather with the global intensity. The client also forces clear skies in zone 31.
+
+Native 1453 dispatch at 0069C086 reads five little-endian shorts for time. The weather reader at 006A3C20 takes a kind byte and intensity short. Open-KO corroborates both in GameProcMain.cpp. The server policy follows the supplied GameServerDlg.cpp UpdateGameTime and UpdateWeather. MagicInstance.cpp discards the return value of GetWeatherDamage, so the forecast has no combat modifier.
+
+For LAN testing, an administrator can type `op weather rain 60`, `op weather snow 60` or `op weather clear 0` in All chat. The override lasts until the next local hour. Intensity accepts 0–100 and the client applies its own visual limits.
+
 ## Population, visibility and AI
 
 Offline imports use supplied1453 K_NPCPOS/K_NPC/K_MONSTER and original client

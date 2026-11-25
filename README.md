@@ -14,6 +14,7 @@ renderer/client and an in-process game host have not been implemented.
 - First-login password registration, password validation, permanent per-server
   nation selection, character creation and persistent characters. One live game
   session per account.
+- Maps load with the server’s local time. Players share hourly weather with zone-specific skies.
 - Movement, sitting, location persistence, Town and zone gates, including
   walkthrough Eslant teleport triggers.
 - Inventory, equipment, buying/selling, repairs, account storage, normal anvil
