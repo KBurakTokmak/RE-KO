@@ -262,6 +262,35 @@ fn validated_movement_relays_speed_direction_and_unchanged_position_stop() {
     assert_eq!(i16::from_le_bytes([updates[0][9], updates[0][10]]), 90);
     assert_eq!(&updates[1][9..], &[0, 0, 0]);
 }
+
+#[test]
+fn durability_changes_do_not_reemit_user_in_out() {
+    let lobby = lobby();
+    let mut a = player(&lobby, "WearActor", 1, 80);
+    let b = player(&lobby, "WearObserver", 1, 80);
+    a.equipment[6] = crate::starter::Item {
+        id: 189101308,
+        durability: 1000,
+        count: 1,
+    };
+    synchronize(&lobby, "WearActor", &mut a);
+    lobby.social.lock().unwrap().queues.clear();
+
+    a.equipment[6].durability = 999;
+    synchronize(&lobby, "WearActor", &mut a);
+    let q = lobby.social.lock().unwrap().take_queue(b.player_id);
+    assert!(
+        !q.iter()
+            .any(|p| p.starts_with(&[7, 1]) || p.starts_with(&[7, 2])),
+        "durability wear must not emit USER_OUT/USER_IN"
+    );
+
+    a.equipment[6].id = 189111275;
+    synchronize(&lobby, "WearActor", &mut a);
+    let q = lobby.social.lock().unwrap().take_queue(b.player_id);
+    assert!(q.iter().any(|p| p.starts_with(&[7, 2])));
+    assert!(q.iter().any(|p| p.starts_with(&[7, 1])));
+}
 pub(crate) fn lobby() -> Lobby {
     Lobby::new(
         Connection::open_in_memory().unwrap(),

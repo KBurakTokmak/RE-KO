@@ -578,6 +578,20 @@ pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
         ALTER TABLE character_skill_state_v2 RENAME TO character_skill_state;
         COMMIT;")?;
     }
+    let mut buff_columns = db.prepare("PRAGMA table_info(character_buffs)")?;
+    let buff_names = buff_columns
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !buff_names.iter().any(|name| name == "paused") {
+        db.execute_batch(
+            "ALTER TABLE character_buffs ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !buff_names.iter().any(|name| name == "saved_at") {
+        db.execute_batch(
+            "ALTER TABLE character_buffs ADD COLUMN saved_at INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     Ok(())
 }
 
@@ -662,10 +676,107 @@ pub(crate) fn save_in(
         "DELETE FROM character_buffs WHERE account=?1 AND slot=?2",
         params![account, slot],
     )?;
+    let saved_at = now_ms();
     for (kind, buff) in &state.buffs {
-        db.execute("INSERT INTO character_buffs(account,slot,category,skill,buff_until) VALUES (?1,?2,?3,?4,?5)",params![account,slot,kind,buff.skill,buff.until])?;
+        db.execute(
+            "INSERT INTO character_buffs(account,slot,category,skill,buff_until,paused,saved_at) VALUES (?1,?2,?3,?4,?5,0,?6)",
+            params![account, slot, kind, buff.skill, buff.until, saved_at],
+        )?;
     }
     Ok(())
+}
+
+pub(crate) fn pause_scroll_buffs(
+    db: &Connection,
+    account: &str,
+    slot: u8,
+    catalog: Option<&Catalog>,
+    now: u64,
+) -> rusqlite::Result<()> {
+    let tx = db.unchecked_transaction()?;
+    let rows = {
+        let mut q = tx.prepare(
+            "SELECT category,skill,buff_until,paused FROM character_buffs WHERE account=?1 AND slot=?2",
+        )?;
+        q.query_map(params![account, slot], |r| {
+            Ok((
+                r.get::<_, u8>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, u64>(2)?,
+                r.get::<_, u8>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (category, skill, buff_until, paused) in rows {
+        if paused != 0 || !crate::travel::is_scroll_buff(skill, catalog) {
+            continue;
+        }
+        let remaining = buff_until.saturating_sub(now);
+        if remaining > 0 {
+            tx.execute(
+                "UPDATE character_buffs SET buff_until=?4,paused=1,saved_at=?5 WHERE account=?1 AND slot=?2 AND category=?3",
+                params![account, slot, category, remaining, now],
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM character_buffs WHERE account=?1 AND slot=?2 AND category=?3",
+                params![account, slot, category],
+            )?;
+        }
+    }
+    tx.commit()
+}
+
+pub(crate) fn resume_scroll_buffs(
+    db: &Connection,
+    account: &str,
+    slot: u8,
+    catalog: Option<&Catalog>,
+    now: u64,
+) -> rusqlite::Result<()> {
+    let tx = db.unchecked_transaction()?;
+    let rows = {
+        let mut q = tx.prepare(
+            "SELECT category,skill,buff_until,paused,saved_at FROM character_buffs WHERE account=?1 AND slot=?2",
+        )?;
+        q.query_map(params![account, slot], |r| {
+            Ok((
+                r.get::<_, u8>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, u64>(2)?,
+                r.get::<_, u8>(3)?,
+                r.get::<_, u64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (category, skill, buff_until, paused, saved_at) in rows {
+        if !crate::travel::is_scroll_buff(skill, catalog) {
+            continue;
+        }
+        let remaining = if paused != 0 {
+            Some(buff_until)
+        } else if saved_at > 0 && now > saved_at {
+            Some(buff_until.saturating_sub(saved_at))
+        } else {
+            None
+        };
+        if let Some(rem) = remaining {
+            if rem > 0 {
+                tx.execute(
+                    "UPDATE character_buffs SET buff_until=?4,paused=0,saved_at=?5 WHERE account=?1 AND slot=?2 AND category=?3",
+                    params![account, slot, category, now.saturating_add(rem), now],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM character_buffs WHERE account=?1 AND slot=?2 AND category=?3",
+                    params![account, slot, category],
+                )?;
+            }
+        }
+    }
+    tx.commit()
 }
 
 #[cfg(test)]
@@ -842,5 +953,67 @@ mod tests {
         state.hp = 100;
         state.mana = 20;
         assert_eq!(state.regenerate(60, 110, false), (0, 32));
+    }
+
+    #[test]
+    fn scroll_buffs_pause_across_logout_and_unclean_server_downtime() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::characters::initialize(&db).unwrap();
+        initialize(&db).unwrap();
+        let ch = crate::characters::Character {
+            slot: 0,
+            name: "ScrollPause".into(),
+            race: 2,
+            class: 108,
+            face: 0,
+            hair: 0,
+            stats: [60; 5],
+        };
+        let mut db_mut = db;
+        crate::characters::ensure_account(&db_mut, "acc").unwrap();
+        crate::characters::set_nation(&db_mut, "acc", 1).unwrap();
+        crate::characters::create(&mut db_mut, "acc", &ch).unwrap();
+        let db = db_mut;
+
+        let t0 = now_ms();
+        let twenty_mins = 20 * 60 * 1000;
+        let mut state = State::default();
+        state.buffs.insert(
+            6,
+            Buff {
+                skill: 500024,
+                until: t0 + twenty_mins,
+            },
+        );
+        state.buffs.insert(
+            1,
+            Buff {
+                skill: 108710,
+                until: t0 + 60_000,
+            },
+        );
+        save(&db, "acc", 0, &state).unwrap();
+
+        pause_scroll_buffs(&db, "acc", 0, None, t0).unwrap();
+        let week_later = t0 + 7 * 24 * 60 * 60 * 1000;
+        resume_scroll_buffs(&db, "acc", 0, None, week_later).unwrap();
+        let reloaded = load(&db, "acc", 0).unwrap();
+        assert_eq!(reloaded.buffs[&6].until, week_later + twenty_mins);
+        assert!(reloaded.buffs[&1].until < week_later);
+
+        // Unclean server shutdown recovery: unpaused scroll saved at saved_at resumes with remaining time.
+        let crash_save = load(&db, "acc", 0).unwrap();
+        let crash_now = now_ms();
+        let expected_rem = crash_save.buffs[&6].until.saturating_sub(crash_now);
+        save(&db, "acc", 0, &crash_save).unwrap();
+        let three_hours_later = crash_now + 3 * 60 * 60 * 1000;
+        resume_scroll_buffs(&db, "acc", 0, None, three_hours_later).unwrap();
+        let after_crash = load(&db, "acc", 0).unwrap();
+        assert!(
+            after_crash.buffs[&6]
+                .until
+                .abs_diff(three_hours_later + expected_rem)
+                < 5_000
+        );
     }
 }

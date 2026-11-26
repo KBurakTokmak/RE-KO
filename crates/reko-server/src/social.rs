@@ -358,8 +358,18 @@ impl Hub {
                 && old.contains(&id)
                 && let Some(prior) = &prior
             {
-                let appearance = prior.s.equipment != s.equipment
-                    || prior.s.costumes != s.costumes
+                let appearance = prior
+                    .s
+                    .equipment
+                    .iter()
+                    .map(|item| item.id)
+                    .ne(s.equipment.iter().map(|item| item.id))
+                    || prior
+                        .s
+                        .costumes
+                        .iter()
+                        .map(|item| item.id)
+                        .ne(s.costumes.iter().map(|item| item.id))
                     || prior.s.clan != s.clan
                     || prior.s.character.class != s.character.class
                     || prior.s.sitting != s.sitting

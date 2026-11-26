@@ -650,9 +650,18 @@ async fn handle_game_payload_inner(
             if let (Some(session), Some(account)) = (world.as_mut(), account) {
                 let loaded = {
                     let db = lobby.db.lock().unwrap();
-                    skills::load(&db, account, session.character.slot).and_then(|state| {
-                        progress::load(&db, account, session.character.slot)
-                            .map(|progress| (state, progress))
+                    skills::resume_scroll_buffs(
+                        &db,
+                        account,
+                        session.character.slot,
+                        lobby.skills.as_ref(),
+                        skills::now_ms(),
+                    )
+                    .and_then(|()| {
+                        skills::load(&db, account, session.character.slot).and_then(|state| {
+                            progress::load(&db, account, session.character.slot)
+                                .map(|progress| (state, progress))
+                        })
                     })
                 };
                 match loaded {
@@ -1966,7 +1975,7 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                         Ok(None) => break,
                         Err(error) => {
                             tracing::error!(%peer, error, pending_bytes = decoder.pending(), "invalid game frame; closing connection");
-                            return;
+                            break 'connection false;
                         }
                     }
                 }
@@ -1983,13 +1992,20 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     if let (Some(session), Some(account)) = (
         world.as_ref().filter(|s| s.entered),
         lease.as_ref().map(lobby::AccountLease::name),
-    ) && let Err(error) = movement::save(
-        &lobby.db.lock().unwrap(),
-        account,
-        session.character.slot,
-        session.position,
     ) {
-        tracing::warn!(%peer, %error, "failed to flush final movement position on disconnect");
+        let db = lobby.db.lock().unwrap();
+        if let Err(error) = movement::save(&db, account, session.character.slot, session.position) {
+            tracing::warn!(%peer, %error, "failed to flush final movement position on disconnect");
+        }
+        if let Err(error) = skills::pause_scroll_buffs(
+            &db,
+            account,
+            session.character.slot,
+            lobby.skills.as_ref(),
+            skills::now_ms(),
+        ) {
+            tracing::warn!(%peer, %error, "failed to pause scroll buffs on disconnect");
+        }
     }
     if let (Some(world), Some(registry)) = (world.as_ref(), lobby.monsters.as_ref()) {
         registry.take_experience(&world.character.name);
