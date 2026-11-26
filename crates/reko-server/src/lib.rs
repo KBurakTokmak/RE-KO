@@ -423,7 +423,7 @@ async fn handle_game_payload_inner(
             .skills
             .buffs
             .get(&20)
-            .is_some_and(|b| skills::now_ms() < b.until);
+            .is_some_and(|b| skills::now_ms() < b.until && !matches!(b.skill, 108780 | 208780));
         if frozen && opcode == 6 {
             let mut correction = vec![0x1e];
             correction.extend(s.position.x.to_le_bytes());
@@ -758,6 +758,24 @@ async fn handle_game_payload_inner(
             if payload[1] == 2 {
                 if session.snapshot_sent && session.entered && !session.zone_loading {
                     social::refresh_region(lobby, account.unwrap(), session);
+                    if session.skills.hp == 0 {
+                        let packet = social::death_packet(session.player_id);
+                        send_response(sock, peer, &None, &packet, "PLAYER_DEAD_ON_ENTRY").await;
+                    }
+                    for (index, active) in
+                        session.skills.periodic_statuses().into_iter().enumerate()
+                    {
+                        if active {
+                            send_response(
+                                sock,
+                                peer,
+                                &None,
+                                &[0x5e, 2, index as u8 + 1, 1],
+                                "PERIODIC_STATUS_ON_ENTRY",
+                            )
+                            .await;
+                        }
+                    }
                     tracing::info!(%peer,name=%session.character.name,"client world load completed; player regions refreshed");
                 }
                 return;
@@ -822,7 +840,14 @@ async fn handle_game_payload_inner(
             let (Some(session), Some(account)) = (world.as_mut(), account) else {
                 return;
             };
-            if !session.entered {
+            if !session.entered || session.skills.hp == 0 {
+                return;
+            }
+            if session.skills.stunned(skills::now_ms()) {
+                let mut packet = vec![0x1e];
+                packet.extend(session.position.x.to_le_bytes());
+                packet.extend(session.position.z.to_le_bytes());
+                send_response(sock, peer, &None, &packet, "STUN_POSITION").await;
                 return;
             }
             let Some(position) = session.movement.validate(
@@ -889,9 +914,12 @@ async fn handle_game_payload_inner(
             });
             let mut result = 0;
             if now >= session.next_attack
-                && !session.skills.buffs.get(&20).is_some_and(|b| now < b.until)
+                && !session.skills.buffs.get(&20).is_some_and(|b| {
+                    now < b.until
+                        && (!matches!(b.skill, 108780 | 208780) || pvp::is_player_id(target))
+                })
                 && !session.skills.buffs.get(&32).is_some_and(|b| now < b.until)
-                && !session.skills.buffs.get(&47).is_some_and(|b| now < b.until)
+                && !session.skills.stunned(now)
                 && (session.is_admin || !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10))
             {
                 let attack = monsters::Attack {
@@ -1050,15 +1078,7 @@ async fn handle_game_payload_inner(
                         Err("This skill's class or learning requirements are not met.")
                     } else if let Some(sprint) = definition {
                         let now = skills::now_ms();
-                        let slowed = next
-                            .buffs
-                            .get(&6)
-                            .filter(|b| now < b.until)
-                            .and_then(|b| {
-                                lobby.skills.as_ref().and_then(|c| c.spells.get(&b.skill))
-                            })
-                            .is_some_and(|s| matches!(s.moral, 7 | 10 | 12));
-                        if slowed {
+                        if next.slowed(lobby.skills.as_ref(), now) {
                             Err("You cannot use speed skills while slowed.")
                         } else {
                             next.cast(id, sprint, now)
@@ -1500,7 +1520,11 @@ async fn tick_character(
         let db = lobby.db.lock().unwrap();
         skills::load(&db, account, session.character.slot).and_then(|mut next| {
             let before = next.hp;
-            next.tick_periodic(now);
+            let periodic_damage = next.tick_periodic(now);
+            let died = before > 0 && next.hp == 0;
+            if died {
+                travel::clear_zone_effects(&mut next, lobby.skills.as_ref());
+            }
             let (_, mp) = if recovery_due {
                 next.regenerate(
                     session.progress.level,
@@ -1532,14 +1556,25 @@ async fn tick_character(
             if hp != 0 || mp != 0 || !expired.is_empty() || periodic_due {
                 skills::save(&db, account, session.character.slot, &next)?;
             }
-            Ok((next, hp, mp, expired, restored_scrolls))
+            Ok((
+                next,
+                hp,
+                mp,
+                expired,
+                restored_scrolls,
+                died,
+                periodic_damage,
+            ))
         })
     };
     if recovery_due {
         session.next_regen = now + 6000;
     }
     match result {
-        Ok((next, hp, mp, expired, restored_scrolls)) => {
+        Ok((next, hp, mp, expired, restored_scrolls, died, periodic_damage)) => {
+            let previous_status = session.skills.periodic_statuses();
+            let was_slowed =
+                session.skills.slowed(lobby.skills.as_ref(), 0) || session.skills.stunned(0);
             session.skills = next;
             let previous = (
                 session.combat.attack,
@@ -1583,8 +1618,77 @@ async fn tick_character(
                 )
                 .await;
             }
-            if hp != 0 {
-                send_response(sock, peer, &None, &session.skills.hp_packet(hp), "HP_REGEN").await;
+            let mut last_source = None;
+            {
+                let mut hub = lobby.social.lock().unwrap();
+                for (key, damage, current) in periodic_damage {
+                    let source = hub.periodic_sources.get(&(session.player_id, key)).copied();
+                    if let Some(source) = source.filter(|id| {
+                        hub.players.get(id).is_some_and(|player| {
+                            player.s.entered
+                                && !player.s.zone_loading
+                                && player.s.position.zone == session.position.zone
+                        })
+                    }) {
+                        last_source = Some(source);
+                        let mut packet = target_hp::packet(
+                            session.player_id,
+                            u32::from(session.skills.max_hp),
+                            u32::from(current),
+                        );
+                        packet[12..14]
+                            .copy_from_slice(&(-(damage.min(32767) as i16)).to_le_bytes());
+                        hub.send(source, packet);
+                    }
+                }
+            }
+            if let Some(source) = last_source {
+                send_response(
+                    sock,
+                    peer,
+                    &None,
+                    &session.skills.hp_packet_from(source),
+                    "PERIODIC_DAMAGE",
+                )
+                .await;
+            } else if hp != 0 {
+                send_response(
+                    sock,
+                    peer,
+                    &None,
+                    &session.skills.hp_packet(if hp < 0 { -1 } else { hp }),
+                    "HP_REGEN",
+                )
+                .await;
+            }
+            for (index, (was_active, active)) in previous_status
+                .into_iter()
+                .zip(session.skills.periodic_statuses())
+                .enumerate()
+            {
+                if was_active && !active {
+                    send_response(
+                        sock,
+                        peer,
+                        &None,
+                        &[0x5e, 2, index as u8 + 1, 0],
+                        "PERIODIC_STATUS_END",
+                    )
+                    .await;
+                }
+            }
+            if was_slowed
+                && !session.skills.slowed(lobby.skills.as_ref(), now)
+                && !session.skills.stunned(now)
+            {
+                send_response(sock, peer, &None, &[0x5e, 2, 3, 0], "SLOW_STATUS_END").await;
+            }
+            if died {
+                session.pending_cast = None;
+                session.merchant = None;
+                session.anvil = None;
+                session.npc_dialog = None;
+                lobby.social.lock().unwrap().player_died(session.player_id);
             }
             if mp != 0 {
                 send_response(sock, peer, &None, &session.skills.mana_packet(), "MP_REGEN").await;
@@ -1600,6 +1704,9 @@ async fn tick_character(
                 }
                 if category == 92 {
                     send_response(sock, peer, &None, &[0x42, 0, 0, 0], "STEALTH_DETECT_END").await;
+                }
+                if category == 20 {
+                    send_response(sock, peer, &None, &[0x5e, 2, 4, 0], "BLIND_STATUS_END").await;
                 }
                 if category == 32 {
                     let mut hub = lobby.social.lock().unwrap();
@@ -2160,6 +2267,94 @@ mod tests {
         tick_character(&mut socket, peer, &lobby, "recovery", session, 12000).await;
         assert_eq!(receive(&mut client).await, [0x18, 100, 0, 65, 0]);
         assert_eq!(session.skills.hp, 94);
+    }
+
+    #[tokio::test]
+    async fn lethal_periodic_damage_sends_death_to_player_and_observer_and_replays_on_login() {
+        let lobby = lobby::Lobby::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+            characters::CreationRules::fixture(),
+            world_entry::Bootstrap { next_level_exp: 50 },
+        )
+        .unwrap();
+        let mut session = world_entry::Session::new(characters::Character {
+            slot: 0,
+            name: "Bleeding".into(),
+            race: 2,
+            class: 102,
+            face: 0,
+            hair: 0,
+            stats: [60, 60, 80, 50, 50],
+        })
+        .unwrap();
+        session.player_id = 1;
+        session.entered = true;
+        session.snapshot_sent = true;
+        session.next_regen = 6000;
+        session.skills.hp = 20;
+        session.skills.periodic.insert(
+            900_000,
+            skills::Periodic {
+                amount: -50,
+                next: 2000,
+                until: 6000,
+            },
+        );
+        {
+            let mut db = lobby.db.lock().unwrap();
+            characters::ensure_account(&db, "bleeding").unwrap();
+            characters::set_nation(&db, "bleeding", 1).unwrap();
+            characters::create(&mut db, "bleeding", &session.character).unwrap();
+            skills::save(&db, "bleeding", 0, &session.skills).unwrap();
+        }
+        let mut observer = session.clone();
+        observer.player_id = 2;
+        {
+            let mut hub = lobby.social.lock().unwrap();
+            hub.synchronize("bleeding", &session);
+            hub.synchronize("observer", &observer);
+            hub.periodic_sources.insert((1, 900_000), 2);
+            hub.take_queue(1);
+            hub.take_queue(2);
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+        tick_character(&mut socket, peer, &lobby, "bleeding", &mut session, 2000).await;
+        let hp = receive(&mut client).await;
+        assert_eq!((hp[0], &hp[5..]), (0x17, [2, 0].as_slice()));
+        assert_eq!(receive(&mut client).await, [0x5e, 2, 1, 0]);
+        assert_eq!(session.skills.hp, 0);
+        tick_character(&mut socket, peer, &lobby, "bleeding", &mut session, 4000).await;
+        {
+            let mut hub = lobby.social.lock().unwrap();
+            assert_eq!(hub.take_queue(1), [vec![0x11, 1, 0]]);
+            let observer = hub.take_queue(2);
+            assert_eq!(observer[0][0], 0x22);
+            assert_eq!(&observer[0][12..], &(-20i16).to_le_bytes());
+            assert_eq!(observer[1], [0x11, 1, 0]);
+        }
+        session.player_id = 3;
+        session.skills = skills::load(&lobby.db.lock().unwrap(), "bleeding", 0).unwrap();
+        {
+            let mut hub = lobby.social.lock().unwrap();
+            hub.disconnect(1);
+            hub.synchronize("bleeding", &session);
+            hub.take_queue(3);
+        }
+        let mut world = Some(session);
+        handle_game_payload(
+            &mut socket,
+            peer,
+            b"\x0d\x02\x08Bleeding",
+            &lobby,
+            Some("bleeding"),
+            &mut world,
+        )
+        .await;
+        assert_eq!(receive(&mut client).await, [0x11, 3, 0]);
     }
 
     #[tokio::test]

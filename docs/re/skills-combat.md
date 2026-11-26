@@ -514,5 +514,31 @@ client `Skill_Magic_1.tbl` column 4 (`Delay`).
 - **Scroll persistence:** Item-backed Type 4 scrolls survive PvP death/respawn
   and are suspended (`category + 100`) under same-category debuffs, then
   automatically reinstated with remaining duration on expiry or cure.
+- **Death and respawn:** Lethal periodic damage sends `WIZ_DEAD (0x11)` to the
+  victim and nearby observers. A saved dead character receives the same packet
+  after world entry, following the supplied 1453 `CharacterSelectionHandler.cpp`.
+  The native client then offers the usual `WIZ_REGENE (0x12)` path.
+- **Periodic damage:** Poison Arrow, Poison Shot and Viper use the native
+  Type 3 totals of 232, 463 and 691 before magic scaling and resistance.
+  Blooding uses its 1,000 HP total over ten two-second ticks. The attacker
+  receives their own `WIZ_TARGET_HP` damage entries while the victim receives
+  HP changes and the native poison or periodic-damage status. PvP attribution
+  stays with the original live player session.
+- **Warrior and Rogue control:** Leg Cutting uses the native 50% speed for
+  10 seconds. Repeated hits within the same slow do not renew it. Shock Stun
+  stops movement, attacks and skills for three seconds. Smoke Screen uses the
+  selected ground area and disables targeted attacks on players for 10 seconds.
+  The skill retains its native Stone of Rogue requirement.
+- **Warrior resources and damage:** Pain Killer spends 100 HP for up to 200 MP.
+  Blade of Hate uses the 1453 Type 3 base of 150 and Quake uses 500 with a
+  10 m radius. Both go through CHA, magic resistance and PvP magic scaling.
+  Exceed Break uses the supplied server's 50% chance and the native 1,000
+  durability amount against one equipped armor slot. A successful roll sends
+  a native durability update. The supplied code has a different wear rule.
+- **Priest attacks:** Priest weapon attacks use the 0.010 first AP term from
+  `User.cpp`. Type 1 adds its flat bonus after physical PvP
+  reduction, using the `ExecuteType1` PvP divisor. The original Helis row and
+  tooltip specify 250% and a flat 400 before that divisor. Actual damage still
+  depends on the Priest's STR and equipment and on the opponent's defenses.
 - **Monster aggro:** `npc_ai.rs` tracks per-attacker damage and switches aggro
   to higher-threat attackers (following 1453/Open-KO `ChangeTarget`).

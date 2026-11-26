@@ -181,6 +181,16 @@ pub(crate) async fn respawn(
     )
     .await;
     super::send_response(sock, peer, &None, &s.skills.mana_packet(), "RESPAWN_MP").await;
+    for status in 1..=4 {
+        super::send_response(
+            sock,
+            peer,
+            &None,
+            &[0x5e, 2, status, 0],
+            "RESPAWN_STATUS_CLEAR",
+        )
+        .await;
+    }
     for packet in crate::utility::buff_restore_packets(s, skills::now_ms()) {
         super::send_response(sock, peer, &None, &packet, "RESPAWN_BUFF_RESTORE").await;
     }

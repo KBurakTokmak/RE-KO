@@ -681,6 +681,15 @@ pub(crate) async fn handle(
             if cure == Some(1) {
                 super::send_response(sock, peer, &None, &[0x31, 7, 200], "DISEASE_REMOVED").await;
             }
+            let cleared_statuses: &[u8] = match cure {
+                Some(1) => &[1, 2],
+                Some(2) => &[3, 4],
+                _ => &[],
+            };
+            for &status in cleared_statuses {
+                super::send_response(sock, peer, &None, &[0x5e, 2, status, 0], "STATUS_REMOVED")
+                    .await;
+            }
             refresh(session, Some(catalog), lobby.combat.as_ref());
             super::send_response(
                 sock,

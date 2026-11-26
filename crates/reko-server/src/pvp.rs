@@ -199,7 +199,7 @@ fn compute_damage(
             hit_rate_tier(ratio, seed)
         };
         if hit_ok {
-            let mut phys = if attack.skill {
+            let phys = if attack.skill {
                 let temp_hit = if attack.arrow && attack.penetrate {
                     eff_attack * u32::from(attack.percent) / 100
                 } else {
@@ -215,9 +215,16 @@ fn compute_damage(
                 let rand = next_rand(seed, temp_hit_b);
                 (0.85 * temp_hit_b as f32 + 0.30 * rand as f32) as u32
             };
-            phys = phys.saturating_add(u32::from(attack.extra));
-            // 1453 Unit.cpp:377-388: PvP physical damage is halved.
-            total = total.saturating_add((phys / 2).max(1));
+            let extra = u32::from(attack.extra)
+                / if matches!(caster.position.zone, 61..=69) {
+                    2
+                } else {
+                    3
+                };
+            // Unit::GetDamage halves physical damage before ExecuteType1 adds its flat bonus.
+            total = total
+                .saturating_add((phys / 2).max(1))
+                .saturating_add(extra);
         }
     }
 
@@ -258,7 +265,7 @@ fn periodic_tick_amount(target: &Session, magic: monsters::MagicDamage) -> Optio
     let duration_ms = u64::from(magic.duration) * 1000;
     let ticks = (u32::from(magic.duration) / 2).max(1);
     let total = if magic.raw_over_time {
-        u32::from(magic.over_time) / 2
+        u32::from(magic.over_time)
     } else {
         let resist = if magic.element >= 1 && magic.element <= 6 {
             u32::from(target.combat.resistance[usize::from(magic.element - 1)])
@@ -367,6 +374,7 @@ pub(crate) fn hit_player(
         dead: bool,
         mana_changed: bool,
         stealth_broken: bool,
+        periodic_key: Option<u32>,
         debuff_applied: Option<(u8, u32, u64)>,
         reflected: Option<ReflectOutcome>,
         killer_np: Option<(u32, u32)>,
@@ -422,15 +430,16 @@ pub(crate) fn hit_player(
         };
 
         let mut debuff_applied = None;
+        let mut periodic_key = None;
         if dead {
             crate::travel::clear_zone_effects(&mut next, lobby.skills.as_ref());
         } else {
             if let Some(magic) = attack.magic
+                && (attack.attack == 0 || actual > 0)
                 && let Some((tick_amt, duration_ms)) = periodic_tick_amount(&target_player.s, magic)
             {
-                let key = 900_000 + u32::from(magic.element);
-                next.periodic.insert(
-                    key,
+                periodic_key = next.track_periodic_damage(
+                    magic.element,
                     skills::Periodic {
                         amount: tick_amt,
                         next: now + 2000,
@@ -439,14 +448,20 @@ pub(crate) fn hit_player(
                 );
             }
             if let Some((cat, skill_id, duration_ms)) = debuff
+                && actual > 0
                 && !next.buffs.get(&29).is_some_and(|b| now < b.until)
                 && !next.buffs.get(&30).is_some_and(|b| now < b.until)
+                && !(matches!(skill_id, 105520 | 106520 | 205520 | 206520)
+                    && next.slowed(lobby.skills.as_ref(), now))
             {
-                let resisted = if cat == 6 {
+                let resisted = if cat == 6 && attack.magic.is_some_and(|m| m.element == 2) {
                     let cold_r = u32::from(target_player.s.combat.resistance[1]);
                     let chance = 100u32.saturating_sub(cold_r * 100 / 250).clamp(15, 75);
                     next_rand(&mut seed, 99) >= chance
-                } else if cat == 47 && attack.magic.is_some_and(|m| m.element == 3) {
+                } else if cat == 47
+                    && !matches!(skill_id, 106820 | 206820)
+                    && attack.magic.is_some_and(|m| m.element == 3)
+                {
                     let light_r = u32::from(target_player.s.combat.resistance[2]);
                     let chance = 100u32.saturating_sub(light_r * 100 / 250).clamp(10, 45);
                     next_rand(&mut seed, 99) >= chance
@@ -524,6 +539,7 @@ pub(crate) fn hit_player(
             dead,
             mana_changed,
             stealth_broken,
+            periodic_key,
             debuff_applied,
             reflected,
             killer_np,
@@ -537,6 +553,7 @@ pub(crate) fn hit_player(
         dead,
         mana_changed,
         stealth_broken,
+        periodic_key,
         debuff_applied,
         reflected,
         killer_np,
@@ -556,7 +573,12 @@ pub(crate) fn hit_player(
     if mana_changed {
         hub.send(target_id, next.mana_packet());
     }
-    if let Some((_cat, skill_id, duration_ms)) = debuff_applied {
+    if let Some(key) = periodic_key {
+        hub.periodic_sources
+            .insert((target_id, key), caster.player_id);
+        hub.send(target_id, vec![0x5e, 2, skills::damage_status(key), 1]);
+    }
+    if let Some((category, skill_id, duration_ms)) = debuff_applied {
         let mut effect = skills::effect(skill_id, caster.player_id);
         effect[8..10].copy_from_slice(&target_id.to_le_bytes());
         effect[12..14].copy_from_slice(&1u16.to_le_bytes());
@@ -571,6 +593,12 @@ pub(crate) fn hit_player(
             effect[20..22].copy_from_slice(&speed.to_le_bytes());
         }
         hub.send(target_id, effect);
+        if category == 20 {
+            hub.send(target_id, vec![0x5e, 2, 4, 1]);
+        }
+        if matches!(category, 6 | 40 | 47) {
+            hub.send(target_id, vec![0x5e, 2, 3, 1]);
+        }
     }
     if stealth_broken {
         hub.send(target_id, vec![0x31, 5, 91]);
@@ -598,13 +626,7 @@ pub(crate) fn hit_player(
             u32::from(refl.caster_next.hp),
         );
         if refl.dead {
-            let mut dead_pkt = vec![0x11];
-            dead_pkt.extend(caster.player_id.to_le_bytes());
-            hub.send(caster.player_id, dead_pkt.clone());
-            hub.broadcast_visual(caster.player_id, None, Some(caster.player_id), &dead_pkt);
-            crate::trade::cancel(&mut hub, caster.player_id, "Trade cancelled: player died.");
-            crate::merchant::close(&mut hub, caster.player_id);
-            challenge::disconnect(&mut hub, caster.player_id);
+            hub.player_died(caster.player_id);
         }
     }
 
@@ -622,13 +644,7 @@ pub(crate) fn hit_player(
     );
 
     if dead {
-        let mut dead_pkt = vec![0x11];
-        dead_pkt.extend(target_id.to_le_bytes());
-        hub.send(target_id, dead_pkt.clone());
-        hub.broadcast_visual(target_id, None, Some(target_id), &dead_pkt);
-        crate::trade::cancel(&mut hub, target_id, "Trade cancelled: player died.");
-        crate::merchant::close(&mut hub, target_id);
-        challenge::disconnect(&mut hub, target_id);
+        hub.player_died(target_id);
     }
 
     if let Some((loyalty, monthly)) = killer_np {
@@ -745,6 +761,9 @@ pub(crate) fn curse_player(
         let duration_s = (duration_ms / 1000).min(32767) as u16;
         effect[16..18].copy_from_slice(&duration_s.to_le_bytes());
         hub.send(target_id, effect);
+        if category == 20 {
+            hub.send(target_id, vec![0x5e, 2, 4, 1]);
+        }
         hub.send(target_id, next.hp_packet(0));
         hub.send(target_id, crate::inventory::attributes(&stats, 2));
         if stealth_broken {
@@ -826,14 +845,14 @@ pub(crate) fn drain_player_mana(
     Ok(drained)
 }
 
-/// 1453 MagicInstance.cpp:1509-1515: Exceed Break (direct=13) has a 50% chance
-/// to reduce a random equipped armor piece's durability by `amount` (1000).
+/// Exceed Break uses the supplied 1453 50% roll and the original tooltip's
+/// armor-only 1,000 durability amount.
 pub(crate) fn break_armor(lobby: &Lobby, target_id: u16, amount: u16) {
-    if !is_player_id(target_id) {
-        return;
-    }
-    let now = skills::now_ms();
-    if now.wrapping_mul(6364136223846793005).is_multiple_of(2) {
+    break_armor_on_roll(lobby, target_id, amount, skills::now_ms());
+}
+
+fn break_armor_on_roll(lobby: &Lobby, target_id: u16, amount: u16, roll: u64) {
+    if !is_player_id(target_id) || roll.is_multiple_of(2) {
         return;
     }
     let mut db = lobby.db.lock().unwrap();
@@ -841,32 +860,36 @@ pub(crate) fn break_armor(lobby: &Lobby, target_id: u16, amount: u16) {
     let Some(target_player) = hub.players.get(&target_id).cloned() else {
         return;
     };
+    let Ok(tx) = db.transaction() else {
+        return;
+    };
+    let Ok(mut gear) =
+        crate::starter::equipment(&tx, &target_player.account, target_player.s.character.slot)
+    else {
+        return;
+    };
     // Armor slots: helmet(1), pauldron(4), pads(10), gauntlets(12), boots(13)
     const ARMOR_SLOTS: [usize; 5] = [1, 4, 10, 12, 13];
     let equipped: Vec<usize> = ARMOR_SLOTS
         .into_iter()
-        .filter(|&s| {
-            target_player.s.equipment[s].id != 0 && target_player.s.equipment[s].durability > 0
-        })
+        .filter(|&s| gear[s].id != 0 && gear[s].durability > 0)
         .collect();
     if equipped.is_empty() {
         return;
     }
-    let slot = equipped[(now as usize) % equipped.len()];
-    let next_dur = target_player.s.equipment[slot]
-        .durability
-        .saturating_sub(amount);
-    if let Ok(tx) = db.transaction()
-        && tx
+    let slot = equipped[(roll as usize / 2) % equipped.len()];
+    let next_dur = gear[slot].durability.saturating_sub(amount);
+    if tx
             .execute(
-                "UPDATE character_equipment SET durability=?1 WHERE account=?2 AND slot=?3 AND equip_slot=?4",
-                params![next_dur, &target_player.account, target_player.s.character.slot, slot as u8],
+                "UPDATE character_equipment SET durability=?1 WHERE account=?2 AND slot=?3 AND equipment_slot=?4 AND item_id=?5",
+                params![next_dur, &target_player.account, target_player.s.character.slot, slot as u8, gear[slot].id],
             )
-            .is_ok()
+            .is_ok_and(|rows| rows == 1)
         && tx.commit().is_ok()
     {
+        gear[slot].durability = next_dur;
         let attr_pkt = hub.players.get_mut(&target_id).map(|p| {
-            p.s.equipment[slot].durability = next_dur;
+            p.s.equipment = gear;
             if let Some(items) = lobby.combat.as_ref()
                 && let Ok(mut base) =
                     items.calculate(&p.s.character, &p.s.progress, &p.s.equipment)
@@ -886,7 +909,7 @@ pub(crate) fn break_armor(lobby: &Lobby, target_id: u16, amount: u16) {
             hub.send(target_id, pkt);
         }
         hub.refresh.insert(target_id);
-        let mut dur_pkt = vec![0x3a, slot as u8];
+        let mut dur_pkt = vec![0x38, slot as u8];
         dur_pkt.extend(next_dur.to_le_bytes());
         hub.send(target_id, dur_pkt);
     }
@@ -952,6 +975,69 @@ mod tests {
         skills::save(&lobby.db.lock().unwrap(), account, 0, &s.skills).unwrap();
         social::synchronize(lobby, account, &mut s);
         s
+    }
+
+    #[test]
+    fn exceed_break_roll_updates_the_persisted_armor_and_native_durability_packet() {
+        let lobby = test_lobby();
+        let defender = spawn(&lobby, "armor", "ArmorTarget", 2, 48, 1900, 1900);
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO character_equipment VALUES ('armor',0,4,210001008,3500)",
+                [],
+            )
+            .unwrap();
+        break_armor_on_roll(&lobby, defender.player_id, 1000, 0);
+        break_armor_on_roll(&lobby, defender.player_id, 1000, 1);
+        let gear = crate::starter::equipment(&lobby.db.lock().unwrap(), "armor", 0).unwrap();
+        assert_eq!(gear[4].durability, 2500);
+        let packets = lobby.social.lock().unwrap().take_queue(defender.player_id);
+        assert!(packets.contains(&vec![0x38, 4, 0xc4, 0x09]));
+    }
+
+    #[test]
+    fn blooding_uses_its_full_duration_total_and_poison_arrows_have_distinct_ticks() {
+        let lobby = test_lobby();
+        let target = spawn(&lobby, "victim", "Target", 2, 48, 1900, 1900);
+        let mut magic = monsters::MagicDamage {
+            element: 4,
+            first: 0,
+            over_time: 1000,
+            duration: 20,
+            charisma: 60,
+            bonus: 0,
+            raw_over_time: true,
+            raw_first: false,
+        };
+        assert_eq!(periodic_tick_amount(&target, magic), Some((-100, 20_000)));
+        magic.element = 6;
+        magic.raw_over_time = false;
+        let amounts: Vec<_> = [232, 463, 691]
+            .into_iter()
+            .map(|amount| {
+                magic.over_time = amount;
+                periodic_tick_amount(&target, magic).unwrap().0
+            })
+            .collect();
+        assert!(amounts.windows(2).all(|two| two[0] > two[1]));
+        let mut state = skills::State::default();
+        for amount in amounts {
+            let key = state
+                .track_periodic_damage(
+                    6,
+                    skills::Periodic {
+                        amount,
+                        next: 2000,
+                        until: 20_000,
+                    },
+                )
+                .unwrap();
+            assert_eq!(skills::damage_status(key), 2);
+        }
+        assert_eq!(state.tick_periodic(2000).len(), 3);
     }
 
     #[test]

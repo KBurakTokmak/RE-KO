@@ -287,6 +287,7 @@ pub(crate) async fn handle(
                     target,
                     combat::integer(row, 5).clamp(1, 200) as u16,
                     combat::integer(row, 3).max(0) as u64 * 1000,
+                    true,
                 );
             }
             tracing::info!(%peer,id=spell.id,target,damage,"arrow impact applied");

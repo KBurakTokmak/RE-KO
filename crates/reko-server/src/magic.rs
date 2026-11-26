@@ -217,8 +217,14 @@ pub(crate) async fn handle(
     .unwrap_or(false)
     {
         Some("Complete this skill's unlock quest before using it.")
-    } else if session.skills.buffs.get(&47).is_some_and(|b| now < b.until) {
+    } else if session.skills.stunned(now) {
         Some("You cannot use skills while stunned.")
+    } else if target != caster
+        && crate::pvp::is_player_id(target)
+        && spell.moral == 7
+        && session.skills.buffs.get(&20).is_some_and(|b| now < b.until)
+    {
+        Some("You cannot target enemy players while affected by Smoke Screen.")
     } else if matches!(spell.types[0], 1 | 2)
         && session.skills.buffs.get(&32).is_some_and(|b| now < b.until)
     {
@@ -248,7 +254,33 @@ pub(crate) async fn handle(
                 target,
                 expires_at: now + spell.cast_ms + 3000,
             });
+            if spell.moral == 12 {
+                session.magic_projectiles.remove(&id);
+            }
             super::send_response(sock, peer, &None, payload, "CURSE_CASTING").await;
+            return true;
+        }
+        if spell.moral == 12
+            && payload[1] == 2
+            && session
+                .pending_cast
+                .as_ref()
+                .is_some_and(|pending| pending.matches(id, target, now))
+        {
+            if payload[10..16].iter().any(|&value| value != 0)
+                && let Ok(center) = crate::mage::center(session.position, spell, payload)
+            {
+                session.magic_projectiles.insert(
+                    id,
+                    crate::mage::Flight {
+                        target,
+                        expires: now + 5000,
+                        origin: session.position,
+                        center: Some(center),
+                    },
+                );
+            }
+            super::send_response(sock, peer, &None, payload, "CURSE_FLYING").await;
             return true;
         }
         if payload[1] != 3 {
@@ -286,20 +318,27 @@ pub(crate) async fn handle(
         session.pending_cast = None;
         let duration_ms = combat::integer(row, 3).max(0) as u64 * 1000;
         if spell.moral == 12 {
-            // Smoke Screen (108780/208780): AoE around caster, enemy players only.
+            // Smoke Screen applies only to hostile players in the selected ground area.
             let radius = combat::integer(row, 2).max(1) as f32;
-            let targets = crate::pvp::area_targets(lobby, session, session.position, radius);
-            if targets.is_empty() {
-                refused(
-                    sock,
-                    peer,
-                    session,
-                    id,
-                    "This skill requires an enemy player in range; it does not apply to monsters.",
-                )
-                .await;
-                return true;
-            }
+            let flight = session.magic_projectiles.remove(&id).filter(|flight| {
+                flight.target == target
+                    && now <= flight.expires
+                    && flight.origin.zone == session.position.zone
+            });
+            let center = if payload[10..16].iter().all(|&value| value == 0) {
+                flight
+                    .and_then(|flight| flight.center)
+                    .unwrap_or(session.position)
+            } else {
+                match crate::mage::center(session.position, spell, payload) {
+                    Ok(center) => center,
+                    Err(reason) => {
+                        refused(sock, peer, session, id, reason).await;
+                        return true;
+                    }
+                }
+            };
+            let targets = crate::pvp::area_targets(lobby, session, center, radius);
             match resources::commit(lobby, account, session.character.slot, spell, 1, |_| Ok(())) {
                 Ok(paid) => {
                     for tid in targets {
@@ -307,7 +346,7 @@ pub(crate) async fn handle(
                             lobby,
                             session,
                             tid,
-                            session.position,
+                            center,
                             radius,
                             category,
                             id,
@@ -318,6 +357,11 @@ pub(crate) async fn handle(
                     resources::sync(sock, peer, lobby, account, session, paid).await;
                     let mut packet = skills::effect(id, caster);
                     packet[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+                    packet[10..16].copy_from_slice(&payload[10..16]);
+                    if payload[10..16].iter().all(|&value| value == 0) {
+                        packet[10..12].copy_from_slice(&(center.x / 10).to_le_bytes());
+                        packet[14..16].copy_from_slice(&(center.z / 10).to_le_bytes());
+                    }
                     super::send_response(sock, peer, &None, &packet, "PVP_CURSE_EFFECT").await;
                 }
                 Err(reason) => refused(sock, peer, session, id, reason).await,
@@ -728,7 +772,7 @@ pub(crate) async fn handle(
     let secondary = catalog.effects.get(&(spell.types[1], id));
     let npc_secondary = spell.types[0] == 1
         && ((spell.types[1] == 4
-            && secondary.is_some_and(|row| matches!(combat::integer(row, 1), 6 | 21)))
+            && secondary.is_some_and(|row| matches!(combat::integer(row, 1), 6 | 21 | 40)))
             || (matches!(session.character.class % 100, 1 | 5 | 6)
                 && spell.types[1] == 3
                 && secondary.is_some_and(|row| matches!(combat::integer(row, 2), 0 | 2 | 13)))
@@ -805,7 +849,7 @@ pub(crate) async fn handle(
     };
     let debuff = if spell.types[1] == 4
         && let Some(row) = secondary
-        && matches!(combat::integer(row, 1), 6 | 21)
+        && matches!(combat::integer(row, 1), 6 | 21 | 40)
     {
         Some((
             combat::integer(row, 1) as u8,
@@ -871,21 +915,36 @@ pub(crate) async fn handle(
                 .await;
             }
             if !crate::pvp::is_player_id(target)
+                && damage > 0
+                && !dead
                 && spell.types[1] == 4
                 && let Some(row) = secondary
-                && combat::integer(row, 1) == 6
+                && matches!(combat::integer(row, 1), 6 | 40)
             {
                 monsters.slow(
                     target,
                     combat::integer(row, 5).clamp(1, 200) as u16,
                     combat::integer(row, 3).max(0) as u64 * 1000,
+                    !matches!(id, 105520 | 106520 | 205520 | 206520),
                 );
             }
-            if !crate::pvp::is_player_id(target) && matches!(id, 106820 | 206820) {
+            if damage > 0
+                && !dead
+                && !crate::pvp::is_player_id(target)
+                && matches!(id, 106820 | 206820)
+            {
                 monsters.stun(target, 3000);
             }
-            if crate::pvp::is_player_id(target) && matches!(id, 106815 | 206815) {
-                crate::pvp::break_armor(lobby, target, 1000);
+            if damage > 0
+                && crate::pvp::is_player_id(target)
+                && matches!(id, 106815 | 206815)
+                && let Some(row) = secondary.filter(|row| combat::integer(row, 2) == 13)
+            {
+                crate::pvp::break_armor(
+                    lobby,
+                    target,
+                    combat::integer(row, 3).unsigned_abs().min(32767) as u16,
+                );
             }
             // Blood Drain (108610/208610) & Vampiric Touch (108650/208650): heal caster for drained HP.
             if drain && damage > 0 {

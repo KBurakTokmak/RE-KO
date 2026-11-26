@@ -29,6 +29,7 @@ pub(crate) struct Hub {
     queues: HashMap<u16, Vec<Vec<u8>>>,
     pub refresh: HashSet<u16>,
     pub skill_refresh: HashSet<u16>,
+    pub periodic_sources: HashMap<(u16, u32), u16>,
     skill_notice: HashSet<u16>,
     pub transfers: HashMap<u16, Position>,
     pub loot_rotation: HashMap<u16, usize>,
@@ -41,6 +42,10 @@ pub(crate) fn near(a: Position, b: Position, meters: u16) -> bool {
     let dx = i64::from(a.x) - i64::from(b.x);
     let dz = i64::from(a.z) - i64::from(b.z);
     a.zone == b.zone && dx * dx + dz * dz <= (i64::from(meters) * 10).pow(2)
+}
+pub(crate) fn death_packet(id: u16) -> [u8; 3] {
+    let [low, high] = id.to_le_bytes();
+    [0x11, low, high]
 }
 pub(crate) fn string(p: &mut Vec<u8>, value: &str) {
     p.extend((value.len() as u16).to_le_bytes());
@@ -221,6 +226,14 @@ impl Hub {
             self.send(id, p.to_vec());
         }
     }
+    pub fn player_died(&mut self, id: u16) {
+        let packet = death_packet(id);
+        self.send(id, packet.to_vec());
+        self.broadcast_visual(id, None, Some(id), &packet);
+        crate::trade::cancel(self, id, "Trade cancelled: player died.");
+        crate::merchant::close(self, id);
+        crate::challenge::disconnect(self, id);
+    }
     pub fn party(&self, id: u16) -> Option<u16> {
         self.parties
             .iter()
@@ -239,6 +252,8 @@ impl Hub {
             .unwrap_or_else(|| vec![id])
     }
     pub fn disconnect(&mut self, id: u16) {
+        self.periodic_sources
+            .retain(|(target, _), source| *target != id && *source != id);
         crate::trade::cancel(self, id, "Trade cancelled: player disconnected.");
         crate::challenge::disconnect(self, id);
         crate::merchant::close(self, id);

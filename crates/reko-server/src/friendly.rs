@@ -278,6 +278,12 @@ fn apply(
             }
             if spell.types[0] == 5 && combat::integer(row, 1) == 1 {
                 hub.send(id, vec![0x31, 7, 200]);
+                hub.send(id, vec![0x5e, 2, 1, 0]);
+                hub.send(id, vec![0x5e, 2, 2, 0]);
+            }
+            if spell.types[0] == 5 && combat::integer(row, 1) == 2 {
+                hub.send(id, vec![0x5e, 2, 3, 0]);
+                hub.send(id, vec![0x5e, 2, 4, 0]);
             }
             hub.send(id, effect.clone());
         } else {
@@ -291,6 +297,12 @@ fn apply(
             }
             if spell.types[0] == 5 && combat::integer(row, 1) == 1 {
                 effects.push((id, vec![0x31, 7, 200]));
+                effects.push((id, vec![0x5e, 2, 1, 0]));
+                effects.push((id, vec![0x5e, 2, 2, 0]));
+            }
+            if spell.types[0] == 5 && combat::integer(row, 1) == 2 {
+                effects.push((id, vec![0x5e, 2, 3, 0]));
+                effects.push((id, vec![0x5e, 2, 4, 0]));
             }
         }
         effects.push((id, effect));

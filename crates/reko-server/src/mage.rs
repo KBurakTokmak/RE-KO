@@ -9,10 +9,10 @@ use tokio::net::TcpStream;
 
 #[derive(Clone)]
 pub(crate) struct Flight {
-    target: u16,
-    expires: u64,
-    origin: Position,
-    center: Option<Position>,
+    pub target: u16,
+    pub expires: u64,
+    pub origin: Position,
+    pub center: Option<Position>,
 }
 
 fn is_mage(class: u16) -> bool {
@@ -24,11 +24,8 @@ fn damage(
     lobby: &Lobby,
     row: &[reko_assets::CellValue],
 ) -> monsters::MagicDamage {
-    let charisma = if is_mage(session.character.class) {
-        u16::from(session.character.stats[4]).saturating_add(session.combat.bonus_stats[4])
-    } else {
-        60
-    };
+    let charisma =
+        u16::from(session.character.stats[4]).saturating_add(session.combat.bonus_stats[4]);
     let mut bonus = 0;
     if let Some(buff) = session.skills.buffs.get(&10)
         && skills::now_ms() < buff.until
@@ -80,7 +77,11 @@ fn pay(
     })
 }
 
-fn center(origin: Position, spell: &skills::Spell, p: &[u8]) -> Result<Position, &'static str> {
+pub(crate) fn center(
+    origin: Position,
+    spell: &skills::Spell,
+    p: &[u8],
+) -> Result<Position, &'static str> {
     let x = i16::from_le_bytes([p[10], p[11]]);
     let z = i16::from_le_bytes([p[14], p[15]]);
     let (Ok(x), Ok(z)) = (
@@ -216,6 +217,10 @@ async fn execute(
         Some(
             if let Some(center) = flight.as_ref().and_then(|f| f.center) {
                 center
+            } else if matches!(spell.id, 105760 | 106760 | 205760 | 206760)
+                && payload[10..16].iter().all(|&value| value == 0)
+            {
+                origin
             } else {
                 center(origin, spell, payload)?
             },
@@ -451,6 +456,7 @@ async fn execute(
                     id,
                     combat::integer(slow, 5).clamp(1, 200) as u16,
                     combat::integer(slow, 3).max(0) as u64 * 1000,
+                    true,
                 );
             }
         }

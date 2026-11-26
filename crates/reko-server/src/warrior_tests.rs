@@ -108,6 +108,9 @@ async fn warrior_combat_recovery_buffs_and_shared_admin_authorization() {
     );
     assert_eq!(s.skills.hp, hp - 850);
     let hp = s.skills.hp;
+    s.skills.mana = s.skills.max_mana - 300;
+    let mana = s.skills.mana;
+    skills::save(&lobby.db.lock().unwrap(), "testing", 0, &s.skills).unwrap();
     magic::handle(
         &mut sock,
         peer,
@@ -118,6 +121,7 @@ async fn warrior_combat_recovery_buffs_and_shared_admin_authorization() {
     )
     .await;
     assert_eq!(s.skills.hp, hp - 100);
+    assert_eq!(s.skills.mana, mana + 200);
     magic::handle(
         &mut sock,
         peer,

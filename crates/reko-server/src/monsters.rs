@@ -1367,12 +1367,14 @@ impl World {
             .is_some_and(|m| m.hp > 0 && crate::population::same_region_view(m.position, position))
     }
 
-    pub fn slow(&self, id: u16, percent: u16, duration: u64) {
+    pub fn slow(&self, id: u16, percent: u16, duration: u64, refresh: bool) {
+        let now = skills::now_ms();
         if let Some(mob) = self.inner.lock().unwrap().mobs.get_mut(&id)
             && mob.hp > 0
+            && (refresh || now >= mob.slow_until)
         {
             mob.speed_percent = percent;
-            mob.slow_until = skills::now_ms() + duration;
+            mob.slow_until = now + duration;
         }
     }
 
@@ -1585,6 +1587,7 @@ impl World {
         if let Some(magic) = magic
             && magic.over_time > 0
             && magic.duration >= 2
+            && (attack == 0 || damage > 0)
             && mob.dots.len() < 64
         {
             let count = magic.duration / 2;

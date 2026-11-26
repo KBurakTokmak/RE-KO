@@ -151,6 +151,20 @@ impl Catalog {
                 }
             }
         }
+        // The native 1453 Type1 table supplies the hit percent, and its tooltip
+        // supplies the flat bonus where the later server export differs.
+        for (id, amount) in [
+            (111551, 50),
+            (112551, 50),
+            (211551, 50),
+            (212551, 50),
+            (112802, 150),
+            (212802, 150),
+            (112815, 400),
+            (212815, 400),
+        ] {
+            type1_add_damage.insert(id, amount);
+        }
         let mut speeds = HashMap::new();
         let cures = Path::new("logs/reference-rules/MAGIC_TYPE5.csv");
         let alternative = Path::new("../../logs/reference-rules/MAGIC_TYPE5.csv");
@@ -253,6 +267,17 @@ pub(crate) struct Periodic {
     pub until: u64,
 }
 
+pub(crate) const PVP_PERIODIC_BASE: u32 = 900_000;
+const PVP_PERIODIC_END: u32 = PVP_PERIODIC_BASE + 400;
+
+pub(crate) fn damage_status(key: u32) -> u8 {
+    if (PVP_PERIODIC_BASE..PVP_PERIODIC_END).contains(&key) && key % 10 == 6 {
+        2
+    } else {
+        1
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct State {
     pub max_hp: u16,
@@ -286,16 +311,44 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 impl State {
-    pub fn tick_periodic(&mut self, now: u64) {
-        for effect in self.periodic.values_mut() {
+    pub fn track_periodic_damage(&mut self, element: u8, effect: Periodic) -> Option<u32> {
+        if self.periodic.len() >= 40 {
+            return None;
+        }
+        let key = (PVP_PERIODIC_BASE..PVP_PERIODIC_END)
+            .step_by(10)
+            .map(|base| base + u32::from(element))
+            .find(|key| !self.periodic.contains_key(key))?;
+        self.periodic.insert(key, effect);
+        Some(key)
+    }
+
+    pub fn periodic_statuses(&self) -> [bool; 2] {
+        let mut active = [false; 2];
+        for (&key, effect) in &self.periodic {
+            if effect.amount < 0 {
+                active[usize::from(damage_status(key) - 1)] = true;
+            }
+        }
+        active
+    }
+
+    pub fn tick_periodic(&mut self, now: u64) -> Vec<(u32, u16, u16)> {
+        let mut damage = Vec::new();
+        for (&key, effect) in &mut self.periodic {
             while self.hp != 0 && effect.next <= now && effect.next <= effect.until {
+                let before = self.hp;
                 self.hp = (i32::from(self.hp) + i32::from(effect.amount))
                     .clamp(0, i32::from(self.max_hp)) as u16;
+                if self.hp < before {
+                    damage.push((key, before - self.hp, self.hp));
+                }
                 effect.next += 2000;
             }
         }
         self.periodic
             .retain(|_, effect| now < effect.until && self.hp != 0);
+        damage
     }
     pub fn spend(&mut self, spell: &Spell, now: u64) -> Result<(), &'static str> {
         let instant = !matches!(spell.id, 110820 | 210820)
@@ -362,6 +415,24 @@ impl State {
         Ok(())
     }
 
+    pub fn stunned(&self, now: u64) -> bool {
+        self.buffs.get(&47).is_some_and(|buff| now < buff.until)
+    }
+
+    pub fn slowed(&self, catalog: Option<&Catalog>, now: u64) -> bool {
+        [6, 40].into_iter().any(|category| {
+            self.buffs
+                .get(&category)
+                .filter(|buff| now < buff.until)
+                .is_some_and(|buff| {
+                    category == 40
+                        || catalog
+                            .and_then(|c| c.effects.get(&(4, buff.skill)))
+                            .is_some_and(|row| crate::combat::integer(row, 5) < 100)
+                })
+        })
+    }
+
     pub fn speed(&self, catalog: Option<&Catalog>, now: u64) -> u16 {
         if let Some(buff) = self.buffs.get(&22).filter(|b| now < b.until)
             && let Some(row) = catalog.and_then(|c| c.effects.get(&(4, buff.skill)))
@@ -375,7 +446,12 @@ impl State {
             return (45u32 * crate::combat::integer(row, 5).clamp(1, 200) as u32).div_ceil(100)
                 as u16;
         }
-        if let Some(buff) = self.buffs.get(&6).filter(|buff| now < buff.until) {
+        if let Some(buff) = self
+            .buffs
+            .get(&40)
+            .filter(|buff| now < buff.until)
+            .or_else(|| self.buffs.get(&6).filter(|buff| now < buff.until))
+        {
             if let Some(skill) = catalog.and_then(|c| c.speeds.get(&buff.skill)) {
                 return (45u32 * u32::from(skill.speed_percent)).div_ceil(100) as u16;
             }

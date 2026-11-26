@@ -639,7 +639,12 @@ impl Catalog {
         } else {
             3.0 + (strength - 150.0).max(0.0) - if strength == 160.0 { 1.0 } else { 0.0 }
         };
-        let ap = (0.005 * f64::from(damage) * (ap_stat + 40.0)
+        let base_factor = if matches!(character.class % 100, 4 | 11 | 12) {
+            0.010
+        } else {
+            0.005
+        };
+        let ap = (base_factor * f64::from(damage) * (ap_stat + 40.0)
             + coefficient * f64::from(damage) * level * ap_stat)
             .trunc()
             + extra_ap;
