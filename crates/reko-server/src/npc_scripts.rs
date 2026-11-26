@@ -597,6 +597,10 @@ fn execute(
     let all = helpers(&tx)?;
     let abyss_trigger = crate::abyss::trigger(&tx, merchant, s, &context.file)?;
     let bifrost_script = crate::bifrost::script(merchant, s, &context.file)?;
+    let arena_script = context.file == "15002_Ates.lua"
+        && merchant.prototype == 15002
+        && s.position.zone == 21
+        && merchant.nearby(s);
     let mut abyss_hub = abyss_trigger.map(|_| lobby.social.lock().unwrap());
     let party = abyss_hub.as_ref().map_or_else(Vec::new, |hub| {
         hub.group(s.player_id)
@@ -740,13 +744,51 @@ fn execute(
                 Ok(true)
             });
         }
-        if abyss_trigger.is_some() || bifrost_script {
-            function!("ZoneChange",|_,a:Variadic<i64>| {
-                let destination=if bifrost_script {crate::bifrost::destination(&tx,s,&a)}
-                    else {crate::abyss::destination(&tx,s,&a)}.map_err(mlua::Error::external)?;
-                let mut st=state.borrow_mut();
-                if st.travel.is_some() {return Err(mlua::Error::runtime("Travel already selected"));}
-                st.travel=Some(destination);
+        if abyss_trigger.is_some() || bifrost_script || arena_script {
+            function!("ZoneChange", |_, a: Variadic<i64>| {
+                let destination = if bifrost_script {
+                    crate::bifrost::destination(&tx, s, &a)
+                } else if arena_script {
+                    (|| -> anyhow::Result<crate::movement::Position> {
+                        anyhow::ensure!(
+                            a.len() == 4 && a[0] == i64::from(s.player_id) && a[1] == 48,
+                            "Invalid Arena travel request"
+                        );
+                        anyhow::ensure!(
+                            !s.skills
+                                .buffs
+                                .get(&22)
+                                .is_some_and(|b| crate::skills::now_ms() < b.until),
+                            "You cannot teleport while frozen"
+                        );
+                        let x = u16::try_from(a[2])?
+                            .checked_mul(10)
+                            .ok_or_else(|| anyhow::anyhow!("Invalid Arena X"))?;
+                        let z = u16::try_from(a[3])?
+                            .checked_mul(10)
+                            .ok_or_else(|| anyhow::anyhow!("Invalid Arena Z"))?;
+                        let configured: bool = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM world_town_starts WHERE zone=48)",
+                            [],
+                            |r| r.get(0),
+                        )?;
+                        anyhow::ensure!(configured, "Arena destination is not configured");
+                        Ok(crate::movement::Position {
+                            zone: 48,
+                            x,
+                            z,
+                            y: 0,
+                        })
+                    })()
+                } else {
+                    crate::abyss::destination(&tx, s, &a)
+                }
+                .map_err(mlua::Error::external)?;
+                let mut st = state.borrow_mut();
+                if st.travel.is_some() {
+                    return Err(mlua::Error::runtime("Travel already selected"));
+                }
+                st.travel = Some(destination);
                 Ok(())
             });
         }
@@ -2969,6 +3011,65 @@ mod tests {
         assert_eq!(
             starter::coins(&l.db.lock().unwrap(), "test", 0).unwrap(),
             1000000
+        );
+    }
+
+    #[test]
+    fn coliseum_artes_zone_change_teleports_to_arena_48() {
+        let Some((mut l, mut s)) = setup() else {
+            return;
+        };
+        s.position = crate::movement::Position {
+            zone: 21,
+            x: 3440,
+            z: 4630,
+            y: 0,
+        };
+        {
+            let db = l.db.lock().unwrap();
+            db.execute("INSERT OR IGNORE INTO world_town_starts(zone,karus_x,karus_z,elmo_x,elmo_z,town_x,town_z,source) VALUES (48,128,120,128,120,0,0,'test')", []).unwrap();
+        }
+        {
+            let artes = &mut l.merchants[0];
+            artes.prototype = 15002;
+            artes.position = s.position;
+        }
+        let context = Context {
+            npc: l.merchants[0].id,
+            helper: 0,
+            file: "15002_Ates.lua".into(),
+            choices: [-1; 10],
+        };
+        let changes = execute(
+            &l,
+            "test",
+            &s,
+            &l.merchants[0],
+            context.clone(),
+            (169, -1),
+            b"if (EVENT == 169) then ZoneChange(UID, 48, 133, 118) end",
+        )
+        .unwrap();
+        assert_eq!(
+            changes.travel,
+            Some(crate::movement::Position {
+                zone: 48,
+                x: 1330,
+                z: 1180,
+                y: 0,
+            })
+        );
+        assert!(
+            execute(
+                &l,
+                "test",
+                &s,
+                &l.merchants[0],
+                context,
+                (169, -1),
+                b"if (EVENT == 169) then ZoneChange(UID, 71, 133, 118) end",
+            )
+            .is_err()
         );
     }
 }

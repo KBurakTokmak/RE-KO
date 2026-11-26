@@ -84,8 +84,28 @@ fn kind_matches(kind: i32, weapon: i32, id: u32) -> bool {
         12 => weapon == 60,
         13 => matches!(weapon, 210 | 220 | 230 | 240),
         14 => weapon == 11,
+        23 => true,
         _ => false,
     }
+}
+fn upgrade_item_type(tx: &rusqlite::Connection, item_id: u32) -> anyhow::Result<Option<(u8, u8)>> {
+    let exact = tx
+        .query_row(
+            "SELECT item_class,item_ext FROM world_upgrade_item_types WHERE item_id=?1",
+            [item_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if exact.is_some() {
+        return Ok(exact);
+    }
+    Ok(tx
+        .query_row(
+            "SELECT item_class,item_ext FROM world_upgrade_item_types WHERE item_id=?1",
+            [item_id / 1000 * 1000],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
 }
 type Outcome = ([starter::Item; 28], u32, Vec<u8>, u8);
 fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Result<Outcome> {
@@ -142,17 +162,9 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
     let (base, ext) = catalog
         .item(origin)
         .ok_or_else(|| anyhow::anyhow!("unknown item"))?;
-    anyhow::ensure!(ext.is_some(), "unknown extension");
-    let (class, _ext): (u8, u8) = tx
-        .query_row(
-            "SELECT item_class,item_ext FROM world_upgrade_item_types WHERE item_id=?1",
-            [origin / 1000 * 1000],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?
+    let ext = ext.ok_or_else(|| anyhow::anyhow!("unknown extension"))?;
+    let (class, _ext): (u8, u8) = upgrade_item_type(&tx, origin)?
         .ok_or_else(|| anyhow::anyhow!("missing upgrade metadata"))?;
-    // Accessory/rebirth exchanges use separate source handlers.
-    anyhow::ensure!(matches!(class, 1..=4), "unsupported upgrade class");
     let supplied: Vec<u32> = entries[1..]
         .iter()
         .filter(|(_, pos)| *pos != 255)
@@ -167,6 +179,23 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
         ingredients.remove(ingredients.iter().position(|i| *i == id).unwrap());
     }
     ingredients.sort_unstable();
+    let ext_kind = combat::integer(ext, 7);
+    let weapon_kind = combat::integer(base, 10);
+    // Accessory/non-upgradeable class 0 items stay excluded; rebirth items (ext 11|12) and +10 unique conversions keep class 0 support.
+    anyhow::ensure!(
+        origin / 100_000_000 != 3
+            && class != 8
+            && !matches!(weapon_kind, 91..=94)
+            && (matches!(class, 1..=4)
+                || (class == 0
+                    && (matches!(ext_kind, 11 | 12)
+                        || (ingredients == [379256000] && ext_kind == 4)))),
+        "unsupported upgrade class"
+    );
+    anyhow::ensure!(
+        ingredients != [379257000] || matches!(ext_kind, 11 | 12),
+        "rebirth upgrade scroll requires a rebirth item"
+    );
     anyhow::ensure!(
         p[1] != 7 || ingredients == [379256000] || ingredients == [379257000],
         "invalid reverse materials"
@@ -231,16 +260,10 @@ fn attempt(lobby: &Lobby, account: &str, s: &Session, p: &[u8]) -> anyhow::Resul
         .ok_or_else(|| anyhow::anyhow!("result absent from client"))?;
     let newext = newext.ok_or_else(|| anyhow::anyhow!("result extension absent from client"))?;
     if ingredients == [379256000] {
-        let result_class: Option<u8> = tx
-            .query_row(
-                "SELECT item_class FROM world_upgrade_item_types WHERE item_id=?1",
-                [upgraded / 1000 * 1000],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let result_class = upgrade_item_type(&tx, upgraded)?.map(|(class, _)| class);
         anyhow::ensure!(
             bonus.is_none()
-                && result_class == Some(4)
+                && matches!(result_class, Some(4) | Some(0))
                 && matches!(combat::integer(newext, 7), 11 | 12),
             "item has no compatible reverse variant"
         );
@@ -582,5 +605,121 @@ mod tests {
         );
         s.position.x += 101;
         assert!(attempt(&lobby, "test", &s, &p).is_err());
+    }
+
+    #[test]
+    fn unique_chitin_shield_converts_to_rebirth_and_upgrades_with_rebirth_scroll() {
+        let Some((lobby, mut s)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        s.anvil = Some((5001, 0, s.position));
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO character_inventory VALUES ('test',0,0,170250267,100,1),('test',0,1,379256000,1,1),('test',0,2,379257000,1,1)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO world_upgrade_item_types VALUES (170250000,1,12),(170250267,3,12),(170251000,0,36),(170251241,4,36),(170251242,4,36)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO world_reference_rules VALUES ('ITEM_UPGRADE',102003,?1),('ITEM_UPGRADE',101200,?2)",
+                [
+                    r#"{"nIndex":102003,"nOriginItem":50267,"nOriginType":12,"nReqNoah":0,"bRateType":4,"nGenRate":10000,"nGiveItem":974,"nNPCNum":5001,"nReqItem1":379256000,"nReqItem2":0,"nReqItem3":0,"nReqItem4":0,"nReqItem5":0,"nReqItem6":0,"nReqItem7":0,"nReqItem8":0}"#,
+                    r#"{"nIndex":101200,"nOriginItem":51241,"nOriginType":12,"nReqNoah":0,"bRateType":4,"nGenRate":10000,"nGiveItem":1,"nNPCNum":5001,"nReqItem1":379257000,"nReqItem2":0,"nReqItem3":0,"nReqItem4":0,"nReqItem5":0,"nReqItem6":0,"nReqItem7":0,"nReqItem8":0}"#,
+                ],
+            )
+            .unwrap();
+        }
+        let build_packet = |mode: u8, item: u32, scroll: u32, scroll_pos: u8| {
+            let mut p = vec![0x5b, 2, mode, 0, 0];
+            for (id, pos) in [(item, 0u8), (scroll, scroll_pos)]
+                .into_iter()
+                .chain(std::iter::repeat_n((0, 255), 8))
+            {
+                p.extend(id.to_le_bytes());
+                p.push(pos);
+            }
+            p
+        };
+        let (bag, _, reply, success) = attempt(
+            &lobby,
+            "test",
+            &s,
+            &build_packet(1, 170250267, 379256000, 1),
+        )
+        .unwrap();
+        assert_eq!((success, reply[3], bag[0].id), (1, 1, 170251241));
+        let (bag, _, reply, success) = attempt(
+            &lobby,
+            "test",
+            &s,
+            &build_packet(1, 170251241, 379257000, 2),
+        )
+        .unwrap();
+        assert_eq!((success, reply[3], bag[0].id), (1, 1, 170251242));
+
+        // +10 unique Chitin Shield (class 0, ext 4) converts to +21 rebirth, while non-rebirth class-0 items and accessories fail.
+        {
+            let db = lobby.db.lock().unwrap();
+            db.execute(
+                "INSERT OR REPLACE INTO character_inventory VALUES ('test',0,0,170250270,100,1),('test',0,1,379256000,1,1),('test',0,2,379257000,1,2),('test',0,3,310150211,100,1),('test',0,4,110111070,100,1)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT OR REPLACE INTO world_upgrade_item_types VALUES (170250270,0,12),(170251261,4,36),(310150000,0,18),(110111070,0,0)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO world_reference_rules VALUES ('ITEM_UPGRADE',102006,?1),('ITEM_UPGRADE',101006,?2),('ITEM_UPGRADE',900348,?3)",
+                [
+                    r#"{"nIndex":102006,"nOriginItem":50270,"nOriginType":12,"nReqNoah":0,"bRateType":4,"nGenRate":10000,"nGiveItem":991,"nNPCNum":5001,"nReqItem1":379256000,"nReqItem2":0,"nReqItem3":0,"nReqItem4":0,"nReqItem5":0,"nReqItem6":0,"nReqItem7":0,"nReqItem8":0}"#,
+                    r#"{"nIndex":101006,"nOriginItem":11070,"nOriginType":23,"nReqNoah":0,"bRateType":4,"nGenRate":10000,"nGiveItem":1,"nNPCNum":5001,"nReqItem1":379257000,"nReqItem2":0,"nReqItem3":0,"nReqItem4":0,"nReqItem5":0,"nReqItem6":0,"nReqItem7":0,"nReqItem8":0}"#,
+                    r#"{"nIndex":900348,"nOriginItem":50211,"nOriginType":2,"nReqNoah":0,"bRateType":4,"nGenRate":10000,"nGiveItem":1,"nNPCNum":5001,"nReqItem1":379257000,"nReqItem2":0,"nReqItem3":0,"nReqItem4":0,"nReqItem5":0,"nReqItem6":0,"nReqItem7":0,"nReqItem8":0}"#,
+                ],
+            )
+            .unwrap();
+        }
+        let (bag, _, reply, success) = attempt(
+            &lobby,
+            "test",
+            &s,
+            &build_packet(1, 170250270, 379256000, 1),
+        )
+        .unwrap();
+        assert_eq!((success, reply[3], bag[0].id), (1, 1, 170251261));
+        assert!(
+            attempt(&lobby, "test", &s, &{
+                let mut p = vec![0x5b, 2, 1, 0, 0];
+                for (id, pos) in [(310150211u32, 3u8), (379257000, 2)]
+                    .into_iter()
+                    .chain(std::iter::repeat_n((0, 255), 8))
+                {
+                    p.extend(id.to_le_bytes());
+                    p.push(pos);
+                }
+                p
+            },)
+            .is_err()
+        );
+        assert!(
+            attempt(&lobby, "test", &s, &{
+                let mut p = vec![0x5b, 2, 1, 0, 0];
+                for (id, pos) in [(110111070u32, 4u8), (379257000, 2)]
+                    .into_iter()
+                    .chain(std::iter::repeat_n((0, 255), 8))
+                {
+                    p.extend(id.to_le_bytes());
+                    p.push(pos);
+                }
+                p
+            },)
+            .is_err()
+        );
     }
 }

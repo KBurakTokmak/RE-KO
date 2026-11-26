@@ -847,17 +847,23 @@ async fn handle_game_payload_inner(
             if !session.entered || session.skills.hp == 0 {
                 return;
             }
+            let now_instant = std::time::Instant::now();
             if session.skills.stunned(skills::now_ms()) {
-                let mut packet = vec![0x1e];
-                packet.extend(session.position.x.to_le_bytes());
-                packet.extend(session.position.z.to_le_bytes());
-                send_response(sock, peer, &None, &packet, "STUN_POSITION").await;
+                if session.last_stun_snap.is_none_or(|at| {
+                    now_instant.saturating_duration_since(at) >= Duration::from_millis(750)
+                }) {
+                    session.last_stun_snap = Some(now_instant);
+                    let mut packet = vec![0x1e];
+                    packet.extend(session.position.x.to_le_bytes());
+                    packet.extend(session.position.z.to_le_bytes());
+                    send_response(sock, peer, &None, &packet, "STUN_POSITION").await;
+                }
                 return;
             }
             let Some(position) = session.movement.validate(
                 payload,
                 session.position,
-                std::time::Instant::now(),
+                now_instant,
                 session
                     .skills
                     .speed(lobby.skills.as_ref(), skills::now_ms()),
@@ -865,42 +871,46 @@ async fn handle_game_payload_inner(
                 tracing::warn!(%peer, "movement refused: malformed packet, speed, or distance limit");
                 return;
             };
-            let saved = movement::save(
-                &lobby.db.lock().unwrap(),
-                account,
-                session.character.slot,
-                position,
-            );
-            match saved {
-                Ok(()) => {
-                    let previous = session.position;
-                    session.position = position;
-                    if travel::movement_event(sock, peer, lobby, account, session, previous).await {
-                        return;
+            let previous = session.position;
+            session.position = position;
+            if travel::movement_event(sock, peer, lobby, account, session, previous).await {
+                return;
+            }
+            social::movement(lobby, account, session, payload);
+            population::refresh(sock, peer, lobby, session).await;
+            let moving = i16::from_le_bytes([payload[7], payload[8]]) != 0;
+            if moving {
+                session.sitting = false;
+                // Forecast movement can arrive after casting starts; phase4 cancels casts.
+                match magic::remove_stealth(lobby, account, session, true) {
+                    Ok(true) => {
+                        send_response(sock, peer, &None, &[0x31, 5, 91], "HIDE_BROKEN_ON_MOVE")
+                            .await
                     }
-                    social::movement(lobby, account, session, payload);
-                    population::refresh(sock, peer, lobby, session).await;
-                    if i16::from_le_bytes([payload[7], payload[8]]) != 0 {
-                        session.sitting = false;
-                        // Forecast movement can arrive after casting starts; phase4 cancels casts.
-                        match magic::remove_stealth(lobby, account, session, true) {
-                            Ok(true) => {
-                                send_response(
-                                    sock,
-                                    peer,
-                                    &None,
-                                    &[0x31, 5, 91],
-                                    "HIDE_BROKEN_ON_MOVE",
-                                )
-                                .await
-                            }
-                            Err(error) => tracing::error!(%peer,%error,"hide break failed"),
-                            _ => {}
-                        }
-                    }
-                    tracing::debug!(%peer, ?position, "movement position committed");
+                    Err(error) => tracing::error!(%peer,%error,"hide break failed"),
+                    _ => {}
                 }
-                Err(error) => tracing::error!(%peer, %error, "failed to save movement position"),
+            }
+            let should_persist = !moving
+                || payload[9] == 0
+                || session.last_position_save.is_none_or(|saved_at| {
+                    now_instant.saturating_duration_since(saved_at) >= Duration::from_secs(1)
+                });
+            if should_persist {
+                match movement::save(
+                    &lobby.db.lock().unwrap(),
+                    account,
+                    session.character.slot,
+                    position,
+                ) {
+                    Ok(()) => {
+                        session.last_position_save = Some(now_instant);
+                        tracing::debug!(%peer, ?position, "movement position committed");
+                    }
+                    Err(error) => {
+                        tracing::error!(%peer, %error, "failed to save movement position")
+                    }
+                }
             }
         }
         0x08 => {
@@ -1744,6 +1754,10 @@ async fn tick_character(
                 }
                 if category == 20 {
                     send_response(sock, peer, &None, &[0x5e, 2, 4, 0], "BLIND_STATUS_END").await;
+                    if !current_status[1] {
+                        send_response(sock, peer, &None, &[0x5e, 2, 2, 0], "BLIND_VISUAL_END")
+                            .await;
+                    }
                 }
                 if category == 32 {
                     let mut hub = lobby.social.lock().unwrap();
@@ -1791,6 +1805,7 @@ fn enable_game_keepalive(sock: &TcpStream) -> std::io::Result<()> {
 /// Handles incoming game client connection on port 15001.
 async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lobby::Lobby>) {
     tracing::info!(%peer, "game client connected to game server (15001)");
+    let _ = sock.set_nodelay(true);
     if let Err(error) = enable_game_keepalive(&sock) {
         tracing::warn!(%peer, %error, "could not configure game TCP keepalive");
     }
@@ -1965,6 +1980,17 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
     if kicked {
         tracing::info!(%peer, "closing game connection at operator request");
     }
+    if let (Some(session), Some(account)) = (
+        world.as_ref().filter(|s| s.entered),
+        lease.as_ref().map(lobby::AccountLease::name),
+    ) && let Err(error) = movement::save(
+        &lobby.db.lock().unwrap(),
+        account,
+        session.character.slot,
+        session.position,
+    ) {
+        tracing::warn!(%peer, %error, "failed to flush final movement position on disconnect");
+    }
     if let (Some(world), Some(registry)) = (world.as_ref(), lobby.monsters.as_ref()) {
         registry.take_experience(&world.character.name);
         registry.forget(world.player_id);
@@ -2028,6 +2054,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let login_loop = async {
         loop {
             let (sock, peer) = login_listener.accept().await?;
+            let _ = sock.set_nodelay(true);
             let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(handle_client(sock, peer, lobby.clone()).instrument(
                 tracing::info_span!("connection", connection, service = "login", %peer),
@@ -2040,6 +2067,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let game_loop = async {
         loop {
             let (sock, peer) = game_listener.accept().await?;
+            let _ = sock.set_nodelay(true);
             let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(handle_game_client(sock, peer, lobby.clone()).instrument(
                 tracing::info_span!("connection", connection, service = "game", %peer),

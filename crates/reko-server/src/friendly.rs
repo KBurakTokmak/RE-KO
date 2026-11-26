@@ -268,6 +268,7 @@ fn apply(
             hub.send(id, state.hp_packet(0));
             hub.send(id, state.mana_packet());
             hub.send(id, crate::inventory::attributes(&player.s.combat, 2));
+            let poison_cleared = removed.contains(&20) && !state.periodic_statuses()[1];
             for category in removed {
                 hub.send(id, vec![0x31, 5, category]);
                 if let Some(scroll) = state.buffs.get(&category).copied()
@@ -284,9 +285,13 @@ fn apply(
             if spell.types[0] == 5 && combat::integer(row, 1) == 2 {
                 hub.send(id, vec![0x5e, 2, 3, 0]);
                 hub.send(id, vec![0x5e, 2, 4, 0]);
+                if poison_cleared {
+                    hub.send(id, vec![0x5e, 2, 2, 0]);
+                }
             }
             hub.send(id, effect.clone());
         } else {
+            let poison_cleared = removed.contains(&20) && !state.periodic_statuses()[1];
             for category in removed {
                 effects.push((id, vec![0x31, 5, category]));
                 if let Some(scroll) = state.buffs.get(&category).copied()
@@ -303,6 +308,9 @@ fn apply(
             if spell.types[0] == 5 && combat::integer(row, 1) == 2 {
                 effects.push((id, vec![0x5e, 2, 3, 0]));
                 effects.push((id, vec![0x5e, 2, 4, 0]));
+                if poison_cleared {
+                    effects.push((id, vec![0x5e, 2, 2, 0]));
+                }
             }
         }
         effects.push((id, effect));

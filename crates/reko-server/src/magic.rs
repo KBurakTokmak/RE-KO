@@ -275,14 +275,14 @@ pub(crate) async fn handle(
             super::send_response(sock, peer, &None, payload, "CURSE_CASTING").await;
             return true;
         }
-        if spell.moral == 12
-            && payload[1] == 2
+        if payload[1] == 2
             && session
                 .pending_cast
                 .as_ref()
                 .is_some_and(|pending| pending.matches(id, target, now))
         {
-            if payload[10..16].iter().any(|&value| value != 0)
+            if spell.moral == 12
+                && payload[10..16].iter().any(|&value| value != 0)
                 && let Ok(center) = crate::mage::center(session.position, spell, payload)
             {
                 session.magic_projectiles.insert(
@@ -1298,5 +1298,120 @@ mod tests {
                 "stationary 4.5m skill rejected for target {target}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn source_marking_accepts_flying_phase_breaks_stealth_and_blocks_invisibility() {
+        let Some((mut lobby, mut caster)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let game = reko_common::game_dir();
+        if !game.join("Data/Skill_Magic_Main_us.tbl").exists() {
+            return;
+        }
+        lobby.skills = Some(skills::Catalog::load(&game).unwrap());
+        let lobby = Arc::new(lobby);
+        let target_char = crate::characters::Character {
+            slot: 0,
+            name: "MarkTarget".into(),
+            race: 12,
+            class: 208,
+            face: 0,
+            hair: 0,
+            stats: [60, 150, 255, 50, 50],
+        };
+        {
+            let mut db = lobby.db.lock().unwrap();
+            crate::characters::ensure_account(&db, "target_acc").unwrap();
+            crate::characters::set_nation(&db, "target_acc", 2).unwrap();
+            crate::characters::create(&mut db, "target_acc", &target_char).unwrap();
+            db.execute(
+                "INSERT INTO character_skill_state (account,slot,points,hp,mana,buffs) VALUES ('test',0,?1,5000,5000,'[]'),('target_acc',0,?2,5000,5000,'[]')",
+                rusqlite::params![r#"[80,0,0,80,20,0,0]"#, r#"[80,0,0,80,20,0,0]"#],
+            )
+            .unwrap();
+        }
+        caster.position = crate::movement::Position {
+            zone: 48,
+            x: 1330,
+            z: 1180,
+            y: 0,
+        };
+        caster.skills = skills::load(&lobby.db.lock().unwrap(), "test", 0).unwrap();
+        caster.skills.set_limits(5000, 5000);
+        skills::save(&lobby.db.lock().unwrap(), "test", 0, &caster.skills).unwrap();
+
+        let mut target = crate::world_entry::Session::new(target_char).unwrap();
+        target.entered = true;
+        target.progress.level = 80;
+        target.position = caster.position;
+        target.skills = skills::load(&lobby.db.lock().unwrap(), "target_acc", 0).unwrap();
+        target.skills.set_limits(5000, 5000);
+        target.skills.buffs.insert(
+            91,
+            skills::Buff {
+                skill: 108645,
+                until: skills::now_ms() + 30_000,
+            },
+        );
+        skills::save(&lobby.db.lock().unwrap(), "target_acc", 0, &target.skills).unwrap();
+
+        crate::social::synchronize(&lobby, "test", &mut caster);
+        crate::social::synchronize(&lobby, "target_acc", &mut target);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut socket, peer) = listener.accept().await.unwrap();
+
+        let caster_id = caster.player_id;
+        let request = |id: u32, to: u16, phase: u8| {
+            let mut p = skills::effect(id, caster_id);
+            p[1] = phase;
+            p[8..10].copy_from_slice(&to.to_le_bytes());
+            p
+        };
+        for phase in [1, 2, 3] {
+            let packet = request(108815, target.player_id, phase);
+            assert!(
+                handle(
+                    &mut socket,
+                    peer,
+                    &packet,
+                    &lobby,
+                    Some("test"),
+                    Some(&mut caster),
+                )
+                .await
+            );
+        }
+        let target_state = skills::load(&lobby.db.lock().unwrap(), "target_acc", 0).unwrap();
+        assert!(target_state.buffs.contains_key(&26));
+        assert!(!target_state.buffs.contains_key(&91));
+
+        target.skills = target_state;
+        for phase in [1, 3] {
+            let mut p = skills::effect(208645, target.player_id);
+            p[1] = phase;
+            p[8..10].copy_from_slice(&target.player_id.to_le_bytes());
+            assert!(
+                handle(
+                    &mut socket,
+                    peer,
+                    &p,
+                    &lobby,
+                    Some("target_acc"),
+                    Some(&mut target),
+                )
+                .await
+            );
+        }
+        assert!(
+            !skills::load(&lobby.db.lock().unwrap(), "target_acc", 0)
+                .unwrap()
+                .buffs
+                .contains_key(&91)
+        );
     }
 }

@@ -79,6 +79,8 @@ pub(crate) struct Session {
     pub pending_cast: Option<crate::magic::Cast>,
     pub magic_projectiles: std::collections::HashMap<u32, crate::mage::Flight>,
     pub arrows: std::collections::HashMap<u32, Vec<crate::archery::Volley>>,
+    pub last_position_save: Option<std::time::Instant>,
+    pub last_stun_snap: Option<std::time::Instant>,
 }
 
 impl Session {
@@ -124,6 +126,8 @@ impl Session {
             pending_cast: None,
             magic_projectiles: std::collections::HashMap::new(),
             arrows: std::collections::HashMap::new(),
+            last_position_save: None,
+            last_stun_snap: None,
         })
     }
 
@@ -349,6 +353,8 @@ mod tests {
             pending_cast: None,
             magic_projectiles: std::collections::HashMap::new(),
             arrows: std::collections::HashMap::new(),
+            last_position_save: None,
+            last_stun_snap: None,
         }
     }
 

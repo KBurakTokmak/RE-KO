@@ -599,6 +599,16 @@ pub(crate) fn hit_player(
         if matches!(category, 6 | 40 | 47) {
             hub.send(target_id, vec![0x5e, 2, 3, 1]);
         }
+        if category == 47 {
+            let mut stop_pkt = vec![0x06];
+            stop_pkt.extend(target_id.to_le_bytes());
+            stop_pkt.extend(target_player.s.position.x.to_le_bytes());
+            stop_pkt.extend(target_player.s.position.z.to_le_bytes());
+            stop_pkt.extend(target_player.s.position.y.to_le_bytes());
+            stop_pkt.extend(0u16.to_le_bytes());
+            stop_pkt.push(0);
+            hub.broadcast_visual(target_id, None, None, &stop_pkt);
+        }
     }
     if stealth_broken {
         hub.send(target_id, vec![0x31, 5, 91]);
