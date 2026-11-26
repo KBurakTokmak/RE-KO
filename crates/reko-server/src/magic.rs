@@ -126,6 +126,21 @@ pub(crate) async fn handle(
     };
     let target = u16::from_le_bytes([payload[8], payload[9]]);
     let now = skills::now_ms();
+    if payload[1] == 4 && caster == session.player_id && matches!(id, 108780 | 208780) {
+        let reason = i16::from_le_bytes([payload[16], payload[17]]);
+        // The client sends -101 to remove the projectile after a successful impact.
+        // A -100 casting cancellation can only discard a pending copy of this spell.
+        if reason == -100
+            && session
+                .pending_cast
+                .as_ref()
+                .is_some_and(|pending| pending.skill == id)
+        {
+            session.pending_cast = None;
+            session.magic_projectiles.remove(&id);
+        }
+        return true;
+    }
     if payload[1] == 6 && target == caster && caster == session.player_id {
         if spell.types.contains(&4) && matches!(spell.moral, 7 | 10 | 12) {
             refused(
@@ -1106,12 +1121,39 @@ mod tests {
             client.try_read(&mut [0]).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+        let player_id = session.player_id;
         let request = |id, target, stage| {
-            let mut p = skills::effect(id, session.player_id);
+            let mut p = skills::effect(id, player_id);
             p[1] = stage;
             p[8..10].copy_from_slice(&u16::to_le_bytes(target));
             p
         };
+        session.pending_cast = Some(Cast {
+            skill: 108780,
+            target: u16::MAX,
+            expires_at: skills::now_ms() + 5000,
+        });
+        for (reason, target, pending) in [(-101i16, u16::MAX, true), (-100, player_id, false)] {
+            let mut smoke_fail = request(108780, target, 4);
+            smoke_fail[16..18].copy_from_slice(&reason.to_le_bytes());
+            assert!(
+                handle(
+                    &mut socket,
+                    peer,
+                    &smoke_fail,
+                    &lobby,
+                    Some("admin"),
+                    Some(&mut session)
+                )
+                .await
+            );
+            assert_eq!(session.pending_cast.is_some(), pending);
+            assert_eq!(
+                client.try_read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_eq!(session.skills.mana, 4110);
+        }
         let vamp_cast = request(108650, 10000, 1);
         let vamp_fly = request(108650, 10000, 2);
         let vamp_hit = request(108650, 10000, 3);

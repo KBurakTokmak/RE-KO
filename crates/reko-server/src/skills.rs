@@ -268,6 +268,7 @@ pub(crate) struct Periodic {
 }
 
 pub(crate) const PVP_PERIODIC_BASE: u32 = 900_000;
+pub(crate) const DAMAGE_DURATION_EXPIRED: [u8; 3] = [0x31, 5, 200];
 const PVP_PERIODIC_END: u32 = PVP_PERIODIC_BASE + 400;
 
 pub(crate) fn damage_status(key: u32) -> u8 {

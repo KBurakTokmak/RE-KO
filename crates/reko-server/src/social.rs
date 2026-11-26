@@ -32,6 +32,7 @@ pub(crate) struct Hub {
     pub periodic_sources: HashMap<(u16, u32), u16>,
     skill_notice: HashSet<u16>,
     pub transfers: HashMap<u16, Position>,
+    arena_transfer_predecessors: HashMap<u16, u16>,
     pub loot_rotation: HashMap<u16, usize>,
     visible: HashMap<u16, HashSet<u16>>,
     gm_public: HashSet<u16>,
@@ -211,11 +212,30 @@ impl Hub {
             }
         }
     }
-    pub fn queue_transfer(&mut self, id: u16, destination: Position) {
+    pub fn set_transfer(&mut self, id: u16, destination: Position) {
+        self.arena_transfer_predecessors.remove(&id);
         self.transfers.insert(id, destination);
+    }
+    pub fn queue_transfer(&mut self, id: u16, destination: Position) {
+        self.set_transfer(id, destination);
         if let Some(wake) = self.notifiers.get(&id) {
             wake.notify_one();
         }
+    }
+    pub fn queue_arena_transfer(&mut self, id: u16, destination: Position, first: u16) {
+        self.queue_transfer(id, destination);
+        self.arena_transfer_predecessors.insert(id, first);
+    }
+    pub fn take_transfer(&mut self, id: u16) -> (Option<Position>, Option<u16>) {
+        (
+            self.transfers.remove(&id),
+            self.arena_transfer_predecessors.remove(&id),
+        )
+    }
+    pub fn arena_entry_pending(&self, id: u16, zone: u8) -> bool {
+        self.players
+            .get(&id)
+            .is_some_and(|p| p.s.position.zone != zone || p.s.zone_loading || !p.s.entered)
     }
     #[cfg(test)]
     pub fn take_queue(&mut self, id: u16) -> Vec<Vec<u8>> {
@@ -268,7 +288,7 @@ impl Hub {
         self.gm_public.remove(&id);
         self.skill_refresh.remove(&id);
         self.skill_notice.remove(&id);
-        self.transfers.remove(&id);
+        self.take_transfer(id);
         party::leave(self, id, id);
         self.party_invites
             .retain(|target, (leader, _)| *target != id && *leader != id);

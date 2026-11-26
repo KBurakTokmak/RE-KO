@@ -244,7 +244,7 @@ fn transport(
         if player.s.player_id == s.player_id {
             own = Some(destination)
         } else {
-            hub.transfers.insert(player.s.player_id, destination);
+            hub.set_transfer(player.s.player_id, destination);
             hub.send(
                 player.s.player_id,
                 effect(spell, s.player_id, player.s.player_id, None),

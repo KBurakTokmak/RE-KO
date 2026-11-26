@@ -3,7 +3,7 @@ use crate::{
     clans, combat, lobby::Lobby, movement::Position, npc_scripts::Context, world_entry::Session,
 };
 use rusqlite::{Connection, params};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 use tokio::net::TcpStream;
 
 const SCRIPT: &str = "reko_clan_trial.lua";
@@ -134,7 +134,7 @@ fn start(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8
     )?;
     tx.commit()?;
     for id in targets {
-        hub.transfers.insert(id, destination);
+        hub.set_transfer(id, destination);
     }
     drop(hub);
     drop(db);
@@ -146,10 +146,27 @@ pub(crate) async fn transfer(
     lobby: &Lobby,
     s: &mut Session,
 ) {
-    let destination = lobby.social.lock().unwrap().transfers.remove(&s.player_id);
+    let (destination, first) = lobby.social.lock().unwrap().take_transfer(s.player_id);
     if let Some(destination) = destination {
         let p = crate::travel::begin(lobby, s, destination);
-        crate::send_response(sock, peer, &None, &p, "CLAN_TRIAL_TRANSFER").await;
+        let label = if let Some(first) = first {
+            // Shared 1453 clients can collide when opening the Arena assets together.
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while lobby
+                    .social
+                    .lock()
+                    .unwrap()
+                    .arena_entry_pending(first, destination.zone)
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            "ARENA_ZONE_CHANGE"
+        } else {
+            "CLAN_TRIAL_TRANSFER"
+        };
+        crate::send_response(sock, peer, &None, &p, label).await;
         if s.entered {
             crate::population::refresh(sock, peer, lobby, s).await;
             let account = lobby

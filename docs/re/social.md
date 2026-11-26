@@ -325,10 +325,18 @@ different clan leaders) are handled:
   `CHALLENGE_ZONE_ERROR` (`12`). Pending requests expire after 60s and cancel on
   disconnect or zone change.
 - Accepting PvP commits both players atomically to Zone 48 (`ZONE_ARENA`) at
-  1453 coordinates `(135, 115)` and `(120, 115)` and triggers immediate zone
-  transfers. Accepting Clan-vs-Clan commits all eligible online same-zone
-  members of both clans atomically to `(128, 125)` and `(135, 120)`.
+  1453 coordinates `(135, 115)` and `(120, 115)`. The accepting client loads
+  first. The challenger follows after the acceptor finishes loading or
+  disconnects, with a five-second fallback. This separates the Arena asset
+  loads when two clients share an installation. Accepting Clan-vs-Clan commits
+  all eligible online same-zone members of both clans atomically to
+  `(128, 125)` and `(135, 120)`.
 - Inside Zone 48, the center lobby around Judge (`13010`) uses 1453
   `Unit.cpp::isInSafetyArea` bounds, and Judge returns players to Moradon's
   imported 1453 start position. Full player-vs-player weapon/spell damage
   remains separate work.
+
+On a shared client installation, the initial Combat invite and its acknowledgement
+both open a native message box through `0075CDF0`. The server delivers the
+recipient's invite first and flushes the sender's acknowledgement 150 ms later
+to separate those loads. Accept, reject and cancel keep immediate dispatch.

@@ -508,10 +508,14 @@ async fn handle_game_payload_inner(
             if let (Some(account), Some(s)) = (
                 account,
                 world.as_mut().filter(|s| s.entered && !s.zone_loading),
-            ) && let Some(destination) = challenge::process(lobby, account, s, payload)
-            {
-                let packet = travel::begin(lobby, s, destination);
-                send_response(sock, peer, &None, &packet, "ARENA_ZONE_CHANGE").await;
+            ) {
+                if let Some(destination) = challenge::process(lobby, account, s, payload) {
+                    let packet = travel::begin(lobby, s, destination);
+                    send_response(sock, peer, &None, &packet, "ARENA_ZONE_CHANGE").await;
+                } else if matches!(payload, [0x75, 1 | 6, _, ..]) {
+                    // Give the recipient's dialog time to load before flushing the sender's dialog.
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
             }
         }
         // Opcode 0x2B: WIZ_VERSION_CHECK
@@ -1520,6 +1524,12 @@ async fn tick_character(
         let db = lobby.db.lock().unwrap();
         skills::load(&db, account, session.character.slot).and_then(|mut next| {
             let before = next.hp;
+            let previous_status = next.periodic_statuses();
+            let damage_effects = next
+                .periodic
+                .values()
+                .filter(|effect| effect.amount < 0)
+                .count();
             let periodic_damage = next.tick_periodic(now);
             let died = before > 0 && next.hp == 0;
             if died {
@@ -1553,7 +1563,14 @@ async fn tick_character(
                 next.set_limits(stats.hp, stats.mp);
             }
             let hp = (i32::from(next.hp) - i32::from(before)) as i16;
-            if hp != 0 || mp != 0 || !expired.is_empty() || periodic_due {
+            let ended_damage_effects = damage_effects
+                - next
+                    .periodic
+                    .values()
+                    .filter(|effect| effect.amount < 0)
+                    .count();
+            if hp != 0 || mp != 0 || !expired.is_empty() || periodic_due || ended_damage_effects > 0
+            {
                 skills::save(&db, account, session.character.slot, &next)?;
             }
             Ok((
@@ -1564,6 +1581,8 @@ async fn tick_character(
                 restored_scrolls,
                 died,
                 periodic_damage,
+                previous_status,
+                ended_damage_effects,
             ))
         })
     };
@@ -1571,8 +1590,17 @@ async fn tick_character(
         session.next_regen = now + 6000;
     }
     match result {
-        Ok((next, hp, mp, expired, restored_scrolls, died, periodic_damage)) => {
-            let previous_status = session.skills.periodic_statuses();
+        Ok((
+            next,
+            hp,
+            mp,
+            expired,
+            restored_scrolls,
+            died,
+            periodic_damage,
+            previous_status,
+            ended_damage_effects,
+        )) => {
             let was_slowed =
                 session.skills.slowed(lobby.skills.as_ref(), 0) || session.skills.stunned(0);
             session.skills = next;
@@ -1661,10 +1689,19 @@ async fn tick_character(
                 )
                 .await;
             }
-            for (index, (was_active, active)) in previous_status
-                .into_iter()
-                .zip(session.skills.periodic_statuses())
-                .enumerate()
+            let current_status = session.skills.periodic_statuses();
+            for _ in 0..ended_damage_effects {
+                send_response(
+                    sock,
+                    peer,
+                    &None,
+                    &skills::DAMAGE_DURATION_EXPIRED,
+                    "PERIODIC_EFFECT_END",
+                )
+                .await;
+            }
+            for (index, (was_active, active)) in
+                previous_status.into_iter().zip(current_status).enumerate()
             {
                 if was_active && !active {
                     send_response(
@@ -2270,7 +2307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lethal_periodic_damage_sends_death_to_player_and_observer_and_replays_on_login() {
+    async fn periodic_expiry_and_death_notify_the_player_and_observer() {
         let lobby = lobby::Lobby::new(
             rusqlite::Connection::open_in_memory().unwrap(),
             characters::CreationRules::fixture(),
@@ -2293,10 +2330,18 @@ mod tests {
         session.next_regen = 6000;
         session.skills.hp = 20;
         session.skills.periodic.insert(
-            900_000,
+            900_006,
+            skills::Periodic {
+                amount: -5,
+                next: 2000,
+                until: 2000,
+            },
+        );
+        session.skills.periodic.insert(
+            900_004,
             skills::Periodic {
                 amount: -50,
-                next: 2000,
+                next: 4000,
                 until: 6000,
             },
         );
@@ -2313,7 +2358,8 @@ mod tests {
             let mut hub = lobby.social.lock().unwrap();
             hub.synchronize("bleeding", &session);
             hub.synchronize("observer", &observer);
-            hub.periodic_sources.insert((1, 900_000), 2);
+            hub.periodic_sources.insert((1, 900_006), 2);
+            hub.periodic_sources.insert((1, 900_004), 2);
             hub.take_queue(1);
             hub.take_queue(2);
         }
@@ -2325,16 +2371,22 @@ mod tests {
         tick_character(&mut socket, peer, &lobby, "bleeding", &mut session, 2000).await;
         let hp = receive(&mut client).await;
         assert_eq!((hp[0], &hp[5..]), (0x17, [2, 0].as_slice()));
+        assert_eq!(receive(&mut client).await, [0x31, 5, 200]);
+        assert_eq!(receive(&mut client).await, [0x5e, 2, 2, 0]);
+        assert_eq!(session.skills.hp, 15);
+        tick_character(&mut socket, peer, &lobby, "bleeding", &mut session, 4000).await;
+        assert_eq!(receive(&mut client).await, [0x17, 100, 0, 0, 0, 2, 0]);
+        assert_eq!(receive(&mut client).await, [0x31, 5, 200]);
         assert_eq!(receive(&mut client).await, [0x5e, 2, 1, 0]);
         assert_eq!(session.skills.hp, 0);
-        tick_character(&mut socket, peer, &lobby, "bleeding", &mut session, 4000).await;
         {
             let mut hub = lobby.social.lock().unwrap();
             assert_eq!(hub.take_queue(1), [vec![0x11, 1, 0]]);
             let observer = hub.take_queue(2);
             assert_eq!(observer[0][0], 0x22);
-            assert_eq!(&observer[0][12..], &(-20i16).to_le_bytes());
-            assert_eq!(observer[1], [0x11, 1, 0]);
+            assert_eq!(&observer[0][12..], &(-5i16).to_le_bytes());
+            assert_eq!(&observer[1][12..], &(-15i16).to_le_bytes());
+            assert_eq!(observer[2], [0x11, 1, 0]);
         }
         session.player_id = 3;
         session.skills = skills::load(&lobby.db.lock().unwrap(), "bleeding", 0).unwrap();

@@ -679,7 +679,14 @@ pub(crate) async fn handle(
                 }
             }
             if cure == Some(1) {
-                super::send_response(sock, peer, &None, &[0x31, 7, 200], "DISEASE_REMOVED").await;
+                super::send_response(
+                    sock,
+                    peer,
+                    &None,
+                    &skills::DAMAGE_DURATION_EXPIRED,
+                    "DISEASE_REMOVED",
+                )
+                .await;
             }
             let cleared_statuses: &[u8] = match cure {
                 Some(1) => &[1, 2],

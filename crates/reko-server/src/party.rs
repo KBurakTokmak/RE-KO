@@ -107,7 +107,7 @@ pub(crate) fn zone_leave(h: &mut Hub, id: u16) {
     leave(h, id, id);
     h.party_invites
         .retain(|target, (owner, _)| *target != id && *owner != id);
-    h.transfers.remove(&id);
+    h.take_transfer(id);
 }
 pub(crate) fn process(h: &mut Hub, id: u16, p: &[u8]) {
     let now = crate::skills::now_ms();

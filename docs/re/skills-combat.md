@@ -523,12 +523,15 @@ client `Skill_Magic_1.tbl` column 4 (`Delay`).
   Blooding uses its 1,000 HP total over ten two-second ticks. The attacker
   receives their own `WIZ_TARGET_HP` damage entries while the victim receives
   HP changes and the native poison or periodic-damage status. PvP attribution
-  stays with the original live player session.
+  stays with the original live player session. Ending or curing a hostile
+  periodic effect sends `31 05 C8` (Type 3 expiry) as well as the applicable
+  status clear, following the supplied 1453 `User.cpp::HPTimeChangeType3`.
 - **Warrior and Rogue control:** Leg Cutting uses the native 50% speed for
   10 seconds. Repeated hits within the same slow do not renew it. Shock Stun
   stops movement, attacks and skills for three seconds. Smoke Screen uses the
   selected ground area and disables targeted attacks on players for 10 seconds.
-  The skill retains its native Stone of Rogue requirement.
+  The skill retains its native Stone of Rogue requirement. The native `31 04`
+  projectile cleanup after impact is acknowledged silently.
 - **Warrior resources and damage:** Pain Killer spends 100 HP for up to 200 MP.
   Blade of Hate uses the 1453 Type 3 base of 150 and Quake uses 500 with a
   10 m radius. Both go through CHA, magic resistance and PvP magic scaling.

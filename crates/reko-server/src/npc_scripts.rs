@@ -1118,7 +1118,7 @@ fn execute(
         }
         if let Some(destination) = party_travel.into_inner() {
             for player in party {
-                hub.transfers.insert(player.s.player_id, destination);
+                hub.set_transfer(player.s.player_id, destination);
             }
         }
     }

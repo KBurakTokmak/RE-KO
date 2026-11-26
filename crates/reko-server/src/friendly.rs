@@ -277,7 +277,7 @@ fn apply(
                 }
             }
             if spell.types[0] == 5 && combat::integer(row, 1) == 1 {
-                hub.send(id, vec![0x31, 7, 200]);
+                hub.send(id, skills::DAMAGE_DURATION_EXPIRED.to_vec());
                 hub.send(id, vec![0x5e, 2, 1, 0]);
                 hub.send(id, vec![0x5e, 2, 2, 0]);
             }
@@ -296,7 +296,7 @@ fn apply(
                 }
             }
             if spell.types[0] == 5 && combat::integer(row, 1) == 1 {
-                effects.push((id, vec![0x31, 7, 200]));
+                effects.push((id, skills::DAMAGE_DURATION_EXPIRED.to_vec()));
                 effects.push((id, vec![0x5e, 2, 1, 0]));
                 effects.push((id, vec![0x5e, 2, 2, 0]));
             }

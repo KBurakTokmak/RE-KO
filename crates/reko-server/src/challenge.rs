@@ -396,7 +396,7 @@ fn accept_pvp(lobby: &Lobby, account: &str, s: &Session) -> Option<Position> {
         hub.send(challenger.s.player_id, vec![0x75, GENERIC_ERROR]);
         return None;
     }
-    hub.queue_transfer(challenger.s.player_id, PVP_CHALLENGER_POS);
+    hub.queue_arena_transfer(challenger.s.player_id, PVP_CHALLENGER_POS, s.player_id);
     Some(PVP_TARGET_POS)
 }
 
@@ -621,8 +621,18 @@ mod tests {
         let target_dest = process(&lobby, "elmoradpvp", &b, &[0x75, PVP_ACCEPT]);
         assert_eq!(target_dest, Some(PVP_TARGET_POS));
         {
-            let hub = lobby.social.lock().unwrap();
-            assert_eq!(hub.transfers.get(&a.player_id), Some(&PVP_CHALLENGER_POS));
+            let mut hub = lobby.social.lock().unwrap();
+            assert_eq!(
+                hub.take_transfer(a.player_id),
+                (Some(PVP_CHALLENGER_POS), Some(b.player_id))
+            );
+            assert!(hub.arena_entry_pending(b.player_id, ZONE_ARENA));
+            let first = &mut hub.players.get_mut(&b.player_id).unwrap().s;
+            first.position = PVP_TARGET_POS;
+            first.zone_loading = true;
+            assert!(hub.arena_entry_pending(b.player_id, ZONE_ARENA));
+            hub.players.get_mut(&b.player_id).unwrap().s.zone_loading = false;
+            assert!(!hub.arena_entry_pending(b.player_id, ZONE_ARENA));
             assert!(!busy(&hub, a.player_id));
             assert!(!busy(&hub, b.player_id));
         }
