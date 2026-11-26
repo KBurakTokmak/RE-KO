@@ -83,6 +83,29 @@ fn distance_meters(a: Position, b: Position) -> f32 {
     f32::from(a.x.abs_diff(b.x)).hypot(f32::from(a.z.abs_diff(b.z))) / 10.0
 }
 
+fn pvp_distance_meters(
+    caster: &Session,
+    origin: Position,
+    target: &Session,
+    use_segment: bool,
+    now: std::time::Instant,
+) -> f32 {
+    let caster_curr = caster.movement.current_position(origin, now);
+    let target_curr = target.movement.current_position(target.position, now);
+    let mut best = distance_meters(origin, target.position)
+        .min(distance_meters(caster_curr, target_curr))
+        .min(distance_meters(origin, target_curr))
+        .min(distance_meters(caster_curr, target.position));
+    if use_segment {
+        let caster_seg = caster.movement.combat_position(origin, target_curr, now);
+        let target_seg = target
+            .movement
+            .combat_position(target.position, caster_curr, now);
+        best = best.min(distance_meters(caster_seg, target_seg));
+    }
+    best
+}
+
 pub(crate) fn can_target(lobby: &Lobby, caster: &Session, target_id: u16) -> bool {
     if !is_player_id(target_id) {
         return false;
@@ -113,7 +136,9 @@ pub(crate) fn validate_target(
     if !hub.can_see(caster.player_id, target_id) || !is_hostile(&hub, caster, &target.s) {
         return Err("You cannot attack this player here.");
     }
-    if distance_meters(origin, target.s.position) > range + 2.0 {
+    if pvp_distance_meters(caster, origin, &target.s, false, std::time::Instant::now())
+        > range + 4.5
+    {
         return Err("The target is too far away.");
     }
     Ok(())
@@ -125,13 +150,17 @@ pub(crate) fn area_targets(
     center: Position,
     radius: f32,
 ) -> Vec<u16> {
+    let now = std::time::Instant::now();
     let hub = lobby.social.lock().unwrap();
     hub.players
         .iter()
         .filter_map(|(&id, player)| {
+            let target_curr = player.s.movement.current_position(player.s.position, now);
+            let dist = distance_meters(center, player.s.position)
+                .min(distance_meters(center, target_curr));
             (hub.can_see(caster.player_id, id)
                 && is_hostile(&hub, caster, &player.s)
-                && distance_meters(center, player.s.position) <= radius + 1.0)
+                && dist <= radius + 4.5)
                 .then_some(id)
         })
         .collect()
@@ -326,20 +355,20 @@ pub(crate) fn hit_player(
         if !hub.can_see(caster.player_id, target_id) || !is_hostile(&hub, caster, &target.s) {
             return Err("You cannot attack this player here.");
         }
-        let origin = if use_movement_segment {
-            caster
-                .movement
-                .current_position(attack.position, std::time::Instant::now())
-        } else {
-            attack.position
-        };
         let max_range = if attack.skill {
-            attack.range + 2.0
+            attack.range + 4.5
         } else {
-            // Basic R melee reach against another player (matching basic_reach minimum + tolerance).
-            ((attack.range + 1.0) * 1.20).max(3.0) + 0.15
+            // Basic R melee reach against another player with movement-sync headroom.
+            ((attack.range + 1.0) * 1.25).max(4.5) + 1.5
         };
-        if distance_meters(origin, target.s.position) > max_range {
+        if pvp_distance_meters(
+            caster,
+            attack.position,
+            &target.s,
+            use_movement_segment,
+            std::time::Instant::now(),
+        ) > max_range
+        {
             return Err("The target is too far away.");
         }
     }
@@ -702,7 +731,9 @@ pub(crate) fn curse_player(
         if !hub.can_see(caster.player_id, target_id) || !is_hostile(&hub, caster, &target.s) {
             return Err("You cannot curse this player here.");
         }
-        if distance_meters(origin, target.s.position) > range + 2.0 {
+        if pvp_distance_meters(caster, origin, &target.s, false, std::time::Instant::now())
+            > range + 4.5
+        {
             return Err("The target is too far away.");
         }
     }
@@ -771,9 +802,6 @@ pub(crate) fn curse_player(
         let duration_s = (duration_ms / 1000).min(32767) as u16;
         effect[16..18].copy_from_slice(&duration_s.to_le_bytes());
         hub.send(target_id, effect);
-        if category == 20 {
-            hub.send(target_id, vec![0x5e, 2, 4, 1]);
-        }
         hub.send(target_id, next.hp_packet(0));
         hub.send(target_id, crate::inventory::attributes(&stats, 2));
         if stealth_broken {
@@ -816,7 +844,9 @@ pub(crate) fn drain_player_mana(
         if !hub.can_see(caster.player_id, target_id) || !is_hostile(&hub, caster, &target.s) {
             return Err("You cannot attack this player here.");
         }
-        if distance_meters(origin, target.s.position) > range + 2.0 {
+        if pvp_distance_meters(caster, origin, &target.s, false, std::time::Instant::now())
+            > range + 4.5
+        {
             return Err("The target is too far away.");
         }
     }
@@ -1327,5 +1357,83 @@ mod tests {
         let restored = crate::travel::restore_suspended_scroll(&mut s, 6, now + 6_000);
         assert_eq!(restored.map(|b| b.skill), Some(500024));
         assert_eq!(s.buffs.get(&6).map(|b| b.skill), Some(500024));
+    }
+
+    #[test]
+    fn smoke_screen_omits_blind_status_aura_and_staff_element_boosts_meteor_pvp_damage() {
+        let Some((mut lobby, mut mage)) = crate::world_service_tests::setup() else {
+            return;
+        };
+        let game = reko_common::game_dir();
+        if !game.join("Data/Skill_Magic_Main_us.tbl").exists() {
+            return;
+        }
+        lobby.skills = Some(skills::Catalog::load(&game).unwrap());
+        mage.character.class = 110;
+        mage.character.stats[4] = 163;
+        mage.progress.level = 80;
+        mage.position = Position {
+            zone: 48,
+            x: 1300,
+            z: 1200,
+            y: 0,
+        };
+        mage.equipment[6] = crate::starter::Item {
+            id: 189101308,
+            durability: 13500,
+            count: 1,
+        };
+        mage.skills.set_limits(5000, 5000);
+        skills::save(&lobby.db.lock().unwrap(), "test", 0, &mage.skills).unwrap();
+        social::synchronize(&lobby, "test", &mut mage);
+
+        let mut rogue = spawn(&lobby, "rogue_def", "RogueTarget", 2, 48, 1305, 1200);
+        rogue.combat.resistance = [40; 6];
+        let _ = lobby.social.lock().unwrap().take_queue(rogue.player_id);
+
+        curse_player(
+            &lobby,
+            &mage,
+            rogue.player_id,
+            mage.position,
+            20.0,
+            20,
+            108780,
+            5000,
+            || Ok(()),
+        )
+        .unwrap();
+        let rq = lobby.social.lock().unwrap().take_queue(rogue.player_id);
+        assert!(
+            !rq.contains(&vec![0x5e, 2, 4, 1]),
+            "Smoke Screen (category 20) must not emit USER_STATUS_BLIND (purple aura)"
+        );
+
+        let row = lobby
+            .skills
+            .as_ref()
+            .unwrap()
+            .effects
+            .get(&(3, 110571))
+            .unwrap();
+        let magic = crate::mage::damage(&mage, &lobby, row);
+        let attack = monsters::Attack {
+            position: mage.position,
+            range: 45.0,
+            attack: 0,
+            percent: 0,
+            extra: 0,
+            skill: true,
+            drain_percent: 0,
+            arrow: false,
+            penetrate: false,
+            magic: Some(magic),
+        };
+        let mut seed = 1u64;
+        let dmg = compute_damage(&mage, &rogue, 5000, &attack, &mut seed);
+        assert!(
+            dmg >= 650,
+            "lv80 Meteor with Wreath of Erenion(+8) must deal >=650 PvP damage (got {dmg})"
+        );
     }
 }

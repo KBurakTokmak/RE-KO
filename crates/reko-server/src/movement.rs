@@ -180,11 +180,11 @@ impl Validator {
             .unwrap_or((f32::from(previous.x) / 10.0, f32::from(previous.z) / 10.0));
         // Forecasts describe a possible current position inside a 1.5 second radius.
         // Keep overlapping time envelopes instead of charging direction changes as travel.
-        if (nx - ox).hypot(nz - oz) > self.distance_budget + total + lead + 0.3 {
+        if (nx - ox).hypot(nz - oz) > self.distance_budget + total + lead + 3.5 {
             return None;
         }
         for &(x, z, prediction, at) in &self.observations {
-            if (nx - x).hypot(nz - z) > prediction + total - at + lead + 0.3 {
+            if (nx - x).hypot(nz - z) > prediction + total - at + lead + 3.5 {
                 return None;
             }
         }

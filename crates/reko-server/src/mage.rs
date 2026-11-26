@@ -19,11 +19,12 @@ fn is_mage(class: u16) -> bool {
     matches!(class % 100, 3 | 9 | 10)
 }
 
-fn damage(
+pub(crate) fn damage(
     session: &Session,
     lobby: &Lobby,
     row: &[reko_assets::CellValue],
 ) -> monsters::MagicDamage {
+    let element = combat::integer(row, 6).clamp(0, 6) as u8;
     let charisma =
         u16::from(session.character.stats[4]).saturating_add(session.combat.bonus_stats[4]);
     let mut bonus = 0;
@@ -36,26 +37,51 @@ fn damage(
     {
         bonus += (combat::integer(effect, 9) - 100).max(0) as u32 * u32::from(charisma) / 100;
     }
-    if session.equipment[8].id == 0
+    if element != 4
+        && session.equipment[8].id == 0
         && let Some((base, extension)) = lobby
             .combat
             .as_ref()
             .and_then(|c| c.item(session.equipment[6].id))
         && combat::integer(base, 10) / 10 == 11
     {
-        let staff = combat::integer(base, 15) + extension.map_or(0, |e| combat::integer(e, 8));
-        bonus += (staff.max(0) as f32 * 0.8
-            + (staff.max(0) * i32::from(session.progress.level) / 60) as f32)
-            as u32;
+        // 1453 MagicInstance.cpp:2664-2734: physical + elemental staff bonuses scale with level.
+        let staff =
+            (combat::integer(base, 15) + extension.map_or(0, |e| combat::integer(e, 8))).max(0);
+        let [fire, cold, light, poison] = extension.map_or([0; 4], |e| {
+            [
+                combat::integer(e, 21).max(0),
+                combat::integer(e, 22).max(0),
+                combat::integer(e, 23).max(0),
+                combat::integer(e, 24).max(0),
+            ]
+        });
+        let elem_match = match element {
+            1 => fire,
+            2 => cold,
+            3 => light,
+            6 => poison,
+            _ => 0,
+        };
+        let attribute_damage = if elem_match > 0 {
+            elem_match * 2
+        } else {
+            fire.max(cold).max(light).max(poison)
+        };
+        let righthand_damage = staff + (fire + cold + light + poison) / 2;
+        let level = i32::from(session.progress.level);
+        let scaled_rh = righthand_damage as f32 * 0.8 + (righthand_damage * level / 60) as f32;
+        let scaled_attr = attribute_damage as f32 * 0.8 + (attribute_damage * level / 30) as f32;
+        bonus += (scaled_rh + scaled_attr).max(0.0) as u32;
     }
     monsters::MagicDamage {
-        element: combat::integer(row, 6).clamp(0, 6) as u8,
+        element,
         first: combat::integer(row, 3).min(0).unsigned_abs().min(32767) as u16,
         over_time: combat::integer(row, 4).min(0).unsigned_abs().min(32767) as u16,
         duration: combat::integer(row, 5).clamp(0, 255) as u8,
         charisma,
         bonus: bonus.min(32767) as u16,
-        raw_over_time: combat::integer(row, 6) == 4,
+        raw_over_time: element == 4,
         raw_first: combat::integer(row, 2) == 2,
     }
 }
@@ -91,7 +117,7 @@ pub(crate) fn center(
         return Err("Invalid ground target coordinates.");
     };
     let distance = f32::from(x.abs_diff(origin.x)).hypot(f32::from(z.abs_diff(origin.z))) / 10.0;
-    if distance > f32::from(spell.range) + 2.0 {
+    if distance > f32::from(spell.range) + 4.5 {
         return Err("The ground target is too far away.");
     }
     Ok(Position { x, z, ..origin })

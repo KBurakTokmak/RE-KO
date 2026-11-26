@@ -58,6 +58,107 @@ fn notify(
     }
 }
 
+struct GtdTerrain {
+    size: usize,
+    data: Vec<u8>,
+}
+
+impl GtdTerrain {
+    fn load(source: &str) -> Option<Self> {
+        let bytes = std::fs::read(reko_common::game_dir().join(source)).ok()?;
+        let name_len =
+            usize::try_from(u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?)).ok()?;
+        let hdr = 4usize.checked_add(name_len)?;
+        let version = u32::from_le_bytes(bytes.get(hdr..hdr.checked_add(4)?)?.try_into().ok()?);
+        let size = usize::try_from(u32::from_le_bytes(
+            bytes
+                .get(hdr.checked_add(4)?..hdr.checked_add(8)?)?
+                .try_into()
+                .ok()?,
+        ))
+        .ok()?;
+        let data_offset = hdr.checked_add(8)?;
+        let data_len = size.checked_mul(size)?.checked_mul(8)?;
+        if version != 0 || size < 2 || bytes.len() < data_offset.checked_add(data_len)? {
+            return None;
+        }
+        Some(Self {
+            size,
+            data: bytes[data_offset..data_offset + data_len].to_vec(),
+        })
+    }
+
+    fn sample(&self, x: u16, z: u16) -> Option<f32> {
+        let fx = (f32::from(x) / 40.0).clamp(0.0, (self.size - 1) as f32);
+        let fz = (f32::from(z) / 40.0).clamp(0.0, (self.size - 1) as f32);
+        let ix = (fx.floor() as usize).min(self.size - 2);
+        let iz = (fz.floor() as usize).min(self.size - 2);
+        let tx = fx - ix as f32;
+        let tz = fz - iz as f32;
+        let h = |gx: usize, gz: usize| -> Option<f32> {
+            let off = (gx * self.size + gz) * 8;
+            let v = f32::from_le_bytes(self.data.get(off..off + 4)?.try_into().ok()?);
+            v.is_finite().then_some(v)
+        };
+        let h00 = h(ix, iz)?;
+        let h10 = h(ix + 1, iz)?;
+        let h01 = h(ix, iz + 1)?;
+        let h11 = h(ix + 1, iz + 1)?;
+        let h0 = h00 + (h01 - h00) * tz;
+        let h1 = h10 + (h11 - h10) * tz;
+        Some(h0 + (h1 - h0) * tx)
+    }
+}
+
+fn arena_interior_contains(pos: Position) -> bool {
+    (1020..=1540).contains(&pos.x) && (980..=1540).contains(&pos.z)
+}
+
+fn blink_destination(
+    s: &Session,
+    origin: Position,
+    radius: u16,
+    extent: u64,
+    source: Option<&str>,
+) -> Result<Position, &'static str> {
+    let max_steps = radius.max(1);
+    let mut has_heading = false;
+    let mut best = None;
+    let terrain = source.and_then(GtdTerrain::load);
+    let origin_h = terrain.as_ref().and_then(|t| t.sample(origin.x, origin.z));
+    let mut prev_h = origin_h;
+    let arena_inside = origin.zone == 48 && arena_interior_contains(origin);
+
+    for step in 1..=max_steps {
+        let Some(mut candidate) = s.movement.forward(origin, step) else {
+            break;
+        };
+        has_heading = true;
+        if u64::from(candidate.x) >= extent || u64::from(candidate.z) >= extent {
+            break;
+        }
+        if arena_inside && !arena_interior_contains(candidate) {
+            break;
+        }
+        if let (Some(t), Some(base_h), Some(last_h)) = (terrain.as_ref(), origin_h, prev_h) {
+            let Some(h) = t.sample(candidate.x, candidate.z) else {
+                break;
+            };
+            if h < -35.0 || (h - last_h).abs() > 1.2 || (h - base_h).abs() > 6.0 {
+                break;
+            }
+            candidate.y = (h * 10.0).round().clamp(-32768.0, 32767.0) as i16;
+            prev_h = Some(h);
+        }
+        best = Some(candidate);
+    }
+
+    if !has_heading {
+        return Err("Move in the desired direction before using Blink.");
+    }
+    best.ok_or("There is an obstacle in the way.")
+}
+
 fn transport(
     lobby: &Lobby,
     account: &str,
@@ -173,14 +274,9 @@ fn transport(
             return Err("Invalid teleport target.");
         }
         let destination = if kind == 20 {
-            let position = s
+            let origin = s
                 .movement
-                .forward(
-                    s.movement
-                        .current_position(s.position, std::time::Instant::now()),
-                    radius,
-                )
-                .ok_or("Move in the desired direction before using Blink.")?;
+                .current_position(s.position, std::time::Instant::now());
             let bounds: String = db.query_row("SELECT data FROM world_reference_rules WHERE table_name='MAP_BOUNDS' AND rule_id=?1",[s.position.zone],|r|r.get(0))
                 .map_err(|_| "Original map bounds have not been imported.")?;
             let bounds: serde_json::Value =
@@ -189,10 +285,7 @@ fn transport(
                 .as_u64()
                 .filter(|v| *v > 0 && *v <= 65535)
                 .ok_or("Invalid map bounds.")?;
-            if u64::from(position.x) >= extent || u64::from(position.z) >= extent {
-                return Err("Blink would leave the map.");
-            }
-            position
+            blink_destination(s, origin, radius, extent, bounds["source"].as_str())?
         } else {
             crate::town::start_position(&db, s)?
         };
@@ -983,6 +1076,38 @@ mod tests {
             let bag =
                 crate::starter::inventory(&lobby.db.lock().unwrap(), "MageFixture", 0).unwrap();
             assert_eq!(bag[20].count, 17);
+        }
+    }
+
+    #[test]
+    fn blink_stops_before_arena_wall_and_steep_gtd_cliffs() {
+        let Some((_lobby, mut s)) = setup(1) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        s.position = Position {
+            zone: 48,
+            x: 1500,
+            z: 1200,
+            y: 0,
+        };
+        let mut p = vec![6];
+        p.extend(1520u16.to_le_bytes());
+        p.extend(1200u16.to_le_bytes());
+        p.extend(0i16.to_le_bytes());
+        p.extend(45i16.to_le_bytes());
+        p.push(1);
+        let next = s.movement.validate(&p, s.position, now, 90).unwrap();
+        s.position = next;
+        let dest = blink_destination(&s, s.position, 20, 2560, None).unwrap();
+        assert!(
+            dest.x <= 1540 && dest.x >= 1520,
+            "Blink must stop at the Arena wall instead of crossing into void: got {}",
+            dest.x
+        );
+        if reko_common::game_dir().join("Zones/Moradon.gtd").exists() {
+            let h = GtdTerrain::load("Zones/Moradon.gtd").and_then(|t| t.sample(3200, 4000));
+            assert!(h.is_some_and(f32::is_finite));
         }
     }
 }
