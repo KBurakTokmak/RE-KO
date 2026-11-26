@@ -100,6 +100,7 @@ pub(crate) struct Catalog {
     pub speeds: HashMap<u32, SpeedSkill>,
     pub spells: HashMap<u32, Spell>,
     pub effects: HashMap<(u8, u32), Vec<CellValue>>,
+    pub type1_add_damage: HashMap<u32, u16>,
 }
 
 impl Catalog {
@@ -109,6 +110,7 @@ impl Catalog {
             speeds,
             spells: HashMap::new(),
             effects: HashMap::new(),
+            type1_add_damage: HashMap::new(),
         }
     }
 
@@ -125,6 +127,28 @@ impl Catalog {
             let table = Table::from_encrypted_bytes(&std::fs::read(file)?)?;
             for row in table.rows {
                 effects.insert((kind, crate::combat::integer(&row, 0) as u32), row);
+            }
+        }
+        let mut type1_add_damage = HashMap::new();
+        let t1_paths = [
+            Path::new("logs/reference-rules/MAGIC_TYPE1.csv"),
+            Path::new("../../logs/reference-rules/MAGIC_TYPE1.csv"),
+        ];
+        if let Some(file) = t1_paths.into_iter().find(|p| p.exists()) {
+            for line in std::fs::read_to_string(file)?
+                .lines()
+                .skip(1)
+                .filter(|l| !l.trim().is_empty())
+            {
+                let mut cols = line
+                    .trim_start_matches('\u{feff}')
+                    .split(',')
+                    .map(|v| v.trim().trim_matches('"'));
+                if let (Some(id), Some(add)) = (cols.next(), cols.nth(3))
+                    && let (Ok(id), Ok(add)) = (id.parse::<u32>(), add.parse::<i32>())
+                {
+                    type1_add_damage.insert(id, add.clamp(0, 32767) as u16);
+                }
             }
         }
         let mut speeds = HashMap::new();
@@ -197,6 +221,7 @@ impl Catalog {
             speeds,
             spells,
             effects,
+            type1_add_damage,
         })
     }
 }
@@ -273,10 +298,13 @@ impl State {
             .retain(|_, effect| now < effect.until && self.hp != 0);
     }
     pub fn spend(&mut self, spell: &Spell, now: u64) -> Result<(), &'static str> {
-        if self
-            .cooldowns
-            .get(&spell.id)
-            .is_some_and(|deadline| now < *deadline)
+        let instant = !matches!(spell.id, 110820 | 210820)
+            && self.buffs.get(&23).is_some_and(|b| now < b.until);
+        if !instant
+            && self
+                .cooldowns
+                .get(&spell.id)
+                .is_some_and(|deadline| now < *deadline)
         {
             return Err("This skill is still cooling down.");
         }
@@ -286,12 +314,19 @@ impl State {
         if self.mana < spell.mana {
             return Err("Not enough mana.");
         }
-        if spell.hp > 0 && self.hp <= spell.hp {
+        let sacrifice = spell.hp >= 10_000;
+        if spell.hp > 0 && !sacrifice && self.hp <= spell.hp {
             return Err("Not enough health.");
         }
         self.mana -= spell.mana;
-        self.hp -= spell.hp;
-        self.cooldowns.insert(spell.id, now + spell.cooldown_ms);
+        if sacrifice {
+            self.hp = 0;
+        } else {
+            self.hp -= spell.hp;
+        }
+        if !instant {
+            self.cooldowns.insert(spell.id, now + spell.cooldown_ms);
+        }
         Ok(())
     }
     pub fn set_limits(&mut self, hp: u16, mana: u16) {
@@ -340,10 +375,14 @@ impl State {
             return (45u32 * crate::combat::integer(row, 5).clamp(1, 200) as u32).div_ceil(100)
                 as u16;
         }
-        if let Some(buff) = self.buffs.get(&6).filter(|buff| now < buff.until)
-            && let Some(skill) = catalog.and_then(|c| c.speeds.get(&buff.skill))
-        {
-            return (45u32 * u32::from(skill.speed_percent)).div_ceil(100) as u16;
+        if let Some(buff) = self.buffs.get(&6).filter(|buff| now < buff.until) {
+            if let Some(skill) = catalog.and_then(|c| c.speeds.get(&buff.skill)) {
+                return (45u32 * u32::from(skill.speed_percent)).div_ceil(100) as u16;
+            }
+            if let Some(row) = catalog.and_then(|c| c.effects.get(&(4, buff.skill))) {
+                let percent = crate::combat::integer(row, 5).clamp(1, 200) as u32;
+                return (45u32 * percent).div_ceil(100) as u16;
+            }
         }
         45
     }

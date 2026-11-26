@@ -38,12 +38,18 @@ async fn execute(
         .and_then(|c| c.effects.get(&(4, spell.id)))
         .ok_or("Curse data unavailable.")?;
     let category = combat::integer(row, 1);
-    if !matches!(category, 1 | 2) {
+    if !matches!(category, 1 | 2 | 4 | 5 | 7) {
         return Err(
             "This curse needs player attributes or active NPC behavior, which is not available yet.",
         );
     }
-    let percent = combat::integer(row, if category == 1 { 11 } else { 7 }).clamp(1, 100) as u16;
+    let percent = match category {
+        1 => combat::integer(row, 11).clamp(1, 100) as u16,
+        2 => combat::integer(row, 7).clamp(1, 100) as u16,
+        4 => combat::integer(row, 8).clamp(1, 100) as u16,
+        5 => combat::integer(row, 4).clamp(1, 100) as u16,
+        _ => 100,
+    };
     let curse = monsters::Curse {
         category: category as u8,
         percent,
@@ -100,6 +106,41 @@ async fn execute(
                 || Ok(()),
             );
         }
+        for id in crate::pvp::area_targets(lobby, session, center, radius) {
+            let _ = crate::pvp::curse_player(
+                lobby,
+                session,
+                id,
+                center,
+                (radius - 2.0).max(0.0),
+                curse.category,
+                spell.id,
+                curse.duration_ms,
+                || Ok(()),
+            );
+        }
+    } else if crate::pvp::is_player_id(target) {
+        crate::pvp::curse_player(
+            lobby,
+            session,
+            target,
+            session.position,
+            f32::from(spell.range),
+            curse.category,
+            spell.id,
+            curse.duration_ms,
+            || {
+                paid = Some(resources::commit(
+                    lobby,
+                    account,
+                    session.character.slot,
+                    spell,
+                    1,
+                    |_| Ok(()),
+                )?);
+                Ok(())
+            },
+        )?;
     } else {
         world.curse(
             target,

@@ -7,17 +7,13 @@ pub(crate) const MERCHANT_CHANNEL: u8 = 14;
 #[derive(Clone)]
 pub(crate) struct Message {
     pub channel: u8,
-    pub nation: u8,
     pub position: Position,
     pub packet: Vec<u8>,
 }
 
 impl Message {
     pub fn visible_to(&self, session: &Session) -> bool {
-        if !session.entered
-            || self.position.zone != session.position.zone
-            || self.nation != session.character.nation()
-        {
+        if !session.entered || self.position.zone != session.position.zone {
             return false;
         }
         if self.channel == 5 {
@@ -79,5 +75,59 @@ mod tests {
             parse(b"\x10\x0e\x17\x00test(Location:992,1051)"),
             Some((MERCHANT_CHANNEL, b"test(Location:992,1051)".as_slice()))
         );
+    }
+
+    #[test]
+    fn all_chat_and_shout_reach_opposite_nation_in_same_zone() {
+        let mut elmo = Session::new(crate::characters::Character {
+            slot: 0,
+            name: "ElmoPeer".into(),
+            race: 11,
+            class: 206,
+            face: 0,
+            hair: 0,
+            stats: [60; 5],
+        })
+        .unwrap();
+        elmo.entered = true;
+        elmo.position = Position {
+            zone: 21,
+            x: 3200,
+            z: 4000,
+            y: 0,
+        };
+        let all = Message {
+            channel: 1,
+            position: Position {
+                zone: 21,
+                x: 3300,
+                z: 4000,
+                y: 0,
+            },
+            packet: packet(1, 1, 7, "KarusPeer", b"hello"),
+        };
+        assert!(all.visible_to(&elmo));
+        let far = Message {
+            position: Position {
+                zone: 21,
+                x: 3800,
+                z: 4000,
+                y: 0,
+            },
+            ..all.clone()
+        };
+        assert!(!far.visible_to(&elmo));
+        let shout = Message { channel: 5, ..far };
+        assert!(shout.visible_to(&elmo));
+        let other_zone = Message {
+            position: Position {
+                zone: 1,
+                x: 3200,
+                z: 4000,
+                y: 0,
+            },
+            ..all
+        };
+        assert!(!other_zone.visible_to(&elmo));
     }
 }

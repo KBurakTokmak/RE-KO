@@ -4,22 +4,24 @@ use crate::{combat, inventory, lobby::Lobby, resources, skills, world_entry::Ses
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
+pub(crate) fn buff_restore_packet(player_id: u16, buff: skills::Buff, now: u64) -> Vec<u8> {
+    let mut packet = skills::effect(buff.skill, player_id);
+    let remaining = buff.until.saturating_sub(now).div_ceil(1000).min(32767) as u16;
+    packet[16..18].copy_from_slice(&remaining.to_le_bytes());
+    packet
+}
+
 pub(crate) fn buff_restore_packets(s: &Session, now: u64) -> Vec<Vec<u8>> {
     let mut buffs: Vec<_> = s
         .skills
         .buffs
         .iter()
-        .filter(|(_, b)| now < b.until)
+        .filter(|(cat, b)| **cat < crate::travel::SUSPENDED_SCROLL_OFFSET && now < b.until)
         .collect();
     buffs.sort_by_key(|(category, _)| **category);
     buffs
         .into_iter()
-        .map(|(_, buff)| {
-            let mut packet = skills::effect(buff.skill, s.player_id);
-            let remaining = buff.until.saturating_sub(now).div_ceil(1000).min(32767) as u16;
-            packet[16..18].copy_from_slice(&remaining.to_le_bytes());
-            packet
-        })
+        .map(|(_, buff)| buff_restore_packet(s.player_id, *buff, now))
         .collect()
 }
 
@@ -63,7 +65,7 @@ pub(crate) fn effective(
     items: Option<&combat::Catalog>,
 ) -> combat::Stats {
     let mut result = session.base_combat;
-    let mut bonuses = [0; 5];
+    let mut bonuses = [0i16; 5];
     let now = skills::now_ms();
     let effect = |kind| {
         state
@@ -79,7 +81,8 @@ pub(crate) fn effective(
     };
     if let Some(row) = stats_buff {
         for (value, col) in bonuses.iter_mut().zip(14..19) {
-            *value = combat::integer(row, col).max(0) as u16;
+            *value =
+                combat::integer(row, col).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         }
     }
     if (stats_buff.is_some() || enchantments.weapon_damage != 0 || enchantments.armor != 0)
@@ -150,17 +153,22 @@ pub(crate) fn effective(
         }
     }
     if matches!(session.character.class % 100, 6 | 12)
-        && u32::from(state.hp) * 100 < u32::from(state.max_hp) * 30
+        && u32::from(state.hp) * 100 <= u32::from(state.max_hp) * 30
     {
         result.defence = (u32::from(result.defence) * 120 / 100).min(32767) as u16;
     }
     let base = result;
     if let Some(catalog) = catalog {
-        for (category, buff) in state
+        let mut active: Vec<(u8, skills::Buff)> = state
             .buffs
             .iter()
-            .filter(|(_, buff)| skills::now_ms() < buff.until)
-        {
+            .filter(|(cat, buff)| {
+                **cat < crate::travel::SUSPENDED_SCROLL_OFFSET && now < buff.until
+            })
+            .map(|(cat, buff)| (*cat, *buff))
+            .collect();
+        active.sort_unstable_by_key(|(cat, _)| *cat);
+        for (category, buff) in active {
             let Some(row) = catalog.effects.get(&(4, buff.skill)) else {
                 continue;
             };
@@ -203,7 +211,7 @@ pub(crate) fn effective(
                 18 => {
                     result.defence =
                         (i32::from(result.defence) + combat::integer(row, 6)).max(0) as u16;
-                    result.delay_ms = base.delay_ms * 100 / combat::integer(row, 8).max(1) as u64;
+                    result.delay_ms = result.delay_ms * 100 / combat::integer(row, 8).max(1) as u64;
                 }
                 28 => {
                     result.defence =
@@ -260,7 +268,7 @@ pub(crate) async fn npc_strikes(
         if strike.zone != s.position.zone || s.skills.hp == 0 {
             continue;
         }
-        let result = (|| -> rusqlite::Result<(skills::State, u16, Option<u8>)> {
+        let result = (|| -> rusqlite::Result<(skills::State, u16, Option<u8>, bool)> {
             let db = lobby.db.lock().unwrap();
             let tx = db.unchecked_transaction()?;
             let mut next = skills::load(&tx, account, s.character.slot)?;
@@ -270,6 +278,7 @@ pub(crate) async fn npc_strikes(
             )
             .min(next.hp);
             next.hp -= amount;
+            let stealth_broken = amount > 0 && next.buffs.remove(&91).is_some();
             let reflected = if amount > 0 {
                 next.buffs
                     .get(&25)
@@ -288,14 +297,25 @@ pub(crate) async fn npc_strikes(
             }
             skills::save_in(&tx, account, s.character.slot, &next)?;
             tx.commit()?;
-            Ok((next, amount, reflected))
+            Ok((next, amount, reflected, stealth_broken))
         })();
-        let Ok((next, amount, reflected)) = result else {
+        let Ok((next, amount, reflected, stealth_broken)) = result else {
             tracing::error!(%peer,"NPC damage persistence failed");
             continue;
         };
         let old_mana = s.skills.mana;
         s.skills = next;
+        if stealth_broken {
+            crate::magic::visibility(lobby, s, false);
+            super::send_response(
+                sock,
+                peer,
+                &None,
+                &[0x31, 5, 91],
+                "STEALTH_BROKEN_ON_NPC_HIT",
+            )
+            .await;
+        }
         if let Some(element) = reflected {
             let _ = world.reflect(strike.npc, s.position, amount, element, &s.character.name);
             super::send_response(sock, peer, &None, &[0x31, 5, 25], "MAGE_ARMOR_CONSUMED").await;
@@ -348,6 +368,14 @@ pub(crate) async fn npc_strikes(
         world.observe(s, now);
         tracing::info!(%peer,npc=strike.npc,amount,hp=s.skills.hp,"monster attack applied");
     }
+}
+
+pub(crate) fn absorb_damage_public(
+    state: &mut skills::State,
+    amount: u16,
+    catalog: Option<&skills::Catalog>,
+) -> u16 {
+    absorb_damage(state, amount, catalog)
 }
 
 fn absorb_damage(state: &mut skills::State, amount: u16, catalog: Option<&skills::Catalog>) -> u16 {
@@ -470,16 +498,28 @@ pub(crate) fn apply_friendly(
         state.periodic.retain(|_, effect| effect.amount >= 0);
     } else if cure == Some(2) {
         state.buffs.retain(|category, buff| {
-            let debuff = catalog
-                .spells
-                .get(&buff.skill)
-                .is_some_and(|s| s.types[0] == 4 && matches!(s.moral, 7 | 10 | 12));
+            let debuff = *category < crate::travel::SUSPENDED_SCROLL_OFFSET
+                && catalog
+                    .spells
+                    .get(&buff.skill)
+                    .is_some_and(|s| s.types.contains(&4) && matches!(s.moral, 7 | 10 | 12));
             if debuff {
                 removed.push(*category);
             }
             !debuff
         });
+        for category in &removed {
+            crate::travel::restore_suspended_scroll(state, *category, now);
+        }
     } else if heal {
+        let mut amount = combat::integer(row, 3) as u16;
+        // 1453 MagicInstance.cpp:1426: Rogue Critical Point (category 19) has a 50% chance to double Minor Healing.
+        if matches!(spell.id, 108705 | 208705)
+            && session.skills.buffs.get(&19).is_some_and(|b| now < b.until)
+            && now.wrapping_mul(6364136223846793005).is_multiple_of(2)
+        {
+            amount = amount.saturating_mul(2);
+        }
         recover(
             state,
             if combat::integer(row, 2) == 14 {
@@ -487,7 +527,7 @@ pub(crate) fn apply_friendly(
             } else {
                 combat::integer(row, 2)
             },
-            combat::integer(row, 3) as u16,
+            amount,
         );
         let duration = combat::integer(row, 5).max(0) as u64;
         if duration >= 2 {
@@ -567,8 +607,10 @@ pub(crate) async fn handle(
     let supported = heal
         || cure.is_some()
         || category.is_some_and(|kind| {
-            matches!(kind, 1 | 2 | 4 | 5 | 7 | 8 | 10 | 18 | 19 | 23 | 28 | 31)
-                || matches!(kind, 6 | 13 | 14) && spell.skill_group == 0
+            matches!(
+                kind,
+                1 | 2 | 4 | 5 | 7 | 8 | 9 | 10 | 18 | 19 | 23 | 28 | 30 | 31
+            ) || matches!(kind, 6 | 13 | 14) && spell.skill_group == 0
                 || kind == 25
                     && matches!(session.character.class % 100, 3 | 9 | 10)
                     && (5..=7).contains(&(spell.skill_group % 10))
@@ -604,9 +646,37 @@ pub(crate) async fn handle(
     match result {
         Ok(paid) => {
             resources::sync(sock, peer, lobby, account, session, paid).await;
+            let now = skills::now_ms();
             for category in removed {
+                if category == 32 {
+                    let mut hub = lobby.social.lock().unwrap();
+                    for slot in [6usize, 8usize] {
+                        let item = session.equipment[slot];
+                        if item.id != 0 {
+                            let pkt = crate::pvp::user_look_change(
+                                session.player_id,
+                                slot as u8,
+                                item.id,
+                                item.durability,
+                            );
+                            hub.broadcast_visual(
+                                session.player_id,
+                                None,
+                                Some(session.player_id),
+                                &pkt,
+                            );
+                            hub.send(session.player_id, pkt);
+                        }
+                    }
+                }
                 super::send_response(sock, peer, &None, &[0x31, 5, category], "CURSE_REMOVED")
                     .await;
+                if let Some(scroll) = session.skills.buffs.get(&category).copied()
+                    && now < scroll.until
+                {
+                    let pkt = buff_restore_packet(session.player_id, scroll, now);
+                    super::send_response(sock, peer, &None, &pkt, "SCROLL_REINSTATED").await;
+                }
             }
             if cure == Some(1) {
                 super::send_response(sock, peer, &None, &[0x31, 7, 200], "DISEASE_REMOVED").await;

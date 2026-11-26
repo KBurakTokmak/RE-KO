@@ -554,13 +554,14 @@ impl Catalog {
         character: &Character,
         progress: &Progress,
         gear: &[Item; 14],
-        mut bonuses: [u16; 5],
+        bonuses: [i16; 5],
         enchantments: Enchantments,
     ) -> anyhow::Result<Stats> {
         let c = self
             .coefficients
             .get(&character.class)
             .ok_or_else(|| anyhow::anyhow!("missing coefficient class {}", character.class))?;
+        let mut signed_bonuses: [i32; 5] = std::array::from_fn(|i| i32::from(bonuses[i]));
         let mut item_hp = 0u32;
         let mut item_mp = 0u32;
         let mut resistance = [0u16; 6];
@@ -571,8 +572,8 @@ impl Catalog {
                 .item(item.id)
                 .ok_or_else(|| anyhow::anyhow!("unresolved equipped item {}", item.id))?;
             if let Some(extension) = extension {
-                for (bonus, column) in bonuses.iter_mut().zip(30..35) {
-                    *bonus = bonus.saturating_add(integer(extension, column).max(0) as u16);
+                for (bonus, column) in signed_bonuses.iter_mut().zip(30..35) {
+                    *bonus += integer(extension, column).max(0);
                 }
                 item_hp += integer(extension, 35).max(0) as u32;
                 item_mp += integer(extension, 36).max(0) as u32;
@@ -585,8 +586,11 @@ impl Catalog {
             }
         }
         let level = f64::from(progress.level);
-        let [strength, stamina, dexterity, intelligence, _] =
-            std::array::from_fn(|i| f64::from(character.stats[i]) + f64::from(bonuses[i]));
+        let [strength, stamina, dexterity, intelligence, _] = std::array::from_fn(|i| {
+            (i32::from(character.stats[i]) + signed_bonuses[i]).max(0) as f64
+        });
+        let bonuses: [u16; 5] =
+            std::array::from_fn(|i| signed_bonuses[i].clamp(0, i32::from(u16::MAX)) as u16);
         let rogue = matches!(character.class % 100, 2 | 7 | 8);
         let mut damage = 0;
         let mut kind = 0;

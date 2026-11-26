@@ -56,13 +56,30 @@ pub(crate) fn publish(lobby: &Lobby, s: &Session, packets: Vec<Vec<u8>>) {
             }
             _ => continue,
         };
-        // Friendly/player-target effects are already delivered directly to the
-        // recipient by their authoritative handler. Observers need the same FX.
+        // Friendly skills, Type4 curses and Vampiric Fire (Type3 direct 16)
+        // already deliver `0x31 03` directly to the recipient. Offensive PvP
+        // damage skills (Type1 melee, Type2 arrows, Type3 spells) do not, so
+        // their victim must receive the broadcast FX too.
         let direct_recipient = target.filter(|id| {
-            packet.first() == Some(&0x31)
-                && packet[1] == 3
-                && *id != s.player_id
-                && hub.players.contains_key(id)
+            if packet.first() != Some(&0x31)
+                || packet[1] != 3
+                || *id == s.player_id
+                || !hub.players.contains_key(id)
+            {
+                return false;
+            }
+            let skill_id = u32::from_le_bytes(packet[2..6].try_into().unwrap());
+            lobby.skills.as_ref().is_some_and(|catalog| {
+                catalog.spells.get(&skill_id).is_some_and(|spell| {
+                    matches!(spell.moral, 2 | 3 | 4 | 6)
+                        || spell.types[0] == 4
+                        || (spell.types[0] == 3
+                            && catalog
+                                .effects
+                                .get(&(3, skill_id))
+                                .is_some_and(|row| crate::combat::integer(row, 2) == 16))
+                })
+            })
         });
         hub.broadcast_visual(s.player_id, target, direct_recipient, &packet);
     }

@@ -140,12 +140,12 @@ pub(crate) async fn handle(
         if spell.skill_group.is_multiple_of(10) && now < session.next_attack {
             return Err("Your bow is not ready for another shot.");
         }
-        if lobby
+        let valid_monster = lobby
             .monsters
             .as_ref()
             .and_then(|world| world.health(target, session.position.zone))
-            .is_none_or(|packet| u32::from_le_bytes(packet[8..12].try_into().unwrap()) == 0)
-        {
+            .is_some_and(|packet| u32::from_le_bytes(packet[8..12].try_into().unwrap()) > 0);
+        if !valid_monster && !crate::pvp::can_target(lobby, session, target) {
             return Err("Select a known combat target.");
         }
         let paid = resources::commit(
@@ -223,25 +223,51 @@ pub(crate) async fn handle(
     };
     let limit = ((session.combat.range + 4.0) * combat::integer(row, 4).max(0) as f32 / 100.0)
         .max(f32::from(spell.range) + 4.0);
-    let result = world.hit_owned(
-        target,
-        monsters::Attack {
-            position: origin,
-            range: (limit - 2.0).max(0.0),
-            attack: session.combat.attack,
-            percent: combat::integer(row, 3).clamp(0, 32767) as u16,
-            extra: 0,
-            skill: true,
-            drain_percent: 0,
-            arrow: true,
-            penetrate: combat::integer(row, 1) == 1,
-            magic,
-        },
-        Some(&session.character.name),
-        || Ok(()),
-    );
+    let attack = monsters::Attack {
+        position: origin,
+        range: (limit - 2.0).max(0.0),
+        attack: session.combat.attack,
+        percent: combat::integer(row, 3).clamp(0, 32767) as u16,
+        extra: 0,
+        skill: true,
+        drain_percent: 0,
+        arrow: true,
+        penetrate: combat::integer(row, 1) == 1,
+        magic,
+    };
+    let debuff = if spell.types[1] == 4
+        && let Some(row) = secondary
+        && matches!(combat::integer(row, 1), 6 | 21)
+    {
+        Some((
+            combat::integer(row, 1) as u8,
+            spell.id,
+            combat::integer(row, 3).max(0) as u64 * 1000,
+        ))
+    } else if magic.is_some_and(|m| m.element == 3) {
+        Some((47u8, spell.id, 3000))
+    } else {
+        None
+    };
+    let result = if crate::pvp::is_player_id(target) {
+        crate::pvp::hit_player(
+            lobby,
+            account,
+            session,
+            target,
+            attack,
+            false,
+            debuff,
+            || Ok(()),
+        )
+        .map(|h| h.damage)
+    } else {
+        world
+            .hit_owned(target, attack, Some(&session.character.name), || Ok(()))
+            .map(|h| h.damage)
+    };
     match result {
-        Ok(hit) => {
+        Ok(damage) => {
             packet[16..18].copy_from_slice(&0i16.to_le_bytes());
             crate::durability::attack(
                 sock,
@@ -249,10 +275,11 @@ pub(crate) async fn handle(
                 lobby,
                 account,
                 session,
-                hit.damage.min(32767) as u16,
+                damage.min(32767) as u16,
             )
             .await;
-            if spell.types[1] == 4
+            if !crate::pvp::is_player_id(target)
+                && spell.types[1] == 4
                 && let Some(row) = secondary
                 && combat::integer(row, 1) == 6
             {
@@ -262,7 +289,7 @@ pub(crate) async fn handle(
                     combat::integer(row, 3).max(0) as u64 * 1000,
                 );
             }
-            tracing::info!(%peer,id=spell.id,target,damage=hit.damage,"arrow impact applied");
+            tracing::info!(%peer,id=spell.id,target,damage,"arrow impact applied");
         }
         Err(reason) => {
             packet[16..18].copy_from_slice(&(-104i16).to_le_bytes());

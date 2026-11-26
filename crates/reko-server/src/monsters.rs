@@ -1057,8 +1057,18 @@ impl World {
         {
             return Err("The target is too far away.");
         }
-        if !matches!(curse.category, 1 | 2) || !(1..=100).contains(&curse.percent) {
+        if !matches!(curse.category, 1 | 2 | 4 | 5) || !(1..=100).contains(&curse.percent) {
             return Err("Unsupported NPC curse.");
+        }
+        // Superior Parasite (30% HP reduction) does not apply to unique/boss monsters.
+        let is_boss = self
+            .bosses
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|b| b.members().contains(&id));
+        if curse.category == 1 && curse.percent <= 70 && is_boss {
+            return Err("This skill does not apply to unique monsters.");
         }
         pay()?;
         mob.modifiers.insert(
@@ -1079,7 +1089,38 @@ impl World {
         let _ = self.events.send(event);
         Ok(())
     }
+    pub fn stun(&self, id: u16, duration_ms: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(mob) = inner.mobs.get_mut(&id)
+            && mob.hp > 0
+        {
+            mob.stunned_until = mob.stunned_until.max(skills::now_ms() + duration_ms);
+        }
+    }
+    pub fn sleep(&self, id: u16, duration_ms: u64) {
+        self.stun(id, duration_ms);
+    }
+    pub fn provoke(&self, id: u16, player_id: u16) {
+        let alive = self
+            .inner
+            .lock()
+            .unwrap()
+            .mobs
+            .get(&id)
+            .is_some_and(|m| m.hp > 0);
+        if alive {
+            self.ai.lock().unwrap().provoke(id, player_id);
+        }
+    }
     pub fn validate(&self, id: u16, position: Position, range: f32) -> Result<(), &'static str> {
+        self.position_if_valid(id, position, range).map(|_| ())
+    }
+    pub fn position_if_valid(
+        &self,
+        id: u16,
+        position: Position,
+        range: f32,
+    ) -> Result<Position, &'static str> {
         let inner = self.inner.lock().unwrap();
         let mob = inner.mobs.get(&id).ok_or("Unknown combat target.")?;
         if mob.position.zone != position.zone || mob.hp == 0 {
@@ -1091,7 +1132,7 @@ impl World {
         {
             return Err("The target is too far away.");
         }
-        Ok(())
+        Ok(mob.position)
     }
     pub fn area_targets(&self, center: Position, radius: f32) -> Vec<u16> {
         let mut ids: Vec<_> = self
@@ -1509,7 +1550,7 @@ impl World {
         }
         pay()?;
         let amount = if drain_percent > 0 {
-            (u64::from(mob.hp) * u64::from(drain_percent) / 100) as u32
+            ((u64::from(mob.hp) * u64::from(drain_percent) / 100) as u32).max(1)
         } else {
             let base = if penetrate {
                 u32::from(attack)

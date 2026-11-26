@@ -470,3 +470,49 @@ maximum HP after strictly more than ten seconds. Dead mobs do not regenerate.
 Training targets deliberately respawn quickly for testing; those timers are
 not historical monster schedules. `hurt N` is restricted to the reusable
 character_privileges admin flag and clamps at1HP.
+
+## PvP combat and 4-class skill behavior
+
+Player-vs-player combat (`pvp.rs`) covers Arena 48 pits (excluding the safety
+lobby), Colony Zone / Ardream (71/72) and war zones (31, 61..69), enforcing
+hostility, party/clan safety, and CZ loyalty rewards (+50 / -25 NP). Physical
+PvP hits use `attack * 200 / (ac + 240)` and `/2` scaling, magic hits use `/3`
+scaling, and Master `Absoluteness` (-10%) / `Matchless` (-15%) apply in both
+PvE and PvP. Type 1 `AddDamage` is loaded from `MAGIC_TYPE1.csv` rather than
+client `Skill_Magic_1.tbl` column 4 (`Delay`).
+
+- **Rogue:** `Critical Point` doubles PvP physical AP and gives a 50% 2x proc on
+  `Minor Healing`; `Blood Drain` / `Vampiric Touch` heal the caster; `Beast
+  Hiding` grants 5s stealth on player hits; `Stealth` / `Hide` break on any
+  damage and are countered by `Source Marking` (cat 26) and `Cat's` / `Lupine
+  Eyes` (`WIZ_STEALTH 0x42`, party-wide for Lupine); `Armor Cancellation` (cat
+  32) disarms weapon attacks and broadcasts `WIZ_USERLOOK_CHANGE (0x2D)` on
+  apply and expiry; `Illusion` / `Concentration` (cat 9), `Smoke Screen` (cat
+  20, moral 12), `Wild Advent` (`WarpType 25`), `Blinding` / `Blinding Strafe`
+  (cat 21), `Ice Shot` (Cold-resist slow), and `Lightning Shot` (3s stun) are
+  enforced.
+- **Mage:** Staff `[1, 3]` skills enforce the 700ms 1453 request interval;
+  `Instantly Magic` (cat 23) skips both cast time and cooldown on the next
+  spell; `Fire` / `Static Thorn` (`direct=8`) absorb HP on player hits; Mage 75
+  Armor (cat 25) reflects flat unreduced 2000 damage in PvP (owner requirement)
+  and 25% resistance-scaled damage in PvE; Lightning spells roll PvP stun (cat
+  47); `Freezing Distance` echoes `31 02 FLYING` to preserve client cooldown;
+  `Vampiric Fire` syncs victim MP and `Minor Resist` refreshes victim combat
+  resistances immediately.
+- **Warrior:** `Binding` / `Provoke` (Type 7, monsters only), `Descent`
+  (`WarpType 25`), `Sacrifice` (`hp >= 10000`, self-lethal party heal), `Exceed
+  Break` (`direct=13`, 50% chance -1000 armor durability in PvP), `Shock Stun`
+  (3s PvP/PvE stun), and `Leg Cutting` / `Scream` slows (not overwritable by
+  `Sprint`) are enforced.
+- **Priest:** `Gate` (Type 8), `Clear Mana` / `Sweep Mana` / `Discountis`
+  (`direct=2` MP burn in PvP / raw HP in PvE), `Massive` / `Subside` / `Slow` /
+  `Confusion` (cat 4/5/7 with signed stat penalties), `Superior Parasite`
+  (boss-immune), `Sleep Wing` / `Sleep Carpet` (Type 7, monsters only), `Bless
+  of God` (20m range), `Curse Refraction` (cat 30), `Elysian Web` (cat 27,
+  moral 11, -30% magic damage), and `Resurrection` (Type 5 kind 3, moral 25)
+  are enforced.
+- **Scroll persistence:** Item-backed Type 4 scrolls survive PvP death/respawn
+  and are suspended (`category + 100`) under same-category debuffs, then
+  automatically reinstated with remaining duration on expiry or cure.
+- **Monster aggro:** `npc_ai.rs` tracks per-attacker damage and switches aggro
+  to higher-threat attackers (following 1453/Open-KO `ChangeTarget`).

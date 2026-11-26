@@ -70,8 +70,11 @@ fn pay(
     spell: &skills::Spell,
 ) -> Result<resources::Paid, &'static str> {
     resources::commit(lobby, account, session.character.slot, spell, 1, |state| {
-        if spell.cast_ms > 0 {
-            state.buffs.remove(&23);
+        // 1453 User.h:23 / MagicInstance.cpp:421-455: Type1+3 Mage staff skills
+        // (e.g. 42 Fire Blade, 72 Fire Staff) have 0 table recast time and use
+        // PLAYER_SKILL_REQUEST_INTERVAL (700 ms) so they cannot be packet-spammed.
+        if spell.types == [1, 3] && spell.cooldown_ms < 700 {
+            state.cooldowns.insert(spell.id, skills::now_ms() + 700);
         }
         Ok(())
     })
@@ -136,11 +139,11 @@ async fn execute(
         .effects
         .get(&(3, spell.id))
         .ok_or("Elemental skill data unavailable.")?;
-    if !matches!(combat::integer(row, 2), 1 | 8)
-        && !(combat::integer(row, 2) == 2 && combat::integer(row, 5) > 0)
-    {
+    let direct_type = combat::integer(row, 2);
+    if !matches!(direct_type, 1 | 2 | 8) {
         return Err("This spell affects player resources; player combat is not available yet.");
     }
+    let mana_burn = direct_type == 2 && combat::integer(row, 5) == 0;
     if !matches!(spell.moral, 7 | 10) {
         return Err("Unsupported elemental target rule.");
     }
@@ -235,7 +238,15 @@ async fn execute(
         } else {
             0
         },
-        extra: 0,
+        extra: if physical {
+            catalog
+                .type1_add_damage
+                .get(&spell.id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        },
         skill: true,
         drain_percent: 0,
         arrow: false,
@@ -244,7 +255,17 @@ async fn execute(
     };
     if payload[1] == 2 {
         if area.is_none() {
-            world.validate(target, origin, f32::from(spell.range))?;
+            if crate::pvp::is_player_id(target) {
+                crate::pvp::validate_target(
+                    lobby,
+                    session,
+                    target,
+                    origin,
+                    f32::from(spell.range),
+                )?;
+            } else {
+                world.validate(target, origin, f32::from(spell.range))?;
+            }
         }
         let paid = pay(lobby, account, session, spell)?;
         if session
@@ -267,8 +288,18 @@ async fn execute(
         super::send_response(sock, peer, &None, payload, "MAGE_FLYING").await;
         return Ok(());
     }
+    let slow_debuff = if spell.types[1] == 4
+        && let Some(slow) = catalog.effects.get(&(4, spell.id))
+        && combat::integer(slow, 1) == 6
+    {
+        Some((6u8, spell.id, combat::integer(slow, 3).max(0) as u64 * 1000))
+    } else if !mana_burn && elemental.element == 3 && elemental.first > 0 {
+        Some((47u8, spell.id, 2000))
+    } else {
+        None
+    };
     let mut paid = None;
-    let mut hits = Vec::new();
+    let mut hits: Vec<(u16, u32)> = Vec::new();
     if let Some(center) = area {
         if !launched {
             paid = Some(pay(lobby, account, session, spell)?);
@@ -280,8 +311,69 @@ async fn execute(
                 Some(&session.character.name),
                 || Ok(()),
             ) {
-                hits.push((id, hit));
+                hits.push((id, hit.damage));
             }
+        }
+        for id in crate::pvp::area_targets(lobby, session, center, radius) {
+            if mana_burn {
+                if let Ok(drained) = crate::pvp::drain_player_mana(
+                    lobby,
+                    session,
+                    id,
+                    center,
+                    (radius - 2.0).max(0.0),
+                    elemental.first,
+                    || Ok(()),
+                ) {
+                    hits.push((id, drained));
+                }
+            } else if let Ok(hit) = crate::pvp::hit_player(
+                lobby,
+                account,
+                session,
+                id,
+                make_attack(center, (radius - 2.0).max(0.0)),
+                false,
+                slow_debuff,
+                || Ok(()),
+            ) {
+                hits.push((id, hit.damage));
+            }
+        }
+    } else if crate::pvp::is_player_id(target) {
+        if mana_burn {
+            let drained = crate::pvp::drain_player_mana(
+                lobby,
+                session,
+                target,
+                origin,
+                f32::from(spell.range),
+                elemental.first,
+                || {
+                    if !launched {
+                        paid = Some(pay(lobby, account, session, spell)?);
+                    }
+                    Ok(())
+                },
+            )?;
+            hits.push((target, drained));
+        } else {
+            let hit = crate::pvp::hit_player(
+                lobby,
+                account,
+                session,
+                target,
+                make_attack(origin, f32::from(spell.range)),
+                false,
+                slow_debuff,
+                || {
+                    if !launched {
+                        paid = Some(pay(lobby, account, session, spell)?);
+                    }
+                    Ok(())
+                },
+            )?;
+            hits.push((target, hit.damage));
         }
     } else {
         let hit = world.hit_owned(
@@ -295,7 +387,7 @@ async fn execute(
                 Ok(())
             },
         )?;
-        hits.push((target, hit));
+        hits.push((target, hit.damage));
     }
     // A paid projectile belongs to an earlier completed cast. Its impact must
     // not erase the next spell being cast while that projectile travels.
@@ -310,27 +402,68 @@ async fn execute(
     if let Some(paid) = paid {
         resources::sync(sock, peer, lobby, account, session, paid).await;
     }
+    if combat::integer(row, 2) == 8 {
+        let absorbed: u32 = hits
+            .iter()
+            .filter(|(id, _)| crate::pvp::is_player_id(*id))
+            .map(|(_, d)| *d)
+            .sum();
+        if absorbed > 0 {
+            let healed = (|| -> rusqlite::Result<Option<(skills::State, u16)>> {
+                let db = lobby.db.lock().unwrap();
+                let mut state = skills::load(&db, account, session.character.slot)?;
+                if state.hp == 0 {
+                    return Ok(None);
+                }
+                let before = state.hp;
+                state.hp = state
+                    .hp
+                    .saturating_add(absorbed.min(32767) as u16)
+                    .min(state.max_hp);
+                let delta = state.hp - before;
+                if delta > 0 {
+                    skills::save(&db, account, session.character.slot, &state)?;
+                }
+                Ok(Some((state, delta)))
+            })();
+            if let Ok(Some((state, delta))) = healed
+                && delta > 0
+            {
+                session.skills = state;
+                super::send_response(
+                    sock,
+                    peer,
+                    &None,
+                    &session.skills.hp_packet(delta as i16),
+                    "MAGE_ABSORB_HP",
+                )
+                .await;
+            }
+        }
+    }
     if spell.types[1] == 4
         && let Some(slow) = catalog.effects.get(&(4, spell.id))
         && combat::integer(slow, 1) == 6
     {
-        for (id, _) in &hits {
-            world.slow(
-                *id,
-                combat::integer(slow, 5).clamp(1, 200) as u16,
-                combat::integer(slow, 3).max(0) as u64 * 1000,
-            );
+        for &(id, _) in &hits {
+            if !crate::pvp::is_player_id(id) {
+                world.slow(
+                    id,
+                    combat::integer(slow, 5).clamp(1, 200) as u16,
+                    combat::integer(slow, 3).max(0) as u64 * 1000,
+                );
+            }
         }
     }
     if physical {
-        for (_, hit) in &hits {
+        for &(_, damage) in &hits {
             crate::durability::attack(
                 sock,
                 peer,
                 lobby,
                 account,
                 session,
-                hit.damage.min(32767) as u16,
+                damage.min(32767) as u16,
             )
             .await;
         }
@@ -338,6 +471,6 @@ async fn execute(
     let mut effect = payload.to_vec();
     effect[12..14].copy_from_slice(&1u16.to_le_bytes());
     super::send_response(sock, peer, &None, &effect, "MAGE_EFFECT").await;
-    tracing::info!(%peer,id=spell.id,name=%spell.name,targets=hits.len(),damage=hits.iter().map(|(_,h)|h.damage).sum::<u32>(),"mage spell applied");
+    tracing::info!(%peer,id=spell.id,name=%spell.name,targets=hits.len(),damage=hits.iter().map(|(_,d)|*d).sum::<u32>(),"mage spell applied");
     Ok(())
 }

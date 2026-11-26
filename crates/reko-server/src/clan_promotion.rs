@@ -165,21 +165,26 @@ pub(crate) async fn transfer(
         }
     }
 }
-fn home(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8>> {
+fn return_zone(
+    lobby: &Lobby,
+    account: &str,
+    s: &mut Session,
+    target_zone: u8,
+) -> anyhow::Result<Vec<u8>> {
     let nation = s.character.nation();
     let db = lobby.db.lock().unwrap();
     let (kx, kz, ex, ez): (u16, u16, u16, u16) = db.query_row(
         "SELECT karus_x,karus_z,elmo_x,elmo_z FROM world_town_starts WHERE zone=?1",
-        [nation],
+        [target_zone],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let (x, z) = if nation == 1 { (kx, kz) } else { (ex, ez) };
     let destination = Position {
-        zone: nation,
+        zone: target_zone,
         x: x.checked_mul(10)
-            .ok_or_else(|| anyhow::anyhow!("Invalid home coordinates."))?,
+            .ok_or_else(|| anyhow::anyhow!("Invalid return coordinates."))?,
         z: z.checked_mul(10)
-            .ok_or_else(|| anyhow::anyhow!("Invalid home coordinates."))?,
+            .ok_or_else(|| anyhow::anyhow!("Invalid return coordinates."))?,
         y: 0,
     };
     crate::travel::save_destination(
@@ -192,6 +197,9 @@ fn home(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8>
     )?;
     drop(db);
     Ok(crate::travel::begin(lobby, s, destination))
+}
+fn home(lobby: &Lobby, account: &str, s: &mut Session) -> anyhow::Result<Vec<u8>> {
+    return_zone(lobby, account, s, s.character.nation())
 }
 fn process(
     lobby: &Lobby,
@@ -231,7 +239,7 @@ fn process(
         .iter()
         .find(|m| m.id == npc && m.nearby(s))
         .ok_or_else(|| anyhow::anyhow!("The knight clerk is out of range."))?;
-    if merchant.prototype == 13010 && s.position.zone == 54 {
+    if merchant.prototype == 13010 && matches!(s.position.zone, 48 | 54) {
         return if event == 0 {
             Ok(vec![menu(
                 s,
@@ -241,7 +249,11 @@ fn process(
                 &[(4071, 10), (4072, 11)],
             )])
         } else if event == 10 {
-            Ok(vec![home(lobby, account, s)?])
+            if s.position.zone == 48 {
+                Ok(vec![return_zone(lobby, account, s, 21)?])
+            } else {
+                Ok(vec![home(lobby, account, s)?])
+            }
         } else {
             Ok(Vec::new())
         };
@@ -356,10 +368,9 @@ pub(crate) async fn handle(
         || match p.first() {
             Some(0x20) if matches!(p.len(), 3 | 7) => {
                 let id = u16::from_le_bytes([p[1], p[2]]);
-                lobby
-                    .merchants
-                    .iter()
-                    .any(|m| m.id == id && m.prototype == 13010 && s.position.zone == 54)
+                lobby.merchants.iter().any(|m| {
+                    m.id == id && m.prototype == 13010 && matches!(s.position.zone, 48 | 54)
+                })
             }
             Some(0x55) => s.npc_dialog.as_ref().is_some_and(|c| c.file == SCRIPT),
             _ => false,

@@ -74,6 +74,93 @@ async fn monster_disguise_blocks_proximity_aggro_but_keeps_damage_retaliation() 
     brain.tick(&mut inner.mobs, 1250);
     assert_eq!(brain.agents[&12000].target, Some(1));
 }
+
+#[cfg(test)]
+#[tokio::test]
+async fn monster_switches_aggro_when_another_player_deals_higher_damage() {
+    let game = reko_common::game_dir();
+    if !game.join("Data/NPC_Looks.tbl").exists() {
+        return;
+    }
+    let db = Connection::open_in_memory().unwrap();
+    crate::population::tests::seed(&db);
+    db.execute_batch(include_str!("npc_ai.sql")).unwrap();
+    db.execute(
+        "INSERT INTO world_monster_ai VALUES(100,5,100,100,1500,3,4,5,5,35,100,0,0,0,0,1,1500)",
+        [],
+    )
+    .unwrap();
+    let world = super::World::load(&game).unwrap();
+    world.load_population(&db, &game).unwrap();
+    let mut brain = Brain::default();
+    brain.load(&db).unwrap();
+    let mut inner = world.inner.lock().unwrap();
+    let home = inner.mobs[&12000].position;
+    brain.players.insert(
+        1,
+        Player {
+            name: "KarusTank".into(),
+            position: home,
+            hp: 500,
+            invisible: false,
+            disguised: false,
+            is_admin: false,
+            stats: combat::Stats::default(),
+            at: 1000,
+        },
+    );
+    brain.players.insert(
+        2,
+        Player {
+            name: "ElmoDps".into(),
+            position: home,
+            hp: 500,
+            invisible: false,
+            disguised: false,
+            is_admin: false,
+            stats: combat::Stats {
+                attack: 500,
+                ..combat::Stats::default()
+            },
+            at: 1000,
+        },
+    );
+    // Proximity aggro locks onto KarusTank first (0 damage dealt by KarusTank).
+    brain.tick(&mut inner.mobs, 1000);
+    assert_eq!(brain.agents[&12000].target, Some(1));
+    // ElmoDps hits the mob -> switches immediately from 0-damage proximity target.
+    inner
+        .mobs
+        .get_mut(&12000)
+        .unwrap()
+        .damage_by
+        .insert("ElmoDps".into(), 200);
+    brain.tick(&mut inner.mobs, 1250);
+    assert_eq!(brain.agents[&12000].target, Some(2));
+    // Now KarusTank deals higher damage across several ticks -> switches back to KarusTank.
+    let mut switched = false;
+    for step in 1..=20u64 {
+        let now = 1250 + step * 250;
+        brain.players.get_mut(&1).unwrap().at = now;
+        brain.players.get_mut(&2).unwrap().at = now;
+        *inner
+            .mobs
+            .get_mut(&12000)
+            .unwrap()
+            .damage_by
+            .entry("KarusTank".into())
+            .or_insert(0) += 400;
+        brain.tick(&mut inner.mobs, now);
+        if brain.agents[&12000].target == Some(1) {
+            switched = true;
+            break;
+        }
+    }
+    assert!(
+        switched,
+        "mob should switch aggro to higher-damage attacker"
+    );
+}
 struct Agent {
     target: Option<u16>,
     home: Position,
@@ -84,6 +171,7 @@ struct Agent {
     alive: bool,
     damage_seen: u64,
     damage_floor: HashMap<String, u32>,
+    last_damage_by: HashMap<String, u32>,
     roam: Option<Position>,
     next_roam: u64,
     pattern: i8,
@@ -270,6 +358,14 @@ impl Brain {
             },
         );
     }
+    pub fn provoke(&mut self, mob_id: u16, player_id: u16) {
+        if self.players.contains_key(&player_id)
+            && let Some(agent) = self.agents.get_mut(&mob_id)
+        {
+            agent.target = Some(player_id);
+            agent.returning = false;
+        }
+    }
     pub fn remove(&mut self, id: u16) {
         self.players.remove(&id);
         self.strikes.remove(&id);
@@ -304,6 +400,7 @@ impl Brain {
                 alive: false,
                 damage_seen: 0,
                 damage_floor: HashMap::new(),
+                last_damage_by: HashMap::new(),
                 roam: None,
                 next_roam: now.saturating_add(rule.stand),
                 pattern: 0,
@@ -318,6 +415,7 @@ impl Brain {
                 agent.roam = None;
                 agent.damage_seen = 0;
                 agent.damage_floor.clear();
+                agent.last_damage_by.clear();
                 agent.moving = false;
                 continue;
             }
@@ -339,7 +437,8 @@ impl Brain {
                 continue;
             }
             let damage = mob.damage_by.values().map(|v| u64::from(*v)).sum();
-            if damage > agent.damage_seen {
+            let new_damage_detected = damage > agent.damage_seen;
+            if new_damage_detected {
                 agent.returning = false;
                 agent.chase_start = mob.position;
             }
@@ -347,11 +446,14 @@ impl Brain {
             let valid = |p: &Player| {
                 p.hp > 0 && !p.invisible && !p.is_admin && p.position.zone == mob.position.zone
             };
-            let attacked = |p: &Player| {
-                mob.damage_by.get(&p.name).is_some_and(|damage| {
-                    *damage > agent.damage_floor.get(&p.name).copied().unwrap_or(0)
-                })
+            let threat = |p: &Player| {
+                mob.damage_by
+                    .get(&p.name)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(agent.damage_floor.get(&p.name).copied().unwrap_or(0))
             };
+            let attacked = |p: &Player| threat(p) > 0;
             if let Some(id) = agent.target {
                 let keep = self.players.get(&id).is_some_and(|p| {
                     let range = if attacked(p) {
@@ -374,7 +476,56 @@ impl Brain {
                     agent.returning = true;
                     agent.roam = None;
                     agent.damage_floor = mob.damage_by.clone();
+                } else if new_damage_detected && let Some(current) = self.players.get(&id) {
+                    // 1453/Open-KO CNpc::ChangeTarget aggro switch when another player deals damage.
+                    let challenger = self
+                        .players
+                        .iter()
+                        .filter_map(|(&other_id, other)| {
+                            if other_id == id || !valid(other) {
+                                return None;
+                            }
+                            let dealt = mob
+                                .damage_by
+                                .get(&other.name)
+                                .copied()
+                                .unwrap_or(0)
+                                .saturating_sub(
+                                    agent.last_damage_by.get(&other.name).copied().unwrap_or(0),
+                                );
+                            (dealt > 0 && distance(mob.position, other.position) < 100.0)
+                                .then_some((other_id, other, dealt))
+                        })
+                        .max_by_key(|&(_, _, dealt)| dealt);
+                    if let Some((other_id, other, _)) = challenger {
+                        let current_threat = threat(current);
+                        let other_threat = threat(other);
+                        let roll = random(&mut self.rng, 99);
+                        let switch = current_threat == 0
+                            || match roll {
+                                0..50 => {
+                                    other_threat > current_threat
+                                        || (other_threat == current_threat
+                                            && other.stats.attack >= current.stats.attack)
+                                }
+                                50..80 => {
+                                    distance(mob.position, other.position)
+                                        <= distance(mob.position, current.position)
+                                }
+                                80..95 => other.stats.defence <= current.stats.defence,
+                                _ => true,
+                            };
+                        if switch {
+                            agent.target = Some(other_id);
+                            agent.chase_start = mob.position;
+                            agent.returning = false;
+                            agent.roam = None;
+                        }
+                    }
                 }
+            }
+            if new_damage_detected {
+                agent.last_damage_by = mob.damage_by.clone();
             }
             if agent.target.is_none() && !agent.returning {
                 let attacked = |p: &Player| {

@@ -127,7 +127,7 @@ pub(crate) async fn handle(
     let target = u16::from_le_bytes([payload[8], payload[9]]);
     let now = skills::now_ms();
     if payload[1] == 6 && target == caster && caster == session.player_id {
-        if spell.types[0] == 4 && matches!(spell.moral, 7 | 10 | 12) {
+        if spell.types.contains(&4) && matches!(spell.moral, 7 | 10 | 12) {
             refused(
                 sock,
                 peer,
@@ -167,6 +167,10 @@ pub(crate) async fn handle(
                 utility::refresh(session, Some(catalog), lobby.combat.as_ref());
                 if category == 91 {
                     visibility(lobby, session, false);
+                }
+                if category == 92 {
+                    super::send_response(sock, peer, &None, &[0x42, 0, 0, 0], "STEALTH_DETECT_END")
+                        .await;
                 }
                 super::send_response(sock, peer, &None, &[0x31, 5, category], "BUFF_CANCELLED")
                     .await;
@@ -213,6 +217,12 @@ pub(crate) async fn handle(
     .unwrap_or(false)
     {
         Some("Complete this skill's unlock quest before using it.")
+    } else if session.skills.buffs.get(&47).is_some_and(|b| now < b.until) {
+        Some("You cannot use skills while stunned.")
+    } else if matches!(spell.types[0], 1 | 2)
+        && session.skills.buffs.get(&32).is_some_and(|b| now < b.until)
+    {
+        Some("Your weapons are disabled.")
     } else if spell.item_group == 1 && session.combat.weapon_kind / 10 != 1 {
         Some("This skill requires an equipped dagger.")
     } else if spell.item_group == 7 && !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10) {
@@ -226,12 +236,125 @@ pub(crate) async fn handle(
     }
     session.sitting = false;
     if spell.types[0] == 4
-        && catalog
-            .effects
-            .get(&(4, id))
-            .is_some_and(|row| combat::integer(row, 1) == 32)
+        && let Some(row) = catalog.effects.get(&(4, id))
+        && (matches!(combat::integer(row, 1), 26 | 32)
+            || (combat::integer(row, 1) == 9 && spell.moral == 7)
+            || (combat::integer(row, 1) == 20 && spell.moral == 12))
     {
-        refused(sock, peer, session, id, "Armor Cancellation affects enemy players, not monsters. Player combat is not implemented yet.").await;
+        let category = combat::integer(row, 1) as u8;
+        if payload[1] == 1 {
+            session.pending_cast = Some(Cast {
+                skill: id,
+                target,
+                expires_at: now + spell.cast_ms + 3000,
+            });
+            super::send_response(sock, peer, &None, payload, "CURSE_CASTING").await;
+            return true;
+        }
+        if payload[1] != 3 {
+            refused(
+                sock,
+                peer,
+                session,
+                id,
+                "This skill phase is not implemented yet.",
+            )
+            .await;
+            return true;
+        }
+        if spell.cast_ms > 0
+            && !session
+                .skills
+                .buffs
+                .get(&23)
+                .is_some_and(|buff| now < buff.until)
+            && !session
+                .pending_cast
+                .as_ref()
+                .is_some_and(|pending| pending.matches(id, target, now))
+        {
+            refused(
+                sock,
+                peer,
+                session,
+                id,
+                "No matching active cast was found.",
+            )
+            .await;
+            return true;
+        }
+        session.pending_cast = None;
+        let duration_ms = combat::integer(row, 3).max(0) as u64 * 1000;
+        if spell.moral == 12 {
+            // Smoke Screen (108780/208780): AoE around caster, enemy players only.
+            let radius = combat::integer(row, 2).max(1) as f32;
+            let targets = crate::pvp::area_targets(lobby, session, session.position, radius);
+            if targets.is_empty() {
+                refused(
+                    sock,
+                    peer,
+                    session,
+                    id,
+                    "This skill requires an enemy player in range; it does not apply to monsters.",
+                )
+                .await;
+                return true;
+            }
+            match resources::commit(lobby, account, session.character.slot, spell, 1, |_| Ok(())) {
+                Ok(paid) => {
+                    for tid in targets {
+                        let _ = crate::pvp::curse_player(
+                            lobby,
+                            session,
+                            tid,
+                            session.position,
+                            radius,
+                            category,
+                            id,
+                            duration_ms,
+                            || Ok(()),
+                        );
+                    }
+                    resources::sync(sock, peer, lobby, account, session, paid).await;
+                    let mut packet = skills::effect(id, caster);
+                    packet[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+                    super::send_response(sock, peer, &None, &packet, "PVP_CURSE_EFFECT").await;
+                }
+                Err(reason) => refused(sock, peer, session, id, reason).await,
+            }
+            return true;
+        }
+        let mut paid = None;
+        let outcome = crate::pvp::curse_player(
+            lobby,
+            session,
+            target,
+            session.position,
+            f32::from(spell.range),
+            category,
+            id,
+            duration_ms,
+            || {
+                paid = Some(resources::commit(
+                    lobby,
+                    account,
+                    session.character.slot,
+                    spell,
+                    1,
+                    |_| Ok(()),
+                )?);
+                Ok(())
+            },
+        );
+        match outcome {
+            Ok(()) => {
+                resources::sync(sock, peer, lobby, account, session, paid.unwrap()).await;
+                let mut packet = skills::effect(id, caster);
+                packet[8..10].copy_from_slice(&target.to_le_bytes());
+                super::send_response(sock, peer, &None, &packet, "PVP_CURSE_EFFECT").await;
+            }
+            Err(reason) => refused(sock, peer, session, id, reason).await,
+        }
         return true;
     }
     if spell.types[0] == 2 {
@@ -257,6 +380,38 @@ pub(crate) async fn handle(
             expires_at: now + spell.cast_ms + 3000,
         });
         super::send_response(sock, peer, &None, payload, "SKILL_CASTING").await;
+        return true;
+    }
+    if payload[1] == 2 {
+        // Projectile launch phase for non-mage-damage skills such as Freezing Distance (110674/210674).
+        // Echoing FLYING keeps the client's local cooldown intact instead of cancelling it with SKILL_FAILED.
+        if session
+            .pending_cast
+            .as_ref()
+            .is_some_and(|pending| pending.matches(id, target, now))
+            || session
+                .skills
+                .buffs
+                .get(&23)
+                .is_some_and(|buff| now < buff.until)
+            || spell.cast_ms == 0
+        {
+            session.pending_cast = Some(Cast {
+                skill: id,
+                target,
+                expires_at: now + 5000,
+            });
+            super::send_response(sock, peer, &None, payload, "SKILL_FLYING").await;
+        } else {
+            refused(
+                sock,
+                peer,
+                session,
+                id,
+                "No matching active cast was found.",
+            )
+            .await;
+        }
         return true;
     }
     if payload[1] == 4 {
@@ -387,6 +542,9 @@ pub(crate) async fn handle(
             skills::load(&db, account, session.character.slot)
                 .map_err(|_| "Unable to load stealth state.")
                 .and_then(|mut next| {
+                    if category == 91 && next.buffs.get(&26).is_some_and(|buff| now < buff.until) {
+                        return Err("You cannot become invisible while marked.");
+                    }
                     if next
                         .buffs
                         .get(&category)
@@ -429,7 +587,133 @@ pub(crate) async fn handle(
                 if category == 91 {
                     visibility(lobby, session, true);
                 }
+                if category == 92 {
+                    let state_change = effect.map_or(3, |r| combat::integer(r, 7));
+                    let radius = effect.map_or(25, |r| combat::integer(r, 8)).clamp(1, 200) as u16;
+                    let mut detect_pkt = vec![0x42, 1];
+                    detect_pkt.extend(radius.to_le_bytes());
+                    super::send_response(sock, peer, &None, &detect_pkt, "STEALTH_DETECT").await;
+                    // 1453 MagicInstance.cpp:2547-2571: Lupine Eyes (bStateChange == 4) applies to party members in range.
+                    if state_change == 4 {
+                        let db = lobby.db.lock().unwrap();
+                        let mut hub = lobby.social.lock().unwrap();
+                        let members = hub.group(session.player_id);
+                        let peers: Vec<_> = hub
+                            .players
+                            .values()
+                            .filter(|p| {
+                                p.s.player_id != session.player_id
+                                    && members.contains(&p.s.player_id)
+                                    && p.s.entered
+                                    && p.s.skills.hp > 0
+                                    && crate::social::near(session.position, p.s.position, radius)
+                            })
+                            .cloned()
+                            .collect();
+                        for peer_player in peers {
+                            if let Ok(mut pstate) = skills::load(
+                                &db,
+                                &peer_player.account,
+                                peer_player.s.character.slot,
+                            ) {
+                                pstate.buffs.insert(
+                                    92,
+                                    skills::Buff {
+                                        skill: id,
+                                        until: now + duration,
+                                    },
+                                );
+                                if skills::save(
+                                    &db,
+                                    &peer_player.account,
+                                    peer_player.s.character.slot,
+                                    &pstate,
+                                )
+                                .is_ok()
+                                {
+                                    hub.skill_refresh.insert(peer_player.s.player_id);
+                                    if let Some(p) = hub.players.get_mut(&peer_player.s.player_id) {
+                                        p.s.skills = pstate;
+                                    }
+                                    let mut peff = skills::effect(id, caster);
+                                    peff[8..10]
+                                        .copy_from_slice(&peer_player.s.player_id.to_le_bytes());
+                                    hub.send(peer_player.s.player_id, peff);
+                                    hub.send(peer_player.s.player_id, detect_pkt.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 tracing::info!(%peer,id,duration,category,"visibility skill applied");
+            }
+            Err(reason) => refused(sock, peer, session, id, reason).await,
+        }
+        return true;
+    }
+    if spell.types == [7, 0] {
+        // Type 7: Warrior Binding/Provoke (monsters only) and Priest Sleep Wing/Carpet (monsters only).
+        let Some(monsters) = lobby.monsters.as_ref() else {
+            refused(sock, peer, session, id, "Combat targets unavailable.").await;
+            return true;
+        };
+        let is_warrior = matches!(session.character.class % 100, 1 | 5 | 6);
+        let is_priest = matches!(session.character.class % 100, 4 | 11 | 12);
+        if !is_warrior && !is_priest {
+            refused(
+                sock,
+                peer,
+                session,
+                id,
+                "This skill is unavailable for your class.",
+            )
+            .await;
+            return true;
+        }
+        let radius = effect.map_or(0, |r| combat::integer(r, 1).max(0)) as f32;
+        if spell.moral == 7 && crate::pvp::is_player_id(target) {
+            refused(
+                sock,
+                peer,
+                session,
+                id,
+                "This skill applies to monsters only.",
+            )
+            .await;
+            return true;
+        }
+        let ids: Vec<u16> = if spell.moral == 10 {
+            monsters.area_targets(session.position, radius.max(f32::from(spell.range)))
+        } else {
+            if monsters
+                .validate(target, session.position, f32::from(spell.range))
+                .is_err()
+            {
+                refused(
+                    sock,
+                    peer,
+                    session,
+                    id,
+                    "The monster target is unavailable or too far away.",
+                )
+                .await;
+                return true;
+            }
+            vec![target]
+        };
+        match resources::commit(lobby, account, session.character.slot, spell, 1, |_| Ok(())) {
+            Ok(paid) => {
+                for mob_id in ids {
+                    if is_warrior {
+                        monsters.provoke(mob_id, session.player_id);
+                    } else {
+                        monsters.sleep(mob_id, 20_000);
+                    }
+                }
+                resources::sync(sock, peer, lobby, account, session, paid).await;
+                let mut packet = skills::effect(id, caster);
+                packet[8..10].copy_from_slice(&target.to_le_bytes());
+                super::send_response(sock, peer, &None, &packet, "TYPE7_EFFECT").await;
             }
             Err(reason) => refused(sock, peer, session, id, reason).await,
         }
@@ -492,7 +776,7 @@ pub(crate) async fn handle(
             },
         attack: session.combat.attack,
         percent: combat::integer(effect, 3).clamp(0, 32767) as u16,
-        extra: combat::integer(effect, 4).clamp(0, 32767) as u16,
+        extra: catalog.type1_add_damage.get(&id).copied().unwrap_or(0),
         skill: true,
         drain_percent: if drain {
             combat::integer(effect, 3) as u8
@@ -519,20 +803,61 @@ pub(crate) async fn handle(
             None
         },
     };
+    let debuff = if spell.types[1] == 4
+        && let Some(row) = secondary
+        && matches!(combat::integer(row, 1), 6 | 21)
+    {
+        Some((
+            combat::integer(row, 1) as u8,
+            id,
+            combat::integer(row, 3).max(0) as u64 * 1000,
+        ))
+    } else if matches!(id, 106820 | 206820) {
+        // Warrior Master 20 Shock Stun: 3-second stun in PvP.
+        Some((47u8, id, 3000))
+    } else {
+        None
+    };
     let mut paid = None;
-    let result = monsters.hit_session_owned(target, attack, session, false, || {
-        paid = Some(resources::commit(
+    let result = if crate::pvp::is_player_id(target) {
+        crate::pvp::hit_player(
             lobby,
             account,
-            session.character.slot,
-            spell,
-            1,
-            |_| Ok(()),
-        )?);
-        Ok(())
-    });
+            session,
+            target,
+            attack,
+            true,
+            debuff,
+            || {
+                paid = Some(resources::commit(
+                    lobby,
+                    account,
+                    session.character.slot,
+                    spell,
+                    1,
+                    |_| Ok(()),
+                )?);
+                Ok(())
+            },
+        )
+        .map(|h| (h.damage, h.dead))
+    } else {
+        monsters
+            .hit_session_owned(target, attack, session, false, || {
+                paid = Some(resources::commit(
+                    lobby,
+                    account,
+                    session.character.slot,
+                    spell,
+                    1,
+                    |_| Ok(()),
+                )?);
+                Ok(())
+            })
+            .map(|h| (h.damage, h.dead))
+    };
     match result {
-        Ok(hit) => {
+        Ok((damage, dead)) => {
             resources::sync(sock, peer, lobby, account, session, paid.unwrap()).await;
             if !drain {
                 crate::durability::attack(
@@ -541,11 +866,12 @@ pub(crate) async fn handle(
                     lobby,
                     account,
                     session,
-                    hit.damage.min(32767) as u16,
+                    damage.min(32767) as u16,
                 )
                 .await;
             }
-            if spell.types[1] == 4
+            if !crate::pvp::is_player_id(target)
+                && spell.types[1] == 4
                 && let Some(row) = secondary
                 && combat::integer(row, 1) == 6
             {
@@ -555,18 +881,84 @@ pub(crate) async fn handle(
                     combat::integer(row, 3).max(0) as u64 * 1000,
                 );
             }
-            match remove_stealth(lobby, account, session, false) {
-                Ok(true) => {
-                    super::send_response(sock, peer, &None, &[0x31, 5, 91], "STEALTH_BROKEN").await
+            if !crate::pvp::is_player_id(target) && matches!(id, 106820 | 206820) {
+                monsters.stun(target, 3000);
+            }
+            if crate::pvp::is_player_id(target) && matches!(id, 106815 | 206815) {
+                crate::pvp::break_armor(lobby, target, 1000);
+            }
+            // Blood Drain (108610/208610) & Vampiric Touch (108650/208650): heal caster for drained HP.
+            if drain && damage > 0 {
+                let healed = (|| -> rusqlite::Result<Option<(skills::State, u16)>> {
+                    let db = lobby.db.lock().unwrap();
+                    let mut state = skills::load(&db, account, session.character.slot)?;
+                    if state.hp == 0 {
+                        return Ok(None);
+                    }
+                    let before = state.hp;
+                    state.hp = state
+                        .hp
+                        .saturating_add(damage.min(32767) as u16)
+                        .min(state.max_hp);
+                    let delta = state.hp - before;
+                    if delta > 0 {
+                        skills::save(&db, account, session.character.slot, &state)?;
+                    }
+                    Ok(Some((state, delta)))
+                })();
+                if let Ok(Some((state, delta))) = healed
+                    && delta > 0
+                {
+                    session.skills = state;
+                    super::send_response(
+                        sock,
+                        peer,
+                        &None,
+                        &session.skills.hp_packet(delta as i16),
+                        "DRAIN_ABSORB_HP",
+                    )
+                    .await;
                 }
-                Err(error) => tracing::error!(%peer,%error,"stealth break failed"),
-                _ => {}
+            }
+            // Beast Hiding (108680/208680, T=[1,9]): grants 5s stealth on player hit instead of breaking stealth.
+            let beast_hiding = spell.types == [1, 9] && crate::pvp::is_player_id(target);
+            if beast_hiding {
+                let dur = secondary.map_or(5, |row| combat::integer(row, 10).max(1)) as u64 * 1000;
+                let granted = (|| -> rusqlite::Result<Option<skills::State>> {
+                    let db = lobby.db.lock().unwrap();
+                    let mut state = skills::load(&db, account, session.character.slot)?;
+                    if state.buffs.get(&26).is_some_and(|b| now < b.until) {
+                        return Ok(None);
+                    }
+                    state.buffs.insert(
+                        91,
+                        skills::Buff {
+                            skill: id,
+                            until: now + dur,
+                        },
+                    );
+                    skills::save(&db, account, session.character.slot, &state)?;
+                    Ok(Some(state))
+                })();
+                if let Ok(Some(state)) = granted {
+                    session.skills = state;
+                    visibility(lobby, session, true);
+                }
+            } else {
+                match remove_stealth(lobby, account, session, false) {
+                    Ok(true) => {
+                        super::send_response(sock, peer, &None, &[0x31, 5, 91], "STEALTH_BROKEN")
+                            .await
+                    }
+                    Err(error) => tracing::error!(%peer,%error,"stealth break failed"),
+                    _ => {}
+                }
             }
             let mut packet = skills::effect(id, caster);
             packet[8..10].copy_from_slice(&target.to_le_bytes());
             super::send_response(sock, peer, &None, &packet, "SKILL_EFFECT").await;
-            if drain && hit.damage > 32767 {
-                let text = format!("{} inflicted {} damage.", spell.name, hit.damage);
+            if drain && damage > 32767 {
+                let text = format!("{} inflicted {} damage.", spell.name, damage);
                 let notice = crate::chat::packet(
                     7,
                     session.character.nation(),
@@ -576,7 +968,7 @@ pub(crate) async fn handle(
                 );
                 super::send_response(sock, peer, &None, &notice, "PERCENT_DAMAGE_TOTAL").await;
             }
-            tracing::info!(%peer,id,name=%spell.name,target,damage=hit.damage,dead=hit.dead,drain,"combat skill applied");
+            tracing::info!(%peer,id,name=%spell.name,target,damage,dead,drain,"combat skill applied");
         }
         Err(reason) => refused(sock, peer, session, id, reason).await,
     }

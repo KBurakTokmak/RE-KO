@@ -21,10 +21,10 @@ fn supported(lobby: &Lobby, spell: &skills::Spell) -> bool {
         [4, 0] => {
             matches!(
                 combat::integer(row, 1),
-                1 | 2 | 4 | 5 | 7 | 8 | 10 | 18 | 19 | 23 | 28 | 29 | 31
+                1 | 2 | 4 | 5 | 7 | 8 | 10 | 18 | 19 | 23 | 27 | 28 | 29 | 30 | 31
             ) || combat::integer(row, 1) == 6 && catalog.speeds.contains_key(&spell.id)
         }
-        [5, 0] => matches!(combat::integer(row, 1), 1 | 2),
+        [5, 0] => matches!(combat::integer(row, 1), 1..=3),
         _ => false,
     }
 }
@@ -39,16 +39,109 @@ fn apply(
     let catalog = lobby.skills.as_ref().ok_or("Skill data unavailable.")?;
     let row = &catalog.effects[&(spell.types[0], spell.id)];
     let group_cast = spell.moral == 6;
+    let area_friend = spell.moral == 11;
+    let resurrection = spell.moral == 25 && spell.types == [5, 0] && combat::integer(row, 1) == 3;
     if group_cast && ![s.player_id, u16::MAX].contains(&target) {
         return Err("Party-wide skills must target your party.");
     }
-    let radius = if group_cast {
-        combat::integer(row, if spell.types[0] == 4 { 2 } else { 1 }).clamp(0, 65535) as u16
+    if spell.hp >= 10_000 && target == s.player_id {
+        return Err("Sacrifice must target another party member.");
+    }
+    let radius = if area_friend {
+        combat::integer(row, 2).clamp(0, 65535) as u16
+    } else if group_cast {
+        if spell.types[0] == 5 {
+            spell.range
+        } else {
+            combat::integer(row, if spell.types[0] == 4 { 2 } else { 1 }).clamp(0, 65535) as u16
+        }
     } else {
         spell.range
     };
     let db = lobby.db.lock().unwrap();
     let mut hub = lobby.social.lock().unwrap();
+    if resurrection {
+        let Some(mut dead_player) = hub.players.get(&target).cloned() else {
+            return Err("Select a dead friendly player within range.");
+        };
+        if target == s.player_id
+            || !dead_player.s.entered
+            || dead_player.s.zone_loading
+            || dead_player.s.skills.hp != 0
+            || !friendly(s, &dead_player.s)
+            || !social::near(s.position, dead_player.s.position, radius)
+        {
+            return Err("Select a dead friendly player within range.");
+        }
+        let need_stones = combat::integer(row, 3).max(0) as u16;
+        let tx = db
+            .unchecked_transaction()
+            .map_err(|_| "Unable to start resurrection transaction.")?;
+        let paid = resources::commit_in(
+            &tx,
+            account,
+            s.character.slot,
+            spell,
+            1,
+            lobby.combat.as_ref(),
+            |_| Ok(()),
+        )?;
+        if need_stones > 0 {
+            crate::inventory::consume(
+                &tx,
+                &dead_player.account,
+                dead_player.s.character.slot,
+                379_006_000,
+                need_stones,
+            )
+            .map_err(|_| "The dead player does not have enough Stones of Life.")?;
+        }
+        let mut tstate = skills::load(&tx, &dead_player.account, dead_player.s.character.slot)
+            .map_err(|_| "Unable to load dead target.")?;
+        if tstate.hp != 0 {
+            return Err("The target is already alive.");
+        }
+        crate::travel::clear_zone_effects(&mut tstate, Some(catalog));
+        let tstats = utility::effective(
+            &dead_player.s,
+            &tstate,
+            Some(catalog),
+            lobby.combat.as_ref(),
+        );
+        tstate.set_limits(tstats.hp, tstats.mp);
+        tstate.hp = tstate.max_hp;
+        skills::save_in(
+            &tx,
+            &dead_player.account,
+            dead_player.s.character.slot,
+            &tstate,
+        )
+        .map_err(|_| "Unable to save resurrected target.")?;
+        tx.commit().map_err(|_| "Unable to commit resurrection.")?;
+        dead_player.s.skills = tstate.clone();
+        dead_player.s.combat = tstats;
+        hub.synchronize(&dead_player.account, &dead_player.s);
+        hub.skill_refresh.insert(target);
+        if need_stones > 0 {
+            hub.refresh.insert(target);
+        }
+        let mut regene = vec![0x12];
+        regene.extend(dead_player.s.position.x.to_le_bytes());
+        regene.extend(dead_player.s.position.z.to_le_bytes());
+        regene.extend(dead_player.s.position.y.to_le_bytes());
+        hub.send(target, regene);
+        hub.send(target, tstate.hp_packet(0));
+        hub.send(target, crate::inventory::attributes(&tstats, 2));
+        hub.send(target, tstate.mana_packet());
+        for pkt in utility::buff_restore_packets(&dead_player.s, skills::now_ms()) {
+            hub.send(target, pkt);
+        }
+        let mut effect = skills::effect(spell.id, s.player_id);
+        effect[8..10].copy_from_slice(&target.to_le_bytes());
+        effect[12..14].copy_from_slice(&1u16.to_le_bytes());
+        hub.send(target, effect.clone());
+        return Ok((paid, vec![(target, effect)]));
+    }
     let members = hub.group(s.player_id);
     let mut players: Vec<_> = hub
         .players
@@ -61,11 +154,14 @@ fn apply(
                 && state.skills.hp > 0
                 && (id == s.player_id
                     || group_cast
+                    || area_friend
                     || spell.moral == 4 && members.contains(&id)
                     || hub.can_see(s.player_id, id))
                 && (id == s.player_id
                     || radius > 0 && social::near(s.position, state.position, radius))
-                && if group_cast {
+                && if area_friend {
+                    friendly(s, state)
+                } else if group_cast {
                     members.contains(&id)
                 } else {
                     id == target
@@ -86,7 +182,7 @@ fn apply(
         }
     }
     if !players.iter().any(|p| p.s.player_id == s.player_id)
-        && (group_cast || target == s.player_id && spell.moral != 3)
+        && (group_cast || area_friend || target == s.player_id && spell.moral != 3)
     {
         players.push(social::Player {
             account: account.into(),
@@ -114,14 +210,14 @@ fn apply(
         let mut state = skills::load(&tx, &player.account, player.s.character.slot)
             .map_err(|_| "Unable to load friendly target.")?;
         if state.hp == 0 {
-            if group_cast {
+            if group_cast || area_friend {
                 continue;
             }
             return Err("The target is dead.");
         }
         let removed = match utility::apply_friendly(lobby, &player.s, spell, &mut state) {
             Ok(removed) => removed,
-            Err(_) if group_cast => continue,
+            Err(_) if group_cast || area_friend => continue,
             Err(reason) => return Err(reason),
         };
         skills::save_in(&tx, &player.account, player.s.character.slot, &state)
@@ -137,6 +233,7 @@ fn apply(
     tx.commit()
         .map_err(|_| "Unable to commit friendly skill.")?;
     let mut effects = Vec::new();
+    let now = skills::now_ms();
     for (mut player, state, removed) in changes {
         let id = player.s.player_id;
         player.s.skills = state.clone();
@@ -150,6 +247,21 @@ fn apply(
             effect[20..22]
                 .copy_from_slice(&(combat::integer(row, 5).clamp(0, 200) as u16).to_le_bytes());
         }
+        if removed.contains(&32) {
+            for slot in [6usize, 8usize] {
+                let item = player.s.equipment[slot];
+                if item.id != 0 {
+                    let pkt =
+                        crate::pvp::user_look_change(id, slot as u8, item.id, item.durability);
+                    hub.broadcast_visual(id, None, Some(id), &pkt);
+                    if id != s.player_id {
+                        hub.send(id, pkt);
+                    } else {
+                        effects.push((id, pkt));
+                    }
+                }
+            }
+        }
         if id != s.player_id {
             hub.synchronize(&player.account, &player.s);
             hub.skill_refresh.insert(id);
@@ -158,6 +270,11 @@ fn apply(
             hub.send(id, crate::inventory::attributes(&player.s.combat, 2));
             for category in removed {
                 hub.send(id, vec![0x31, 5, category]);
+                if let Some(scroll) = state.buffs.get(&category).copied()
+                    && now < scroll.until
+                {
+                    hub.send(id, utility::buff_restore_packet(id, scroll, now));
+                }
             }
             if spell.types[0] == 5 && combat::integer(row, 1) == 1 {
                 hub.send(id, vec![0x31, 7, 200]);
@@ -166,6 +283,11 @@ fn apply(
         } else {
             for category in removed {
                 effects.push((id, vec![0x31, 5, category]));
+                if let Some(scroll) = state.buffs.get(&category).copied()
+                    && now < scroll.until
+                {
+                    effects.push((id, utility::buff_restore_packet(id, scroll, now)));
+                }
             }
             if spell.types[0] == 5 && combat::integer(row, 1) == 1 {
                 effects.push((id, vec![0x31, 7, 200]));
@@ -192,7 +314,10 @@ pub(crate) async fn handle(
     spell: &skills::Spell,
     target: u16,
 ) -> Option<Result<(), &'static str>> {
-    if spell.skill_group == 0 || !matches!(spell.moral, 2 | 3 | 4 | 6) || !supported(lobby, spell) {
+    if spell.skill_group == 0
+        || !matches!(spell.moral, 2 | 3 | 4 | 6 | 11 | 25)
+        || !supported(lobby, spell)
+    {
         return None;
     }
     Some(match apply(lobby, account, session, spell, target) {
@@ -209,6 +334,11 @@ pub(crate) async fn handle(
             .await;
             for (_, packet) in effects {
                 super::send_response(sock, peer, &None, &packet, "FRIENDLY_EFFECT").await;
+            }
+            if session.skills.hp == 0 {
+                let mut dead_pkt = vec![0x11];
+                dead_pkt.extend(session.player_id.to_le_bytes());
+                super::send_response(sock, peer, &None, &dead_pkt, "SACRIFICE_DEAD").await;
             }
             Ok(())
         }

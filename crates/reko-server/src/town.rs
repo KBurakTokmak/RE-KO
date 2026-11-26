@@ -144,8 +144,7 @@ pub(crate) async fn respawn(
         let db = lobby.db.lock().unwrap();
         let tx = db.unchecked_transaction()?;
         let mut next = s.skills.clone();
-        next.buffs.clear();
-        next.periodic.clear();
+        crate::travel::clear_zone_effects(&mut next, lobby.skills.as_ref());
         let stats =
             crate::utility::effective(s, &next, lobby.skills.as_ref(), lobby.combat.as_ref());
         next.set_limits(stats.hp, stats.mp);
@@ -182,6 +181,9 @@ pub(crate) async fn respawn(
     )
     .await;
     super::send_response(sock, peer, &None, &s.skills.mana_packet(), "RESPAWN_MP").await;
+    for packet in crate::utility::buff_restore_packets(s, skills::now_ms()) {
+        super::send_response(sock, peer, &None, &packet, "RESPAWN_BUFF_RESTORE").await;
+    }
     s.entity_region = None;
     crate::population::refresh(sock, peer, lobby, s).await;
     crate::social::refresh_region(lobby, account, s);
@@ -214,6 +216,13 @@ mod tests {
                 until: skills::now_ms() + 60000,
             },
         );
+        s.skills.buffs.insert(
+            1,
+            skills::Buff {
+                skill: 500024,
+                until: skills::now_ms() + 600_000,
+            },
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap())
             .await
@@ -224,13 +233,19 @@ mod tests {
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply[4..11], &[0x12, 0xf4, 0x0b, 0xc0, 0x0d, 0, 0]);
         assert_eq!(s.skills.hp, s.combat.hp);
-        assert!(s.skills.buffs.is_empty());
+        assert!(!s.skills.buffs.contains_key(&6));
+        assert_eq!(
+            s.skills.buffs.get(&1).map(|b| b.skill),
+            Some(500024),
+            "item-backed scroll buff must survive respawn"
+        );
         assert_eq!(s.skills.mana, 50);
         let db = lobby.db.lock().unwrap();
         assert_eq!(movement::load(&db, "test", 0).unwrap(), s.position);
         let saved = skills::load(&db, "test", 0).unwrap();
         assert_eq!(saved.hp, s.skills.hp);
-        assert!(saved.buffs.is_empty());
+        assert!(!saved.buffs.contains_key(&6));
+        assert_eq!(saved.buffs.get(&1).map(|b| b.skill), Some(500024));
     }
 
     #[tokio::test]

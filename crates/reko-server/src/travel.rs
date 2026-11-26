@@ -211,17 +211,68 @@ fn select(
     Ok((begin(lobby, s, position), w.coins))
 }
 
-fn clear_zone_effects(state: &mut skills::State, catalog: Option<&skills::Catalog>) {
+pub(crate) const SUSPENDED_SCROLL_OFFSET: u8 = 100;
+
+pub(crate) fn is_scroll_buff(skill: u32, catalog: Option<&skills::Catalog>) -> bool {
+    catalog.map_or(skill > 500000, |catalog| {
+        catalog.spells.get(&skill).is_some_and(|spell| {
+            spell.skill_group == 0 && spell.use_item != 0 && spell.types == [4, 0]
+        })
+    })
+}
+
+pub(crate) fn suspend_scroll_for_debuff(
+    state: &mut skills::State,
+    category: u8,
+    now: u64,
+    catalog: Option<&skills::Catalog>,
+) {
+    if category < SUSPENDED_SCROLL_OFFSET
+        && let Some(existing) = state.buffs.get(&category).copied()
+        && now < existing.until
+        && is_scroll_buff(existing.skill, catalog)
+    {
+        state
+            .buffs
+            .insert(category + SUSPENDED_SCROLL_OFFSET, existing);
+    }
+}
+
+pub(crate) fn restore_suspended_scroll(
+    state: &mut skills::State,
+    category: u8,
+    now: u64,
+) -> Option<skills::Buff> {
+    if category >= SUSPENDED_SCROLL_OFFSET {
+        return None;
+    }
+    let scroll = state.buffs.remove(&(category + SUSPENDED_SCROLL_OFFSET))?;
+    if now < scroll.until {
+        state.buffs.insert(category, scroll);
+        Some(scroll)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn clear_zone_effects(state: &mut skills::State, catalog: Option<&skills::Catalog>) {
     let now = skills::now_ms();
     state.buffs.retain(|kind, buff| {
         now < buff.until
-            && (*kind == crate::transformation::CATEGORY
-                || catalog.map_or(buff.skill > 500000, |catalog| {
-                    catalog.spells.get(&buff.skill).is_some_and(|spell| {
-                        spell.skill_group == 0 && spell.use_item != 0 && spell.types == [4, 0]
-                    })
-                }))
+            && (*kind == crate::transformation::CATEGORY || is_scroll_buff(buff.skill, catalog))
     });
+    let suspended: Vec<u8> = state
+        .buffs
+        .keys()
+        .copied()
+        .filter(|&k| k >= SUSPENDED_SCROLL_OFFSET)
+        .collect();
+    for key in suspended {
+        let base = key - SUSPENDED_SCROLL_OFFSET;
+        if let Some(buff) = state.buffs.remove(&key) {
+            state.buffs.entry(base).or_insert(buff);
+        }
+    }
     state.periodic.clear();
 }
 
@@ -271,6 +322,7 @@ pub(crate) fn begin(lobby: &Lobby, s: &mut Session, position: movement::Position
     {
         let mut hub = lobby.social.lock().unwrap();
         if !same_zone {
+            crate::challenge::disconnect(&mut hub, s.player_id);
             crate::party::zone_leave(&mut hub, s.player_id);
             if let Some(player) = hub.players.get_mut(&s.player_id) {
                 player.s.zone_loading = true;

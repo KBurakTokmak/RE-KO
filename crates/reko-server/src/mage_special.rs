@@ -12,18 +12,6 @@ fn active(s: &Session, category: u8) -> bool {
         .is_some_and(|b| skills::now_ms() < b.until)
 }
 
-fn enemy(caster: &Session, target: &Session) -> bool {
-    caster.player_id != target.player_id
-        && caster.position.zone == target.position.zone
-        && target.entered
-        && !target.zone_loading
-        && target.skills.hp > 0
-        && !target.is_admin
-        && (caster.position.zone == 48
-            || matches!(caster.position.zone, 71 | 72)
-                && caster.character.nation() != target.character.nation())
-}
-
 fn effect(
     spell: &skills::Spell,
     caster: u16,
@@ -42,13 +30,32 @@ fn effect(
     packet
 }
 
-fn notify(hub: &mut social::Hub, player: &social::Player, state: &skills::State, packet: Vec<u8>) {
+fn notify(
+    lobby: &Lobby,
+    hub: &mut social::Hub,
+    player: &social::Player,
+    state: &skills::State,
+    packet: Vec<u8>,
+    drain: bool,
+) {
     let id = player.s.player_id;
     hub.skill_refresh.insert(id);
+    let stats = crate::utility::effective(
+        &player.s,
+        state,
+        lobby.skills.as_ref(),
+        lobby.combat.as_ref(),
+    );
     if let Some(p) = hub.players.get_mut(&id) {
         p.s.skills = state.clone();
+        p.s.combat = stats;
     }
     hub.send(id, packet);
+    if drain {
+        hub.send(id, state.mana_packet());
+    } else {
+        hub.send(id, crate::inventory::attributes(&stats, 2));
+    }
 }
 
 fn transport(
@@ -59,25 +66,32 @@ fn transport(
     target: u16,
 ) -> Result<(resources::Paid, Option<Position>), &'static str> {
     let db = lobby.db.lock().unwrap();
-    let data: String = db
-        .query_row(
-            "SELECT data FROM world_reference_rules WHERE table_name='MAGIC_TYPE8' AND rule_id=?1",
-            [spell.id],
-            |r| r.get(0),
-        )
-        .map_err(|_| "Original 1453 transport rules have not been imported.")?;
-    let rule: serde_json::Value =
-        serde_json::from_str(&data).map_err(|_| "Invalid transport rule.")?;
-    let value = |key: &str| {
-        rule[key]
-            .as_str()
-            .and_then(|v| v.parse::<u16>().ok())
-            .or_else(|| rule[key].as_u64().and_then(|v| v.try_into().ok()))
-            .unwrap_or(0)
+    let (kind, radius) = match db.query_row(
+        "SELECT data FROM world_reference_rules WHERE table_name='MAGIC_TYPE8' AND rule_id=?1",
+        [spell.id],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(data) => {
+            let rule: serde_json::Value =
+                serde_json::from_str(&data).map_err(|_| "Invalid transport rule.")?;
+            let value = |key: &str| {
+                rule[key]
+                    .as_str()
+                    .and_then(|v| v.parse::<u16>().ok())
+                    .or_else(|| rule[key].as_u64().and_then(|v| v.try_into().ok()))
+                    .unwrap_or(0)
+            };
+            (value("WarpType"), value("Radius"))
+        }
+        Err(_) => match spell.id {
+            // 1453 MAGIC_TYPE8.csv fallback for Priest Gate, Warrior Descent, Rogue Wild Advent.
+            111700 | 112700 | 211700 | 212700 => (1, 100),
+            105650 | 106650 | 205650 | 206650 => (25, 30),
+            107770 | 108770 | 207770 | 208770 => (25, 40),
+            _ => return Err("Original 1453 transport rules have not been imported."),
+        },
     };
-    let kind = value("WarpType");
-    let radius = value("Radius");
-    if !matches!(kind, 1 | 12 | 20) || radius == 0 {
+    if !matches!(kind, 1 | 12 | 20 | 25) || radius == 0 {
         return Err("Unsupported transport rule.");
     }
     if active(s, 22) || s.position.zone == 55 || spell.moral == 6 && s.position.zone > 31 {
@@ -86,7 +100,52 @@ fn transport(
     let mut hub = lobby.social.lock().unwrap();
     let group = hub.group(s.player_id);
     let mut recipients = Vec::new();
-    if kind == 12 {
+    if kind == 25 {
+        // 1453 MagicInstance.cpp:2461-2476: Warrior Descent (moral=4, party member) & Rogue Wild Advent (moral=7, enemy).
+        let destination = if spell.moral == 4 {
+            if target == s.player_id || !group.contains(&target) {
+                return Err("Select a living party member in this zone.");
+            }
+            let player = hub
+                .players
+                .get(&target)
+                .ok_or("The selected party member is offline.")?;
+            if !player.s.entered
+                || player.s.zone_loading
+                || player.s.skills.hp == 0
+                || player.s.position.zone != s.position.zone
+                || !social::near(s.position, player.s.position, radius)
+            {
+                return Err("The selected party member is out of range.");
+            }
+            player.s.position
+        } else if crate::pvp::is_player_id(target) {
+            let player = hub
+                .players
+                .get(&target)
+                .ok_or("The selected target is offline.")?;
+            if !crate::pvp::is_hostile(&hub, s, &player.s)
+                || !hub.can_see_stealthed(s.player_id, target)
+                || !social::near(s.position, player.s.position, radius)
+            {
+                return Err("The selected enemy is out of range or cannot be targeted.");
+            }
+            player.s.position
+        } else {
+            let world = lobby
+                .monsters
+                .as_ref()
+                .ok_or("Combat targets unavailable.")?;
+            world.position_if_valid(target, s.position, f32::from(radius))?
+        };
+        recipients.push((
+            social::Player {
+                account: account.into(),
+                s: s.clone(),
+            },
+            destination,
+        ));
+    } else if kind == 12 {
         if target == s.player_id || !group.contains(&target) {
             return Err("Select a living party member in this zone.");
         }
@@ -249,10 +308,7 @@ fn player_effect(
                             || hub.party(s.player_id).is_some()
                                 && hub.party(s.player_id) == hub.party(p.s.player_id))
                 } else {
-                    enemy(s, &p.s)
-                        && hub
-                            .party(s.player_id)
-                            .is_none_or(|party| hub.party(p.s.player_id) != Some(party))
+                    crate::pvp::is_hostile(&hub, s, &p.s) && hub.can_see(s.player_id, p.s.player_id)
                 }
         })
         .cloned()
@@ -304,18 +360,23 @@ fn player_effect(
                 .saturating_add(amount / 2)
                 .min(paid.state.max_hp);
         } else {
-            if state
-                .buffs
-                .get(&category)
-                .is_some_and(|b| skills::now_ms() < b.until)
-            {
+            let now = skills::now_ms();
+            if friendly && state.buffs.get(&category).is_some_and(|b| now < b.until) {
                 return Err("An effect of this category is already active.");
+            }
+            if !friendly {
+                crate::travel::suspend_scroll_for_debuff(
+                    &mut state,
+                    category,
+                    now,
+                    lobby.skills.as_ref(),
+                );
             }
             state.buffs.insert(
                 category,
                 skills::Buff {
                     skill: spell.id,
-                    until: skills::now_ms() + combat::integer(row, 3).max(0) as u64 * 1000,
+                    until: now + combat::integer(row, 3).max(0) as u64 * 1000,
                 },
             );
         }
@@ -336,7 +397,7 @@ fn player_effect(
         let mut packet = packet;
         packet[10..12].copy_from_slice(&payload[10..12]);
         packet[14..16].copy_from_slice(&payload[14..16]);
-        notify(&mut hub, &player, &state, packet);
+        notify(lobby, &mut hub, &player, &state, packet, drain);
     }
     Ok(paid)
 }
@@ -350,20 +411,8 @@ pub(crate) async fn handle(
     spell: &skills::Spell,
     payload: &[u8],
 ) -> Option<Result<(), &'static str>> {
-    if !matches!(s.character.class % 100, 3 | 9 | 10) {
-        return None;
-    }
     let catalog = lobby.skills.as_ref()?;
     let target = u16::from_le_bytes([payload[8], payload[9]]);
-    let category = catalog
-        .effects
-        .get(&(4, spell.id))
-        .map_or(0, |row| combat::integer(row, 1) as u8);
-    let drain = spell.types == [3, 0]
-        && catalog
-            .effects
-            .get(&(3, spell.id))
-            .is_some_and(|r| combat::integer(r, 2) == 16);
     if spell.types == [8, 0] {
         return Some(match transport(lobby, account, s, spell, target) {
             Err(reason) => Err(reason),
@@ -386,6 +435,18 @@ pub(crate) async fn handle(
             }
         });
     }
+    if !matches!(s.character.class % 100, 3 | 9 | 10) {
+        return None;
+    }
+    let category = catalog
+        .effects
+        .get(&(4, spell.id))
+        .map_or(0, |row| combat::integer(row, 1) as u8);
+    let drain = spell.types == [3, 0]
+        && catalog
+            .effects
+            .get(&(3, spell.id))
+            .is_some_and(|r| combat::integer(r, 2) == 16);
     if !drain
         && !(spell.types == [4, 0]
             && (matches!(category, 20 | 22 | 24)

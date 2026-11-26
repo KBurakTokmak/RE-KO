@@ -94,6 +94,12 @@ separate from this presence and social implementation.
 
 ## Private chat
 
+Normal All chat (channel 1, within 50m) and Shout (channel 5, same zone) deliver
+to all entered players in the same zone regardless of nation, matching supplied
+1453 `ChatHandler.cpp` (`Send_NearRegion` / `SendToRegion`); the native client
+applies its own zone-based cross-nation language rules using the packet's nation
+byte.
+
 Select a player with the client's Whisper control, then send a private message.
 The server selects characters by name regardless of zone. It delivers channel 2
 only to the selected live session. The client applies its own language rules
@@ -305,3 +311,24 @@ native consumption and supplied1453 User::SendMyInfo; player IN has no type byte
 
 NP donation, rankings, symbols, clan banks, alliances, wars and siege ownership
 remain unimplemented. Do not infer these from basic knight promotion.
+
+## PvP and Clan-vs-Clan Arena challenges
+
+Right-clicking a player and choosing **Combat** sends native `WIZ_CHALLENGE`
+(`0x75`, subcodes 1..13, verified at `0x006C89FB..0x006C9840` and supplied 1453
+`GameServer/ArenaHandler.cpp`). Request/sent packets use a u8-length character
+name (`SByte`). Both 1v1 PvP (`1..5`) and Clan-vs-Clan (`6..10`, requiring two
+different clan leaders) are handled:
+
+- Rejects dead, loading, in-party, trading, merchanting, already-challenged or
+  already-in-Arena players, and forbids war/nation-PvP/Delos zones with
+  `CHALLENGE_ZONE_ERROR` (`12`). Pending requests expire after 60s and cancel on
+  disconnect or zone change.
+- Accepting PvP commits both players atomically to Zone 48 (`ZONE_ARENA`) at
+  1453 coordinates `(135, 115)` and `(120, 115)` and triggers immediate zone
+  transfers. Accepting Clan-vs-Clan commits all eligible online same-zone
+  members of both clans atomically to `(128, 125)` and `(135, 120)`.
+- Inside Zone 48, the center lobby around Judge (`13010`) uses 1453
+  `Unit.cpp::isInSafetyArea` bounds, and Judge returns players to Moradon's
+  imported 1453 start position. Full player-vs-player weapon/spell damage
+  remains separate work.

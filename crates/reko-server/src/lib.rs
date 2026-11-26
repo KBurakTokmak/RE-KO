@@ -15,6 +15,7 @@ mod archery;
 mod auth;
 mod bifrost;
 mod bosses;
+mod challenge;
 mod chaotic;
 mod characters;
 mod chat;
@@ -60,6 +61,7 @@ mod priest;
 #[cfg(test)]
 mod priest_tests;
 mod progress;
+mod pvp;
 mod quest_journal;
 mod quest_rewards;
 mod quests;
@@ -312,10 +314,15 @@ async fn handle_payload(
         }
         // Opcode 0xF3: LS_LOGIN
         0xF3 => {
-            let result = auth::login(lobby.clone(), peer.ip(), payload).await;
-            tracing::info!(%peer,result,"login authentication result");
-            let response = if result == 1 {
-                vec![0xF3, 1, 0xAD, 5, 1, 0]
+            let (result, account) = auth::login_account(lobby.clone(), peer.ip(), payload).await;
+            tracing::info!(%peer, result, "login authentication result");
+            let response = if result == 1
+                && let Some(account) = account
+            {
+                let mut p = vec![0xF3, 1, 0xAD, 5];
+                p.extend((account.len() as u16).to_le_bytes());
+                p.extend(account.as_bytes());
+                p
             } else {
                 vec![0xF3, result]
             };
@@ -495,6 +502,16 @@ async fn handle_game_payload_inner(
         0x3c => {
             if let (Some(account), Some(s)) = (account, world.as_mut().filter(|s| s.entered)) {
                 clans::process(lobby, account, s, payload);
+            }
+        }
+        0x75 => {
+            if let (Some(account), Some(s)) = (
+                account,
+                world.as_mut().filter(|s| s.entered && !s.zone_loading),
+            ) && let Some(destination) = challenge::process(lobby, account, s, payload)
+            {
+                let packet = travel::begin(lobby, s, destination);
+                send_response(sock, peer, &None, &packet, "ARENA_ZONE_CHANGE").await;
             }
         }
         // Opcode 0x2B: WIZ_VERSION_CHECK
@@ -873,19 +890,20 @@ async fn handle_game_payload_inner(
             let mut result = 0;
             if now >= session.next_attack
                 && !session.skills.buffs.get(&20).is_some_and(|b| now < b.until)
+                && !session.skills.buffs.get(&32).is_some_and(|b| now < b.until)
+                && !session.skills.buffs.get(&47).is_some_and(|b| now < b.until)
                 && (session.is_admin || !matches!(session.combat.weapon_kind / 10, 7 | 8 | 10))
-                && let Some(monsters) = lobby.monsters.as_ref()
             {
                 let attack = monsters::Attack {
                     position: session.position,
                     range: session.combat.range,
-                    attack: if session.is_admin {
+                    attack: if session.is_admin && !pvp::is_player_id(target) {
                         0
                     } else {
                         session.combat.attack
                     },
                     percent: 100,
-                    extra: if session.is_admin {
+                    extra: if session.is_admin && !pvp::is_player_id(target) {
                         admin::BASIC_ATTACK_DAMAGE
                     } else {
                         0
@@ -896,9 +914,25 @@ async fn handle_game_payload_inner(
                     penetrate: false,
                     magic: None,
                 };
-                match monsters.hit_session_owned(target, attack, session, true, || Ok(())) {
-                    Ok(hit) => {
-                        result = if hit.dead { 2 } else { 1 };
+                let hit_outcome = if pvp::is_player_id(target) {
+                    if let Some(account) = account {
+                        pvp::hit_player(lobby, account, session, target, attack, true, None, || {
+                            Ok(())
+                        })
+                        .map(|h| (h.damage, h.dead))
+                    } else {
+                        Err("Unauthenticated attacker.")
+                    }
+                } else if let Some(monsters) = lobby.monsters.as_ref() {
+                    monsters
+                        .hit_session_owned(target, attack, session, true, || Ok(()))
+                        .map(|h| (h.damage, h.dead))
+                } else {
+                    Err("Combat targets unavailable.")
+                };
+                match hit_outcome {
+                    Ok((damage, dead)) => {
+                        result = if dead { 2 } else { 1 };
                         session.next_attack = now + session.combat.delay_ms;
                         if let Some(account) = account {
                             durability::attack(
@@ -907,7 +941,7 @@ async fn handle_game_payload_inner(
                                 lobby,
                                 account,
                                 session,
-                                hit.damage.min(32767) as u16,
+                                damage.min(32767) as u16,
                             )
                             .await;
                             match magic::remove_stealth(lobby, account, session, false) {
@@ -925,7 +959,7 @@ async fn handle_game_payload_inner(
                                 _ => {}
                             }
                         }
-                        tracing::info!(%peer,target,damage=hit.damage,"normal attack applied");
+                        tracing::info!(%peer,target,damage,"normal attack applied");
                     }
                     Err(reason) => tracing::info!(%peer,target,reason,"normal attack refused"),
                 }
@@ -1015,7 +1049,20 @@ async fn handle_game_payload_inner(
                         }) {
                         Err("This skill's class or learning requirements are not met.")
                     } else if let Some(sprint) = definition {
-                        next.cast(id, sprint, skills::now_ms())
+                        let now = skills::now_ms();
+                        let slowed = next
+                            .buffs
+                            .get(&6)
+                            .filter(|b| now < b.until)
+                            .and_then(|b| {
+                                lobby.skills.as_ref().and_then(|c| c.spells.get(&b.skill))
+                            })
+                            .is_some_and(|s| matches!(s.moral, 7 | 10 | 12));
+                        if slowed {
+                            Err("You cannot use speed skills while slowed.")
+                        } else {
+                            next.cast(id, sprint, now)
+                        }
                     } else {
                         Err("This skill is not implemented yet.")
                     };
@@ -1299,7 +1346,6 @@ async fn handle_game_payload_inner(
                 }
                 let message = chat::Message {
                     channel,
-                    nation: session.character.nation(),
                     position: session.position,
                     packet: chat::packet(
                         channel,
@@ -1465,7 +1511,15 @@ async fn tick_character(
                 (0, 0)
             };
             let expired = next.expire(now);
-            if expired.iter().any(|c| matches!(c, 1 | 7)) {
+            let mut restored_scrolls = Vec::new();
+            for &cat in &expired {
+                if let Some(scroll) = travel::restore_suspended_scroll(&mut next, cat, now) {
+                    restored_scrolls.push((cat, scroll));
+                }
+            }
+            if expired.iter().any(|c| matches!(c, 1 | 7))
+                || restored_scrolls.iter().any(|(c, _)| matches!(c, 1 | 7))
+            {
                 let stats = utility::effective(
                     session,
                     &next,
@@ -1478,14 +1532,14 @@ async fn tick_character(
             if hp != 0 || mp != 0 || !expired.is_empty() || periodic_due {
                 skills::save(&db, account, session.character.slot, &next)?;
             }
-            Ok((next, hp, mp, expired))
+            Ok((next, hp, mp, expired, restored_scrolls))
         })
     };
     if recovery_due {
         session.next_regen = now + 6000;
     }
     match result {
-        Ok((next, hp, mp, expired)) => {
+        Ok((next, hp, mp, expired, restored_scrolls)) => {
             session.skills = next;
             let previous = (
                 session.combat.attack,
@@ -1493,7 +1547,9 @@ async fn tick_character(
                 session.combat.resistance,
             );
             utility::refresh(session, lobby.skills.as_ref(), lobby.combat.as_ref());
-            if expired.iter().any(|c| matches!(c, 1 | 7)) {
+            if expired.iter().any(|c| matches!(c, 1 | 7))
+                || restored_scrolls.iter().any(|(c, _)| matches!(c, 1 | 7))
+            {
                 send_response(
                     sock,
                     peer,
@@ -1534,13 +1590,43 @@ async fn tick_character(
                 send_response(sock, peer, &None, &session.skills.mana_packet(), "MP_REGEN").await;
             }
             for category in expired {
-                if category == transformation::CATEGORY {
+                if category == transformation::CATEGORY
+                    || category >= travel::SUSPENDED_SCROLL_OFFSET
+                {
                     continue;
                 }
                 if category == 91 {
                     magic::visibility(lobby, session, false);
                 }
+                if category == 92 {
+                    send_response(sock, peer, &None, &[0x42, 0, 0, 0], "STEALTH_DETECT_END").await;
+                }
+                if category == 32 {
+                    let mut hub = lobby.social.lock().unwrap();
+                    for slot in [6usize, 8usize] {
+                        let item = session.equipment[slot];
+                        if item.id != 0 {
+                            let pkt = pvp::user_look_change(
+                                session.player_id,
+                                slot as u8,
+                                item.id,
+                                item.durability,
+                            );
+                            hub.broadcast_visual(
+                                session.player_id,
+                                None,
+                                Some(session.player_id),
+                                &pkt,
+                            );
+                            hub.send(session.player_id, pkt);
+                        }
+                    }
+                }
                 send_response(sock, peer, &None, &[0x31, 5, category], "BUFF_EXPIRED").await;
+            }
+            for (_category, scroll) in restored_scrolls {
+                let pkt = utility::buff_restore_packet(session.player_id, scroll, now);
+                send_response(sock, peer, &None, &pkt, "SCROLL_REINSTATED").await;
             }
         }
         Err(error) => tracing::error!(%peer,%error,"recovery/buff state commit failed"),
@@ -1664,7 +1750,15 @@ async fn handle_game_client(mut sock: TcpStream, peer: SocketAddr, lobby: Arc<lo
                             let span = tracing::info_span!("request", packet = packet_count, opcode = %last_opcode.as_deref().unwrap_or("empty"));
                             if payload.first() == Some(&1) {
                                 if lease.is_none() {
-                                    lease = lobby.claim_game_login(peer.ip());
+                                    lease = if payload.len() == 1 {
+                                        lobby.claim_game_login(peer.ip())
+                                    } else if let Some(account) =
+                                        auth::game_login(lobby.clone(), &payload).await
+                                    {
+                                        lobby.lease_account(peer.ip(), &account)
+                                    } else {
+                                        lobby.claim_game_login(peer.ip())
+                                    };
                                 }
                                 let nation = lease
                                     .as_ref()
@@ -2241,7 +2335,7 @@ mod tests {
         crypt.transform(&mut credentials);
         assert_eq!(
             exchange(&mut login, &credentials).await,
-            crypt.encrypt_server_packet(&[0xF3, 1, 0xAD, 5, 1, 0])
+            crypt.encrypt_server_packet(b"\xF3\x01\xAD\x05\x05\x00admin")
         );
         let mut wrong = vec![1, 0, 0, 0, 0xf3, 5, 0];
         wrong.extend_from_slice(b"admin");
@@ -2260,7 +2354,7 @@ mod tests {
         );
         assert_eq!(
             exchange(&mut login, &credentials).await,
-            crypt.encrypt_server_packet(&[0xf3, 1, 0xad, 5, 1, 0])
+            crypt.encrypt_server_packet(b"\xF3\x01\xAD\x05\x05\x00admin")
         );
         drop(login);
         login_task.await.unwrap();
@@ -2547,5 +2641,64 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn select_character_reconnect_authenticates_directly_with_native_wiz_login() {
+        let lobby = Arc::new(
+            lobby::Lobby::new(
+                rusqlite::Connection::open_in_memory().unwrap(),
+                characters::CreationRules::fixture(),
+                world_entry::Bootstrap { next_level_exp: 50 },
+            )
+            .unwrap(),
+        );
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let mut login_req = vec![0xf3];
+        login_req.extend((5u16).to_le_bytes());
+        login_req.extend(b"admin");
+        login_req.extend((6u16).to_le_bytes());
+        login_req.extend(b"secret");
+        assert_eq!(auth::login(lobby.clone(), ip, &login_req).await, 1);
+        assert!(characters::set_nation(&lobby.db.lock().unwrap(), "admin", 1).unwrap());
+
+        let mut wiz_login = vec![0x01];
+        wiz_login.extend((5u16).to_le_bytes());
+        wiz_login.extend(b"admin");
+        wiz_login.extend((6u16).to_le_bytes());
+        wiz_login.extend(b"secret");
+        wiz_login.extend((0u16).to_le_bytes());
+        wiz_login.push(4);
+        wiz_login.extend(b"tok1");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // First game session consumes pending login.
+        let mut first = TcpStream::connect(addr).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        let first_task = tokio::spawn(handle_game_client(server, peer, lobby.clone()));
+        assert_eq!(exchange(&mut first, &wiz_login).await, vec![0x01, 1]);
+
+        // Duplicate concurrent connection for same account is refused.
+        let mut dup = TcpStream::connect(addr).await.unwrap();
+        let (dup_server, dup_peer) = listener.accept().await.unwrap();
+        let dup_task = tokio::spawn(handle_game_client(dup_server, dup_peer, lobby.clone()));
+        assert_eq!(exchange(&mut dup, &wiz_login).await, vec![0x01, 0xff]);
+        drop(dup);
+        dup_task.await.unwrap();
+
+        // Disconnect first session (simulating Exit -> Select Character).
+        drop(first);
+        first_task.await.unwrap();
+
+        // Reconnect directly to Game Server without Login Server 0xF3.
+        let mut second = TcpStream::connect(addr).await.unwrap();
+        let (server2, peer2) = listener.accept().await.unwrap();
+        let second_task = tokio::spawn(handle_game_client(server2, peer2, lobby.clone()));
+        assert_eq!(exchange(&mut second, &wiz_login).await, vec![0x01, 1]);
+        assert_eq!(exchange(&mut second, &[0x0C]).await.len(), 173);
+        drop(second);
+        second_task.await.unwrap();
     }
 }

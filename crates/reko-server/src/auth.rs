@@ -15,8 +15,12 @@ pub(crate) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn credentials(payload: &[u8]) -> Option<(String, Vec<u8>)> {
-    if payload.first() != Some(&0xf3) || payload.len() < 5 {
+fn parse_credentials(
+    payload: &[u8],
+    opcode: u8,
+    allow_game_tail: bool,
+) -> Option<(String, Vec<u8>)> {
+    if payload.first() != Some(&opcode) || payload.len() < 5 {
         return None;
     }
     let size = usize::from(u16::from_le_bytes(payload[1..3].try_into().ok()?));
@@ -31,10 +35,14 @@ fn credentials(payload: &[u8]) -> Option<(String, Vec<u8>)> {
     let length = usize::from(u16::from_le_bytes(
         payload.get(at..at + 2)?.try_into().ok()?,
     ));
-    if !(1..=28).contains(&length) || payload.len() != at + 2 + length {
+    let end = at + 2 + length;
+    if !(1..=28).contains(&length) || payload.len() < end {
         return None;
     }
-    let password = payload.get(at + 2..)?;
+    if payload.len() != end && (!allow_game_tail || payload.len() > 256) {
+        return None;
+    }
+    let password = payload.get(at + 2..end)?;
     if password.contains(&0) {
         return None;
     }
@@ -42,6 +50,59 @@ fn credentials(payload: &[u8]) -> Option<(String, Vec<u8>)> {
         String::from_utf8(name.to_ascii_lowercase()).ok()?,
         password.to_vec(),
     ))
+}
+
+fn credentials(payload: &[u8]) -> Option<(String, Vec<u8>)> {
+    parse_credentials(payload, 0xf3, false)
+}
+
+fn verify_existing(lobby: &Lobby, account: &str, password: &[u8]) -> anyhow::Result<bool> {
+    let Some(hash) = stored(&lobby.db.lock().unwrap(), account)? else {
+        return Ok(false);
+    };
+    verify(&hash, password)
+}
+
+pub(crate) async fn game_login(lobby: Arc<Lobby>, payload: &[u8]) -> Option<String> {
+    let Some((account, password)) = parse_credentials(payload, 0x01, true) else {
+        let first_len = payload
+            .get(1..3)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_le_bytes);
+        let second_len = first_len.and_then(|n| {
+            let at = 3 + usize::from(n);
+            payload
+                .get(at..at + 2)
+                .and_then(|b| b.try_into().ok())
+                .map(u16::from_le_bytes)
+        });
+        tracing::warn!(
+            payload_len = payload.len(),
+            ?first_len,
+            ?second_len,
+            "WIZ_LOGIN credential parser rejected payload shape"
+        );
+        return None;
+    };
+    let permit = lobby.login_slots.clone().try_acquire_owned().ok()?;
+    let work = lobby.clone();
+    let name = account.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_existing(&work, &name, &password)
+    })
+    .await;
+    match result {
+        Ok(Ok(true)) => Some(account),
+        Ok(Ok(false)) => {
+            tracing::warn!("WIZ_LOGIN password verification failed");
+            None
+        }
+        error => {
+            tracing::error!(?error, "game login password authentication unavailable");
+            None
+        }
+    }
 }
 
 fn stored(db: &Connection, account: &str) -> rusqlite::Result<Option<String>> {
@@ -91,13 +152,17 @@ fn authenticate(lobby: &Lobby, account: &str, password: &[u8]) -> anyhow::Result
     }
 }
 
-pub(crate) async fn login(lobby: Arc<Lobby>, ip: IpAddr, payload: &[u8]) -> u8 {
+pub(crate) async fn login_account(
+    lobby: Arc<Lobby>,
+    ip: IpAddr,
+    payload: &[u8],
+) -> (u8, Option<String>) {
     lobby.clear_login(ip);
     let Some((account, password)) = credentials(payload) else {
-        return 3;
+        return (3, None);
     };
     let Ok(permit) = lobby.login_slots.clone().try_acquire_owned() else {
-        return 6;
+        return (6, None);
     };
     let work = lobby.clone();
     let name = account.clone();
@@ -108,18 +173,23 @@ pub(crate) async fn login(lobby: Arc<Lobby>, ip: IpAddr, payload: &[u8]) -> u8 {
     .await;
     match result {
         Ok(Ok(true)) => match lobby.record_login(ip, &account) {
-            Ok(()) => 1,
+            Ok(()) => (1, Some(account)),
             Err(error) => {
                 tracing::error!(%error,"authenticated login association failed");
-                6
+                (6, None)
             }
         },
-        Ok(Ok(false)) => 3,
+        Ok(Ok(false)) => (3, None),
         error => {
             tracing::error!(?error, "password authentication unavailable");
-            6
+            (6, None)
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn login(lobby: Arc<Lobby>, ip: IpAddr, payload: &[u8]) -> u8 {
+    login_account(lobby, ip, payload).await.0
 }
 
 #[cfg(test)]
@@ -233,5 +303,50 @@ mod tests {
         let hash = stored(&l.db.lock().unwrap(), "newuser").unwrap().unwrap();
         assert_eq!(verify(&hash, b"One").unwrap(), first == 1);
         assert_eq!(verify(&hash, b"Two").unwrap(), second == 1);
+    }
+
+    #[tokio::test]
+    async fn game_login_verifies_existing_accounts_with_native_tail_and_never_registers() {
+        let l = lobby(Connection::open_in_memory().unwrap());
+        let ip = "127.0.0.1".parse().unwrap();
+        assert_eq!(login(l.clone(), ip, &packet("Admin", b"secret")).await, 1);
+
+        let mut wiz = vec![0x01];
+        wiz.extend((5u16).to_le_bytes());
+        wiz.extend(b"ADMIN");
+        wiz.extend((6u16).to_le_bytes());
+        wiz.extend(b"secret");
+        // Native 1453 WIZ_LOGIN tail: u16 + u8 length + token bytes.
+        wiz.extend((0u16).to_le_bytes());
+        wiz.push(4);
+        wiz.extend(b"tok1");
+
+        assert_eq!(game_login(l.clone(), &wiz).await.as_deref(), Some("admin"));
+        // Without native tail is also accepted.
+        assert_eq!(
+            game_login(l.clone(), &wiz[..wiz.len() - 7])
+                .await
+                .as_deref(),
+            Some("admin")
+        );
+        // Oversized trailing tail beyond 256 bytes is rejected.
+        let mut bad_tail = wiz.clone();
+        bad_tail.resize(257, 0);
+        assert_eq!(game_login(l.clone(), &bad_tail).await, None);
+        // Wrong password is rejected.
+        let mut wrong = vec![0x01];
+        wrong.extend((5u16).to_le_bytes());
+        wrong.extend(b"admin");
+        wrong.extend((5u16).to_le_bytes());
+        wrong.extend(b"wrong");
+        assert_eq!(game_login(l.clone(), &wrong).await, None);
+        // Unregistered account is rejected and never created on game port.
+        let mut fresh = vec![0x01];
+        fresh.extend((5u16).to_le_bytes());
+        fresh.extend(b"ghost");
+        fresh.extend((6u16).to_le_bytes());
+        fresh.extend(b"secret");
+        assert_eq!(game_login(l.clone(), &fresh).await, None);
+        assert_eq!(stored(&l.db.lock().unwrap(), "ghost").unwrap(), None);
     }
 }

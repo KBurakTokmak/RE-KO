@@ -21,3 +21,11 @@ RE-KO is a Rust server for the original 1453 client, for singleplayer and small 
 - Run `cargo fmt --all -- --check`, `cargo test --workspace` with available original assets, and `cargo clippy --all-targets -- -D warnings`. Follow [testing](docs/testing.md) for database checks and native-client coverage.
 - After implementation, have a separate subagent review the complete change against the request and reference behavior. Ask it to check correctness, regressions and test gaps. Fix confirmed findings, rerun affected checks, and have the reviewer verify substantive fixes before finishing.
 - Report validation and remaining in-game checks. Push only with explicit owner confirmation and open pull requests only when requested.
+
+## High-impact gotchas
+
+Record only major, recurring or cross-cutting traps here (protocol, locking, transaction, or lifecycle invariants that cause silent failures). Skip minor one-off bugs so this section stays concise.
+
+- **Lock and transaction order:** Always acquire `lobby.db` before `lobby.social` to prevent AB-BA deadlocks. Inside an active SQLite transaction (`tx`), use `skills::save_in(&tx, ...)`—never `skills::save`, which opens a nested transaction and fails.
+- **Native 1453 `LS_LOGIN (0xF3)` account echo:** `0xF3` must return `[0xF3, 1, premium:u16, len:u16, account_bytes]`; omitting the account name causes the client to overwrite its stored account ID with `""` and fail `WIZ_LOGIN (0x01)` reconnects (including Select Character).
+- **Death/respawn scroll preservation and PvP visuals:** On death and respawn, clear temporary effects with `travel::clear_zone_effects` (not `buffs.clear()`) so item-backed Type 4 scrolls persist, and replay `utility::buff_restore_packets` on respawn so the client restores icons/effects. Do not exclude victims of offensive `0x31 03` PvP skills via `direct_recipient` in `visuals.rs`.

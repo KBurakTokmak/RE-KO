@@ -113,6 +113,19 @@ impl Lobby {
 
     pub fn claim_game_login(&self, ip: IpAddr) -> Option<AccountLease<'_>> {
         let account = self.claim_login(ip)?;
+        self.lease_account(ip, &account)
+    }
+
+    pub fn lease_account(&self, ip: IpAddr, account: &str) -> Option<AccountLease<'_>> {
+        let account = account.to_ascii_lowercase();
+        let mut pending = self.pending.lock().unwrap();
+        if let Some(entries) = pending.get_mut(&ip) {
+            entries.retain(|entry| entry.account != account);
+            if entries.is_empty() {
+                pending.remove(&ip);
+            }
+        }
+        drop(pending);
         if !self.active_accounts.lock().unwrap().insert(account.clone()) {
             tracing::info!(%account, "duplicate game login refused");
             return None;

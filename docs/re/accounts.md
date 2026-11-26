@@ -44,13 +44,17 @@ VersionManager/User.cpp LogInReq and client GameProcLogIn_1298.cpp
 MsgRecv_GameServerLogIn corroborate this. First-login registration is the
 owner's requested policy, not copied SQL/ODBC account provisioning.
 
-The game handoff consumes a single-use 60-second IP association. Ambiguous
-same-IP handoffs are refused. A successful game login holds an exclusive account
-lease, starting with game login and lasting until the game connection
-closes. A second connection for the same account receives the existing game
-login failure response. The first connection keeps its session, and retrying
-after it disconnects requires a fresh login. Distinct accounts can play from the
-same address if each handoff is completed before the next begins.
+The game handoff supports both the single-use 60-second IP association and
+direct native `WIZ_LOGIN` (`0x01`) credential verification. Native 1453
+`MsgSend_GameServerLogIn` (`0x0075E890`) sends `0x01`, u16-length account and
+password strings, a u16 field and a u8-length token string. Direct `0x01`
+verification checks existing `account_passwords` entries off the async executor
+and never auto-registers new accounts on the game port; this allows returning to
+character selection from the in-game exit menu without reconnecting to the login
+server. A successful game login holds an exclusive account lease, starting with
+game login and lasting until the game connection closes. A second connection for
+the same account receives the existing game login failure response (`01 FF`).
+The first connection keeps its session.
 TCP keepalive probes detect dead game connections so a lost network link can
 release its account lease without restarting the server. On Windows, Linux and
 macOS the settings are 60 seconds idle, 10 seconds between probes and five

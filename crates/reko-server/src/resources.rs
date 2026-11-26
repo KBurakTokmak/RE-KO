@@ -47,7 +47,10 @@ pub(crate) fn commit_in(
 ) -> Result<Paid, &'static str> {
     let mut state =
         skills::load(tx, account, slot).map_err(|_| "Unable to load skill resources.")?;
-    state.spend(spell, skills::now_ms())?;
+    let now = skills::now_ms();
+    let had_instant =
+        !matches!(spell.id, 110820 | 210820) && state.buffs.get(&23).is_some_and(|b| now < b.until);
+    state.spend(spell, now)?;
     let consumed = spell.consumed_item();
     if consumed != spell.use_item {
         let bag = starter::inventory(tx, account, slot)
@@ -69,7 +72,7 @@ pub(crate) fn commit_in(
     }
     .map_err(|_| "You do not have the required consumable items.")?;
     apply(&mut state)?;
-    if spell.cast_ms > 0 {
+    if had_instant && (spell.cast_ms > 0 || spell.cooldown_ms > 0) {
         state.buffs.remove(&23);
     }
     skills::save_in(tx, account, slot, &state).map_err(|_| "Unable to save skill resources.")?;

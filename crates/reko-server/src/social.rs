@@ -15,6 +15,7 @@ pub(crate) struct Player {
 pub(crate) struct Hub {
     pub players: HashMap<u16, Player>,
     pub exchanges: HashMap<u16, crate::trade::Exchange>,
+    pub challenges: Vec<crate::challenge::Pending>,
     pub stalls: HashMap<u16, crate::merchant::Stall>,
     pub merchant_views: HashMap<u16, u16>,
     pub parties: HashMap<u16, Vec<u16>>,
@@ -94,6 +95,28 @@ impl Hub {
         self.targets.insert(viewer, target);
     }
 
+    pub fn notify_target_hp(&mut self, target_id: u16, exclude_viewer: u16, max_hp: u32, hp: u32) {
+        let Some(target_pos) = self.players.get(&target_id).map(|p| p.s.position) else {
+            return;
+        };
+        let viewers: Vec<_> = self
+            .targets
+            .iter()
+            .filter_map(|(&viewer, &target)| {
+                (viewer != exclude_viewer
+                    && target == target_id
+                    && self.can_see(viewer, target_id)
+                    && self.players.get(&viewer).is_some_and(|p| {
+                        p.s.entered
+                            && !p.s.zone_loading
+                            && crate::population::same_region_view(p.s.position, target_pos)
+                    }))
+                .then_some(viewer)
+            })
+            .collect();
+        self.send_many(&viewers, &crate::target_hp::packet(target_id, max_hp, hp));
+    }
+
     pub fn broadcast_visual(
         &mut self,
         actor: u16,
@@ -153,6 +176,25 @@ impl Hub {
             .zip(self.players.get(&target))
             .is_some_and(|(v, t)| !t.s.is_admin || v.s.is_admin || self.gm_public.contains(&target))
     }
+    pub fn can_see_stealthed(&self, viewer: u16, target: u16) -> bool {
+        self.can_see(viewer, target)
+            && self
+                .players
+                .get(&viewer)
+                .zip(self.players.get(&target))
+                .is_some_and(|(v, t)| {
+                    let now = crate::skills::now_ms();
+                    if viewer != target
+                        && t.s.skills.buffs.get(&91).is_some_and(|b| now < b.until)
+                        && crate::pvp::is_hostile(self, &v.s, &t.s)
+                    {
+                        v.s.skills.buffs.get(&92).is_some_and(|b| now < b.until)
+                            && near(v.s.position, t.s.position, 25)
+                    } else {
+                        true
+                    }
+                })
+    }
     pub fn send(&mut self, id: u16, p: Vec<u8>) {
         if matches!(p.first(), Some(0x26 | 0x3d | 0x4a)) {
             crate::trade::cancel(self, id, "Trade cancelled: inventory or Noah changed.");
@@ -163,6 +205,16 @@ impl Hub {
                 wake.notify_one();
             }
         }
+    }
+    pub fn queue_transfer(&mut self, id: u16, destination: Position) {
+        self.transfers.insert(id, destination);
+        if let Some(wake) = self.notifiers.get(&id) {
+            wake.notify_one();
+        }
+    }
+    #[cfg(test)]
+    pub fn take_queue(&mut self, id: u16) -> Vec<Vec<u8>> {
+        self.queues.remove(&id).unwrap_or_default()
     }
     pub fn send_many(&mut self, ids: &[u16], p: &[u8]) {
         for &id in ids {
@@ -188,6 +240,7 @@ impl Hub {
     }
     pub fn disconnect(&mut self, id: u16) {
         crate::trade::cancel(self, id, "Trade cancelled: player disconnected.");
+        crate::challenge::disconnect(self, id);
         crate::merchant::close(self, id);
         self.notifiers.remove(&id);
         self.disconnect_requests.remove(&id);
@@ -233,6 +286,7 @@ impl Hub {
             },
         );
         crate::trade::maintain(self, id);
+        crate::challenge::maintain(self, id);
         crate::merchant::maintain(self, id);
         let ids: Vec<_> = self.players.keys().copied().collect();
         for viewer in ids {
@@ -612,10 +666,12 @@ pub(crate) fn synchronize(lobby: &Lobby, account: &str, s: &mut Session) {
             match (
                 crate::starter::coins(&db, account, s.character.slot),
                 crate::starter::inventory(&db, account, s.character.slot),
+                crate::starter::equipment(&db, account, s.character.slot),
             ) {
-                (Ok(coins), Ok(bag)) => {
+                (Ok(coins), Ok(bag), Ok(gear)) => {
                     s.coins = coins;
                     s.inventory = bag;
+                    s.equipment = gear;
                     if let Some(c) = &lobby.combat {
                         crate::durability::refresh(s, c, lobby.skills.as_ref());
                     }
