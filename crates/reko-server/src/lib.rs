@@ -431,6 +431,12 @@ async fn handle_game_payload_inner(
             correction.extend(s.position.x.to_le_bytes());
             correction.extend(s.position.z.to_le_bytes());
             send_response(sock, peer, &None, &correction, "FROZEN_POSITION").await;
+            // The warp clears the client's nearby monsters; let them be sent again.
+            if let Some(s) = world.as_mut() {
+                s.visible_entities.clear();
+                s.entity_region = None;
+                population::refresh(sock, peer, lobby, s).await;
+            }
             return;
         }
         if blinded
@@ -868,6 +874,10 @@ async fn handle_game_payload_inner(
                     packet.extend(session.position.x.to_le_bytes());
                     packet.extend(session.position.z.to_le_bytes());
                     send_response(sock, peer, &None, &packet, "STUN_POSITION").await;
+                    // The warp clears the client's nearby monsters; let them be sent again.
+                    session.visible_entities.clear();
+                    session.entity_region = None;
+                    population::refresh(sock, peer, lobby, session).await;
                 }
                 return;
             }

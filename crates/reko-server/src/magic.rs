@@ -106,6 +106,11 @@ pub(crate) async fn handle(
     let mut id = u32::from_le_bytes(payload[2..6].try_into().unwrap());
     let mut recovered;
     let caster = u16::from_le_bytes([payload[6], payload[7]]);
+    // The native client echoes monster casts back with the monster as caster
+    // (Open-KO style). The server already resolved the spell; ignore silently.
+    if !crate::pvp::is_player_id(caster) {
+        return true;
+    }
     let payload = if id == 0 && matches!(payload[1], 3 | 4) {
         // Nearby clients may report a visible projectile fired by another player.
         if caster != session.player_id {
