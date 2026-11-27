@@ -38,8 +38,9 @@ logged out normally and the daemon stopped, run `python scripts/database_manager
 the ports. Existing characters/accounts stay local to each installation.
 Schema initialization uses the same Rust code as the runtime. Named content
 migrations apply once; ordered migrations cover Delos/CZ/Ardream travel, combat-zone population and boss
-pools, transformations, the bounded suppression repair, source zone metadata and
-owner-defined potion economy defaults from tracked `config/item-balance.json`.
+pools, transformations, the bounded suppression repair, source zone metadata,
+owner-defined potion economy defaults from tracked `config/item-balance.json`
+and primary1453 skill Type1 flat damage.
 An update is staged on a disposable database, validated and published only on
 success, with the prior save backed up under `logs/`. Missing inputs, conflicting
 local routes, damaged saves and newer unsupported versions stop startup with an
@@ -79,8 +80,9 @@ required primary1453 JSON inputs read-only from your own SQL reference instance:
 .\scripts\Export-1453MigrationInputs.ps1 -Server '<reference-instance>' -Database '<reference-database>'
 ```
 
-This writes only local MAGIC_TYPE8, the46 scroll MAGIC_TYPE6 rules, the eight
-NPC-form audit rules and ZONE_INFO JSON. Other inputs are the original client,
+This writes only local MAGIC_TYPE1, MAGIC_TYPE8, the46 scroll MAGIC_TYPE6 rules,
+the eight NPC-form audit rules and ZONE_INFO JSON. Run it with
+`powershell -ExecutionPolicy Bypass -File` if script execution is disabled. Other inputs are the original client,
 Open-KO historical maps, supplementary2004 maps and existing reference-rules CSVs;
 see [reference data](reference-data.md). Build `cargo build -p reko-tools` for the
 original table reader used by imports. The manager runs the existing bounded

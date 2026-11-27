@@ -238,11 +238,27 @@ def potion_balance(db, historical, template):
         db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('ITEM_ECONOMY',?,?)", (item['id'], value))
 
 
+
+def skill_type1_damage(db, historical, template):
+    """Primary1453 MAGIC_TYPE1 rows supply flat AddDamage; the client table omits that column."""
+    reference = ROOT / 'logs/reference1453/MAGIC_TYPE1.json'
+    if reference.is_file():
+        for row in json.loads(reference.read_text(encoding='utf-8-sig')):
+            key = int(row['iNum'])
+            old = db.execute("SELECT data FROM world_reference_rules WHERE table_name='MAGIC_TYPE1' AND rule_id=?", (key,)).fetchone()
+            if old and json.loads(old[0]) != row:
+                raise ValueError(f'Skill Type1 customization conflicts: {key}.')
+            db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('MAGIC_TYPE1',?,?)", (key, json.dumps(row, sort_keys=True)))
+    else:
+        from_template(db, template, {'world_reference_rules': lambda r: r['table_name'] == 'MAGIC_TYPE1'}, minimum=200)
+    if db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='MAGIC_TYPE1'").fetchone()[0] < 200:
+        raise ValueError('Skill Type1 rules are incomplete.')
+
 # Append new revisions in order; never rename/replay an already shipped revision.
 MIGRATIONS = ((REVISION, delos), ('002-mage-combat-travel', mage_travel),
               ('003-combat-zone-population', combat_zones), ('004-transformations', transformations),
               ('005-suppression-loot', suppression_loot), ('006-zone-metadata', zone_names),
-              ('007-potion-balance', potion_balance))
+              ('007-potion-balance', potion_balance), ('008-skill-type1-damage', skill_type1_damage))
 
 
 def migrate_content(db, historical, template=None):

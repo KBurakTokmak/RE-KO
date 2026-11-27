@@ -3027,7 +3027,7 @@ mod tests {
         };
         {
             let db = l.db.lock().unwrap();
-            db.execute("INSERT OR IGNORE INTO world_town_starts(zone,karus_x,karus_z,elmo_x,elmo_z,town_x,town_z,source) VALUES (48,128,120,128,120,0,0,'test')", []).unwrap();
+            db.execute("INSERT OR IGNORE INTO world_town_starts(zone,karus_x,karus_z,elmo_x,elmo_z,range_x,range_z,source) VALUES (48,128,120,128,120,0,0,'test')", []).unwrap();
         }
         {
             let artes = &mut l.merchants[0];

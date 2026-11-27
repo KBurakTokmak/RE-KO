@@ -1372,10 +1372,11 @@ mod tests {
         mage.character.class = 110;
         mage.character.stats[4] = 163;
         mage.progress.level = 80;
+        // Arena 48 fighting pit; the Judge lobby around (130, 120) refuses PvP.
         mage.position = Position {
             zone: 48,
-            x: 1300,
-            z: 1200,
+            x: 1900,
+            z: 1900,
             y: 0,
         };
         mage.equipment[6] = crate::starter::Item {
@@ -1387,7 +1388,7 @@ mod tests {
         skills::save(&lobby.db.lock().unwrap(), "test", 0, &mage.skills).unwrap();
         social::synchronize(&lobby, "test", &mut mage);
 
-        let mut rogue = spawn(&lobby, "rogue_def", "RogueTarget", 2, 48, 1305, 1200);
+        let mut rogue = spawn(&lobby, "rogue_def", "RogueTarget", 2, 48, 1905, 1900);
         rogue.combat.resistance = [40; 6];
         let _ = lobby.social.lock().unwrap().take_queue(rogue.player_id);
 

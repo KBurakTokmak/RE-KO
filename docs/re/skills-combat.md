@@ -478,8 +478,13 @@ lobby), Colony Zone / Ardream (71/72) and war zones (31, 61..69), enforcing
 hostility, party/clan safety, and CZ loyalty rewards (+50 / -25 NP). Physical
 PvP hits use `attack * 200 / (ac + 240)` and `/2` scaling, magic hits use `/3`
 scaling, and Master `Absoluteness` (-10%) / `Matchless` (-15%) apply in both
-PvE and PvP. Type 1 `AddDamage` is loaded from `MAGIC_TYPE1.csv` rather than
-client `Skill_Magic_1.tbl` column 4 (`Delay`).
+PvE and PvP. Type 1 `AddDamage` comes from primary1453 `MAGIC_TYPE1` rules
+(migration008, `world_reference_rules`); client `Skill_Magic_1.tbl` omits that
+column (its column4 is `Delay`). These values match every player-class tooltip
+that states a flat bonus. Transformation skills301002/301003/301006 have0 in
+the export but their tooltips state +50/+50/+200, which the server uses. The
+former supplementary2086 CSV path changed the bonus of32 skills (for example staff +250,
+Piercing +50, and no bonus for Blow Arrow, Blinding, Beast Hiding or Shock Stun).
 
 - **Rogue:** `Critical Point` doubles PvP physical AP and gives a 50% 2x proc on
   `Minor Healing`; `Blood Drain` / `Vampiric Touch` heal the caster; `Beast

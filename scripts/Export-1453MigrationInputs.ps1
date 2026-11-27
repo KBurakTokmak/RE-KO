@@ -14,6 +14,7 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 try {
     $connection.Open()
     $queries = [ordered]@{
+        MAGIC_TYPE1 = 'SELECT * FROM MAGIC_TYPE1 ORDER BY iNum'
         MAGIC_TYPE8 = 'SELECT * FROM MAGIC_TYPE8 ORDER BY iNum'
         MAGIC_TYPE6 = 'SELECT * FROM MAGIC_TYPE6 WHERE iNum / 1000 = 472 ORDER BY iNum'
         MAGIC_TYPE6_NPC = 'SELECT * FROM MAGIC_TYPE6 WHERE iNum BETWEEN 500505 AND 500512 ORDER BY iNum'

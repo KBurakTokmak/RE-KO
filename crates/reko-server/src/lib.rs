@@ -2024,7 +2024,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     quest_rewards::verify_thresholds(&lobby.db.lock().unwrap())?;
     starter::grant_missing(&mut lobby.db.lock().unwrap(), &catalog)?;
     lobby.starters = Some(catalog);
-    lobby.skills = Some(skills::Catalog::load(&cfg.game_dir)?);
+    let mut skill_catalog = skills::Catalog::load(&cfg.game_dir)?;
+    skill_catalog.load_type1_add_damage(&lobby.db.lock().unwrap())?;
+    lobby.skills = Some(skill_catalog);
     lobby.merchants = shops::load(&lobby.db.lock().unwrap(), &cfg.game_dir)?;
     lobby.merchants.extend(shops::load_population(
         &lobby.db.lock().unwrap(),

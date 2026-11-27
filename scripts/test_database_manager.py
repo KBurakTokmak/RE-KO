@@ -159,6 +159,29 @@ class DatabaseTests(unittest.TestCase):
             with manager.connect(self.save) as db:
                 manager.potion_balance(db,self.historical,None)
 
+    def test_skill_type1_rules_are_idempotent_and_refuse_conflicts(self):
+        rows = [dict(iNum=100000 + key, AddDamage=key, Name="synthetic") for key in range(200)]
+        (self.root / "logs/reference1453").mkdir(parents=True)
+        (self.root / "logs/reference1453/MAGIC_TYPE1.json").write_text(json.dumps(rows), encoding="utf-8")
+        with manager.connect(self.save) as db:
+            db.execute("INSERT INTO lobby_accounts VALUES('private','secret')")
+            manager.skill_type1_damage(db, self.historical, None)
+            first = db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name='MAGIC_TYPE1' ORDER BY rule_id").fetchall()
+            manager.skill_type1_damage(db, self.historical, None)
+            self.assertEqual(first, db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name='MAGIC_TYPE1' ORDER BY rule_id").fetchall())
+            self.assertEqual(len(first), 200)
+            self.assertEqual(json.loads(first[42][1])["AddDamage"], 42)
+            self.assertEqual(db.execute("SELECT password FROM lobby_accounts").fetchone()[0], 'secret')
+            db.execute("UPDATE world_reference_rules SET data='{\"AddDamage\":9}' WHERE table_name='MAGIC_TYPE1' AND rule_id=100001")
+        with self.assertRaisesRegex(ValueError, 'Skill Type1 customization'):
+            with manager.connect(self.save) as db:
+                manager.skill_type1_damage(db, self.historical, None)
+        (self.root / "logs/reference1453/MAGIC_TYPE1.json").unlink()
+        with self.assertRaisesRegex(ValueError, 'original inputs or an updated world template'):
+            with manager.connect(self.save) as db:
+                db.execute("DELETE FROM world_reference_rules WHERE table_name='MAGIC_TYPE1'")
+                manager.skill_type1_damage(db, self.historical, None)
+
     def run(self, result=None):
         def initialize(arguments, **kwargs):
             path = Path(arguments[-1])

@@ -114,6 +114,37 @@ impl Catalog {
         }
     }
 
+    /// Loads flat Type1 `AddDamage` from primary1453 `MAGIC_TYPE1` rules
+    /// (migration008). The client `Skill_Magic_1.tbl` omits this column.
+    /// Transformation skills 301002/301003/301006 have0 in that export but
+    /// their native client tooltips state +50/+50/+200, so the tooltip wins.
+    pub fn load_type1_add_damage(&mut self, db: &Connection) -> anyhow::Result<()> {
+        let mut query = db.prepare(
+            "SELECT rule_id,data FROM world_reference_rules WHERE table_name='MAGIC_TYPE1'",
+        )?;
+        let rows = query
+            .query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        self.type1_add_damage.clear();
+        for (id, data) in rows {
+            let row: serde_json::Value = serde_json::from_str(&data)?;
+            let add = row["AddDamage"].as_i64().unwrap_or(0).clamp(0, 32767) as u16;
+            if add > 0 {
+                self.type1_add_damage.insert(id, add);
+            }
+        }
+        if self.type1_add_damage.is_empty() {
+            tracing::warn!(
+                "no MAGIC_TYPE1 rules; run the database manager update for flat skill damage"
+            );
+            return Ok(());
+        }
+        for (id, amount) in [(301002, 50), (301003, 50), (301006, 200)] {
+            self.type1_add_damage.insert(id, amount);
+        }
+        Ok(())
+    }
+
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let main = Table::from_encrypted_bytes(&std::fs::read(
             path.join("Data/Skill_Magic_Main_us.tbl"),
@@ -129,42 +160,8 @@ impl Catalog {
                 effects.insert((kind, crate::combat::integer(&row, 0) as u32), row);
             }
         }
-        let mut type1_add_damage = HashMap::new();
-        let t1_paths = [
-            Path::new("logs/reference-rules/MAGIC_TYPE1.csv"),
-            Path::new("../../logs/reference-rules/MAGIC_TYPE1.csv"),
-        ];
-        if let Some(file) = t1_paths.into_iter().find(|p| p.exists()) {
-            for line in std::fs::read_to_string(file)?
-                .lines()
-                .skip(1)
-                .filter(|l| !l.trim().is_empty())
-            {
-                let mut cols = line
-                    .trim_start_matches('\u{feff}')
-                    .split(',')
-                    .map(|v| v.trim().trim_matches('"'));
-                if let (Some(id), Some(add)) = (cols.next(), cols.nth(3))
-                    && let (Ok(id), Ok(add)) = (id.parse::<u32>(), add.parse::<i32>())
-                {
-                    type1_add_damage.insert(id, add.clamp(0, 32767) as u16);
-                }
-            }
-        }
-        // The native 1453 Type1 table supplies the hit percent, and its tooltip
-        // supplies the flat bonus where the later server export differs.
-        for (id, amount) in [
-            (111551, 50),
-            (112551, 50),
-            (211551, 50),
-            (212551, 50),
-            (112802, 150),
-            (212802, 150),
-            (112815, 400),
-            (212815, 400),
-        ] {
-            type1_add_damage.insert(id, amount);
-        }
+        // Flat Type1 AddDamage comes from SQLite; see `load_type1_add_damage`.
+        let type1_add_damage = HashMap::new();
         let mut speeds = HashMap::new();
         let cures = Path::new("logs/reference-rules/MAGIC_TYPE5.csv");
         let alternative = Path::new("../../logs/reference-rules/MAGIC_TYPE5.csv");
@@ -1014,6 +1011,44 @@ mod tests {
                 .until
                 .abs_diff(three_hours_later + expected_rem)
                 < 5_000
+        );
+    }
+
+    #[test]
+    fn type1_add_damage_uses_primary_rules_and_native_transformation_tooltips() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE world_reference_rules (table_name TEXT NOT NULL, rule_id INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(table_name,rule_id));").unwrap();
+        let mut catalog = Catalog::fixture(HashMap::new());
+        catalog.load_type1_add_damage(&db).unwrap();
+        assert!(
+            catalog.type1_add_damage.is_empty(),
+            "no rules means no guessed bonuses"
+        );
+        for (id, add) in [
+            (112815, 400),
+            (110572, 100),
+            (101009, 0),
+            (301006, 0),
+            (999, 99999),
+        ] {
+            db.execute(
+                "INSERT INTO world_reference_rules VALUES('MAGIC_TYPE1',?1,?2)",
+                params![id, format!(r#"{{"iNum":{id},"AddDamage":{add}}}"#)],
+            )
+            .unwrap();
+        }
+        catalog.type1_add_damage.insert(5, 5);
+        catalog.load_type1_add_damage(&db).unwrap();
+        assert_eq!(catalog.type1_add_damage.get(&112815), Some(&400));
+        assert_eq!(catalog.type1_add_damage.get(&110572), Some(&100));
+        assert_eq!(catalog.type1_add_damage.get(&101009), None);
+        assert_eq!(catalog.type1_add_damage.get(&301006), Some(&200));
+        assert_eq!(catalog.type1_add_damage.get(&301002), Some(&50));
+        assert_eq!(catalog.type1_add_damage.get(&999), Some(&32767));
+        assert_eq!(
+            catalog.type1_add_damage.get(&5),
+            None,
+            "reload replaces stale values"
         );
     }
 }

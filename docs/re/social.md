@@ -89,8 +89,8 @@ corroborates retail GM invisibility, while current Open-KO has commented-out
 render exclusions and must not override original1453 behavior here. Keeping GMs
 visible to authorized viewers is an intentional local display policy; it neither
 revokes their server permissions nor grants privileges to other clients.
-General player-target combat and PvP remain
-separate from this presence and social implementation.
+Player combat is described in
+[PvP combat](skills-combat.md#pvp-combat-and-4-class-skill-behavior).
 
 ## Private chat
 
@@ -333,8 +333,9 @@ different clan leaders) are handled:
   `(128, 125)` and `(135, 120)`.
 - Inside Zone 48, the center lobby around Judge (`13010`) uses 1453
   `Unit.cpp::isInSafetyArea` bounds, and Judge returns players to Moradon's
-  imported 1453 start position. Full player-vs-player weapon/spell damage
-  remains separate work.
+  imported 1453 start position. Pit damage follows
+  [PvP combat](skills-combat.md#pvp-combat-and-4-class-skill-behavior); no
+  win/leave result is recorded yet.
 
 On a shared client installation, the initial Combat invite and its acknowledgement
 both open a native message box through `0075CDF0`. The server delivers the

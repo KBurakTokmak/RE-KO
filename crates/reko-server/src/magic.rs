@@ -1325,18 +1325,17 @@ mod tests {
             crate::characters::ensure_account(&db, "target_acc").unwrap();
             crate::characters::set_nation(&db, "target_acc", 2).unwrap();
             crate::characters::create(&mut db, "target_acc", &target_char).unwrap();
-            db.execute(
-                "INSERT INTO character_skill_state (account,slot,points,hp,mana,buffs) VALUES ('test',0,?1,5000,5000,'[]'),('target_acc',0,?2,5000,5000,'[]')",
-                rusqlite::params![r#"[80,0,0,80,20,0,0]"#, r#"[80,0,0,80,20,0,0]"#],
-            )
-            .unwrap();
         }
+        // Arena 48 fighting pit; the Judge lobby around (130, 120) refuses PvP.
         caster.position = crate::movement::Position {
             zone: 48,
-            x: 1330,
-            z: 1180,
+            x: 1900,
+            z: 1900,
             y: 0,
         };
+        // Source Marking (group 1088) needs 15 points in master branch 8.
+        caster.progress.level = 80;
+        caster.progress.points[8] = 15;
         caster.skills = skills::load(&lobby.db.lock().unwrap(), "test", 0).unwrap();
         caster.skills.set_limits(5000, 5000);
         skills::save(&lobby.db.lock().unwrap(), "test", 0, &caster.skills).unwrap();

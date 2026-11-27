@@ -31,8 +31,10 @@ renderer/client and an in-process game host have not been implemented.
   change, and up to **40 concurrent accepted quests** with separate kill counters.
 - Combat and many Rogue, Warrior, Mage and Priest skills, including timed buffs,
   healing, drains, multi-arrow attacks, area spells and supported NPC debuffs.
-- Mage party transport/Blink, NPC lightning stun/reactive armor, and bounded
-  player resource/control effects in combat zones; full PvP remains incomplete.
+- Mage party transport/Blink, NPC lightning stun/reactive armor and class
+  player effects.
+- PvP in Arena48 pits, Colony Zone/Ardream and war zones, plus native 1v1 and
+  clan Arena challenges. Nation wars, sieges and challenge results remain open.
 - HP/MP potions, natural regeneration, weapon durability and recovery updates.
 - Eight-member parties with invitations, chat, shared XP/quest kills and loot routing.
 - Private messages with the client’s whisper target and block controls.
@@ -50,7 +52,7 @@ renderer/client and an in-process game host have not been implemented.
 
 These are working subsets, not a claim of complete retail behavior. Some NPC
 services, specialist quests, skills and multiplayer mechanics remain incomplete.
-Terrain pathfinding, monster spells, advanced clan systems and full PvP are
+Terrain pathfinding, monster spells, advanced clan systems and war events are
 among the remaining systems. See the [feature backlog](docs/design/1453-feature-backlog.md).
 
 ## Run and develop
