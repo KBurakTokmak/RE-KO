@@ -4,6 +4,9 @@ use rusqlite::{OptionalExtension, params};
 use std::{collections::HashSet, net::SocketAddr};
 use tokio::net::TcpStream;
 
+pub(crate) fn anvil_in_range(a: Position, b: Position) -> bool {
+    in_range(a, b)
+}
 fn in_range(a: Position, b: Position) -> bool {
     a.zone == b.zone
         && u32::from(a.x.abs_diff(b.x)).pow(2) + u32::from(a.z.abs_diff(b.z)).pow(2) <= 10000
@@ -373,7 +376,19 @@ pub(crate) async fn handle(
         }
         return;
     }
-    match attempt(lobby, account, s, p) {
+    let result = if p.get(1) == Some(&3) {
+        let roll = crate::loot::roll(&mut crate::skills::now_ms(), 0, 9999);
+        crate::accessory::attempt(lobby, account, s, p, roll).map_err(|(code, reason)| {
+            tracing::info!(%peer,reason,code,"accessory compound refused");
+            code
+        })
+    } else {
+        attempt(lobby, account, s, p).map_err(|e| {
+            tracing::info!(%peer,%e,"anvil request refused");
+            crate::accessory::NO_MATCH
+        })
+    };
+    match result {
         Ok((bag, coins, response, effect)) => {
             let spent = s.coins.saturating_sub(coins);
             s.inventory = bag;
@@ -383,7 +398,7 @@ pub(crate) async fn handle(
                 let gold = crate::wallet::change(coins + spent, coins);
                 super::send_response(sock, peer, &None, &gold, "ANVIL_COINS").await;
             }
-            if p.len() != 55 || p[2] == 1 {
+            if p.len() == 54 || p.get(2) == Some(&1) {
                 let mut event = vec![0x33, 8, effect];
                 event.extend(s.anvil.unwrap().1.to_le_bytes());
                 super::send_response(sock, peer, &None, &event, "ANVIL_EFFECT").await;
@@ -393,10 +408,27 @@ pub(crate) async fn handle(
                 crate::durability::attributes(sock, peer, s).await;
             }
         }
-        Err(e) => {
-            tracing::info!(%peer,%e,"anvil request refused");
-            let subtype = if p.get(1) == Some(&7) { 7 } else { 2 };
-            super::send_response(sock, peer, &None, &[0x5b, subtype, 1, 4], "ANVIL_REFUSED").await;
+        Err(code) => {
+            // Each upgrade window waits for a reply with its own subtype.
+            let (subtype, mode) = match p.get(1) {
+                Some(&7) => (7, 1),
+                Some(&3) => (
+                    3,
+                    p.get(2)
+                        .copied()
+                        .filter(|m| matches!(m, 1 | 2))
+                        .unwrap_or(1),
+                ),
+                _ => (2, 1),
+            };
+            super::send_response(
+                sock,
+                peer,
+                &None,
+                &[0x5b, subtype, mode, code],
+                "ANVIL_REFUSED",
+            )
+            .await;
         }
     }
 }

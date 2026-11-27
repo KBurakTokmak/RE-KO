@@ -28,7 +28,8 @@ RE-KO is a Rust server for the original 1453 client, for singleplayer and small 
 
 - Agents may work autonomously in this repository. Commit directly to `main`; there are no pull requests until the project is mostly complete.
 - Push after a patch is verified (fmt, tests, clippy, review and any relevant live check), or whenever the owner says to push.
-- This is a dev server: agents start, stop and restart it whenever needed without asking (`server_starter.bat` / `server_stopper.bat`). When the owner should test something in-game, just tell them to start or restart the server.
+- This is a dev server: agents start, stop and restart it whenever needed without asking (`server_starter.bat` / `server_stopper.bat`). Launch them detached, for example `cmd //c start "" server_starter.bat` from Git Bash, and do not wait on them: the starter keeps child handles open and blocks the agent's shell. Check the 15100/15001 listeners afterwards. When the owner should test something in-game, just tell them to start or restart the server.
+- For large features (many skills, monsters, items or recipes), work in a loop: inventory the full scope from references and tables, implement in tiers, then have an independent subagent compare the implementation against that inventory. Repeat until everything is implemented or each remaining gap is documented with the missing evidence.
 - There is no handover file. Record durable findings in the relevant subsystem doc and cross-cutting rules here.
 
 ## High-impact gotchas

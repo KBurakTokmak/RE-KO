@@ -18,11 +18,12 @@ renderer/client and an in-process game host have not been implemented.
 - Movement, sitting, location persistence, Town and zone gates, including
   walkthrough Eslant teleport triggers.
 - Inventory, equipment, buying/selling, repairs, account storage, normal anvil
-  upgrades and eligible Reverse Scroll conversion using imported rules;
+  upgrades, accessory compounding and eligible Reverse Scroll conversion using imported rules;
   class, race, level and stat equip checks.
 - NPC population and supported shop, storage, dialog and quest interactions.
 - Imported monster populations, roaming, aggression, ranged retaliation,
-  chasing, physical attacks, regeneration and source-based respawn timers. Rare
+  chasing, physical attacks, monster spells (damage, area, poison and other
+  damage over time, debuffs, stuns, drains), regeneration and source-based respawn timers. Rare
   bosses pick one source location per zone, respawn six hours after death, and
   reset on server startup.
 - Monster loot boxes, drop tables, item pickup, optional `/autoloot`, coins,
@@ -52,7 +53,7 @@ renderer/client and an in-process game host have not been implemented.
 
 These are working subsets, not a claim of complete retail behavior. Some NPC
 services, specialist quests, skills and multiplayer mechanics remain incomplete.
-Terrain pathfinding, monster spells, advanced clan systems and war events are
+Terrain pathfinding, monster family assistance, advanced clan systems and war events are
 among the remaining systems. See the [feature backlog](docs/design/1453-feature-backlog.md).
 
 ## Run and develop

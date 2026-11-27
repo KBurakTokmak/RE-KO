@@ -77,7 +77,46 @@ step stops just outside the nominal range, as observed with Apes at 2.138 m
 from a 2.10 m target.
 
 Movement1/2 performs bounded idle roaming;0/4 do not. Terrain pathfinding,
-movement3 patrol, family assistance and monster spells remain incomplete.
+movement3 patrol and family assistance remain incomplete.
+
+### Monster spells
+
+Monsters cast their first magic slot (`npc_magic.rs`, `npc_ai.rs`), following
+known1453 server behavior. Casting mode `byMagicAttack` comes from migration009.
+- `byDirectAttack`1 chases to within5m and casts there; 2 casts from its attack
+  range when the target is outside melee reach and melees otherwise. Local choice:
+  a cast never starts beyond the spell's own range, so such monsters close in;
+  known1453 servers cast from attack range and the spell then misses.
+- `byMagicAttack`2 turns about10% of melee swings into an instant single-target
+  spell; 4/5 do the same and the next attack waits an extra second.
+- Only the4/5 roll uses an area: an enemy-area spell (moral10) is centred on the
+  victim. Long casts and mode-2 rolls hit the single target. Known1453 behavior
+  hits nobody when the4/5 roll picks a single-target spell; RE-KO hits the victim
+  instead (local choice).
+- Casts with a table cast time send phase1 first and land after that time
+  (×100ms, as for players). A stun, death, invisibility or the target leaving
+  range cancels the cast. Monsters pay no mana and ignore recast times; their
+  attack delay paces casting. The second and third slots are never used, so
+  monster heals and secondary spells stay inactive, as in1453.
+- Damage against players uses only the victim's elemental resistance:
+  `230×first/(resistance+250)`, a0.85–1.15 spread, then divided by3. Single
+  targets must be within the spell's range. Area spells hit visible, living,
+  non-GM players within the radius of the victim.
+- Each victim applies its hit in one save transaction: HP, Mana Shield, Mage Armor
+  reflection, mana change (DirectType2/3), HP absorb (8) or current-HP drain (9)
+  healing the monster, damage over time in two-second ticks, Type4 debuffs
+  (blocked by immunity categories29/30; cold slows can be resisted; max-HP and
+  stat debuffs clamp current HP/MP) and a two-second lightning stun with about a
+  21% chance below125 lightning resistance and none above. A durational
+  DirectType2 spell takes its first amount as HP. Mage Armor reflects instant
+  damage spells (known1453 behavior) and, as an existing local rule, physical
+  monster attacks; not DoTs, drains or mana spells.
+- Spell packets (`0x31`) reach the victim and players who can see the caster.
+  Monster-caused deaths clear temporary effects (keeping item scrolls) and notify
+  bystanders, trades and challenges.
+- Some data cannot be used: skill301021 has no client row and300269 has no1453
+  server row. Whether the client draws projectile models without a flying
+  phase needs an in-game check.
 
 Complete character assets take precedence over the table joint/animation fields,
 following Open-KO `CPlayerBase::InitChr` and `CN3Chr::Load`. The radius reader
@@ -166,7 +205,8 @@ native shape. Resolve an object-click ID0 only to the matching nearby anvil;
 reject forged nonzero IDs. Normal/preview upgrades match source recipes,
 reagent multisets, item classes and valid original-client result items. Preview
 consumes nothing; failure burns the origin. Reverse Scroll conversion uses source
-recipes plus the owner-requested plain-weapon compatibility rule. Accessories,
+recipes plus the owner-requested plain-weapon compatibility rule. Accessory
+compounding is described in [rates](upgrade-rates.md#accessory-compounding);
 sealing and remaining specialist branches are separate. See [rates](upgrade-rates.md).
 
 ## Loot

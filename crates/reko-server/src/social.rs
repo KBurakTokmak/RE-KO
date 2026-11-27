@@ -247,8 +247,12 @@ impl Hub {
         }
     }
     pub fn player_died(&mut self, id: u16) {
+        self.send(id, death_packet(id).to_vec());
+        self.announce_death(id);
+    }
+    /// Death side effects for everyone except the victim's own socket.
+    pub fn announce_death(&mut self, id: u16) {
         let packet = death_packet(id);
-        self.send(id, packet.to_vec());
         self.broadcast_visual(id, None, Some(id), &packet);
         crate::trade::cancel(self, id, "Trade cancelled: player died.");
         crate::merchant::close(self, id);

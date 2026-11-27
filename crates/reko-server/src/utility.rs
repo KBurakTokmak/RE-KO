@@ -1,6 +1,6 @@
 //! Original-table rogue self utility effects and effective attributes.
 
-use crate::{combat, inventory, lobby::Lobby, resources, skills, world_entry::Session};
+use crate::{combat, inventory, lobby::Lobby, npc_magic, resources, skills, world_entry::Session};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
@@ -268,18 +268,45 @@ pub(crate) async fn npc_strikes(
         if strike.zone != s.position.zone || s.skills.hp == 0 {
             continue;
         }
+        let spell = strike.spell.clone();
+        let mut spell_outcome = SpellOutcome::default();
         let result = (|| -> rusqlite::Result<(skills::State, u16, Option<u8>, bool)> {
             let db = lobby.db.lock().unwrap();
             let tx = db.unchecked_transaction()?;
             let mut next = skills::load(&tx, account, s.character.slot)?;
-            let amount = damage_received(
+            let mut amount = damage_received(
                 absorb_damage(&mut next, strike.amount, lobby.skills.as_ref()),
                 s,
             )
             .min(next.hp);
+            if let Some(hit) = &spell
+                && hit.drain_percent > 0
+            {
+                amount = amount.saturating_add(
+                    (u32::from(next.hp) * u32::from(hit.drain_percent) / 100) as u16,
+                );
+                amount = amount.min(next.hp);
+            }
             next.hp -= amount;
+            if let Some(hit) = &spell {
+                spell_outcome =
+                    apply_monster_spell(&mut next, hit, amount, now, lobby.skills.as_ref());
+                // Max HP and stat debuffs clamp current HP/MP inside the save.
+                if spell_outcome
+                    .debuff
+                    .is_some_and(|d| matches!(d.category, 1 | 7))
+                {
+                    let stats = effective(s, &next, lobby.skills.as_ref(), lobby.combat.as_ref());
+                    next.set_limits(stats.hp, stats.mp);
+                }
+            }
             let stealth_broken = amount > 0 && next.buffs.remove(&91).is_some();
-            let reflected = if amount > 0 {
+            // Mage Armor reflects physical hits (existing local rule) and instant
+            // damage spells (known 1453 behavior), not DoTs, drains or mana spells.
+            let instant = spell.as_ref().is_none_or(|h| {
+                h.dot.is_none() && h.mana == 0 && !h.absorb && h.drain_percent == 0
+            });
+            let reflected = if amount > 0 && instant {
                 next.buffs
                     .get(&25)
                     .filter(|b| now < b.until)
@@ -295,6 +322,9 @@ pub(crate) async fn npc_strikes(
             if reflected.is_some() {
                 next.buffs.remove(&25);
             }
+            if next.hp == 0 {
+                crate::travel::clear_zone_effects(&mut next, lobby.skills.as_ref());
+            }
             skills::save_in(&tx, account, s.character.slot, &next)?;
             tx.commit()?;
             Ok((next, amount, reflected, stealth_broken))
@@ -303,6 +333,21 @@ pub(crate) async fn npc_strikes(
             tracing::error!(%peer,"NPC damage persistence failed");
             continue;
         };
+        if spell_outcome.heal_monster > 0 {
+            world.heal(strike.npc, s.position.zone, spell_outcome.heal_monster);
+            if let Some(health) = world.health(strike.npc, s.position.zone) {
+                super::send_response(sock, peer, &None, &health, "NPC_SPELL_DRAIN_HP").await;
+            }
+        }
+        if let Some(key) = spell_outcome.periodic {
+            // A monster DoT has no player source; drop any stale attribution for this key.
+            lobby
+                .social
+                .lock()
+                .unwrap()
+                .periodic_sources
+                .remove(&(s.player_id, key));
+        }
         let old_mana = s.skills.mana;
         s.skills = next;
         if stealth_broken {
@@ -354,7 +399,27 @@ pub(crate) async fn npc_strikes(
             )
             .await;
         }
-        super::send_response(sock, peer, &None, &attack, "NPC_ATTACK").await;
+        if spell.is_none() {
+            super::send_response(sock, peer, &None, &attack, "NPC_ATTACK").await;
+        } else {
+            for (packet, name) in spell_outcome.packets() {
+                super::send_response(sock, peer, &None, &packet, name).await;
+            }
+            if spell_outcome.stunned {
+                let mut stop = vec![0x06];
+                stop.extend(s.player_id.to_le_bytes());
+                stop.extend(s.position.x.to_le_bytes());
+                stop.extend(s.position.z.to_le_bytes());
+                stop.extend(s.position.y.to_le_bytes());
+                stop.extend(0u16.to_le_bytes());
+                stop.push(0);
+                lobby
+                    .social
+                    .lock()
+                    .unwrap()
+                    .broadcast_visual(s.player_id, None, None, &stop);
+            }
+        }
         refresh(s, lobby.skills.as_ref(), lobby.combat.as_ref());
         if s.skills.hp == 0 {
             s.pending_cast = None;
@@ -364,10 +429,104 @@ pub(crate) async fn npc_strikes(
             let mut dead = vec![0x11];
             dead.extend(s.player_id.to_le_bytes());
             super::send_response(sock, peer, &None, &dead, "PLAYER_DEAD").await;
+            // Bystanders, trades, merchants and challenges learn of the death too.
+            lobby.social.lock().unwrap().announce_death(s.player_id);
         }
         world.observe(s, now);
         tracing::info!(%peer,npc=strike.npc,amount,hp=s.skills.hp,"monster attack applied");
     }
+}
+
+/// Effects of one monster spell on its victim, decided inside the save transaction.
+#[derive(Default)]
+struct SpellOutcome {
+    periodic: Option<u32>,
+    debuff: Option<npc_magic::Debuff>,
+    stunned: bool,
+    heal_monster: u32,
+}
+
+impl SpellOutcome {
+    fn packets(&self) -> Vec<(Vec<u8>, &'static str)> {
+        let mut out = Vec::new();
+        if let Some(key) = self.periodic {
+            out.push((
+                vec![0x5e, 2, skills::damage_status(key), 1],
+                "NPC_SPELL_DOT",
+            ));
+        }
+        if let Some(debuff) = self.debuff {
+            if debuff.category == 20 {
+                out.push((vec![0x5e, 2, 4, 1], "NPC_SPELL_BLIND"));
+            }
+            if matches!(debuff.category, 6 | 40 | 47) {
+                out.push((vec![0x5e, 2, 3, 1], "NPC_SPELL_SLOW"));
+            }
+        }
+        if self.stunned {
+            out.push((vec![0x5e, 2, 3, 1], "NPC_SPELL_STUN"));
+        }
+        out
+    }
+}
+
+/// Applies a monster spell's mana change, damage-over-time, debuff and stun.
+/// Death clears nothing here; the caller clears temporary effects afterwards.
+fn apply_monster_spell(
+    next: &mut skills::State,
+    hit: &npc_magic::Hit,
+    amount: u16,
+    now: u64,
+    catalog: Option<&skills::Catalog>,
+) -> SpellOutcome {
+    let mut out = SpellOutcome::default();
+    if hit.absorb || hit.drain_percent > 0 {
+        out.heal_monster = u32::from(amount);
+    }
+    if hit.mana != 0 {
+        next.mana =
+            (i32::from(next.mana) + i32::from(hit.mana)).clamp(0, i32::from(next.max_mana)) as u16;
+    }
+    if next.hp == 0 {
+        return out;
+    }
+    if let Some((per_tick, duration_ms, element)) = hit.dot {
+        out.periodic = next.track_periodic_damage(
+            element,
+            skills::Periodic {
+                amount: per_tick,
+                next: now + 2000,
+                until: now + duration_ms,
+            },
+        );
+    }
+    let blocked = next.buffs.get(&29).is_some_and(|b| now < b.until)
+        || next.buffs.get(&30).is_some_and(|b| now < b.until);
+    if let Some(debuff) = hit.debuff
+        && !blocked
+        && debuff.duration_ms > 0
+    {
+        crate::travel::suspend_scroll_for_debuff(next, debuff.category, now, catalog);
+        next.buffs.insert(
+            debuff.category,
+            skills::Buff {
+                skill: hit.skill,
+                until: now + debuff.duration_ms,
+            },
+        );
+        out.debuff = Some(debuff);
+    }
+    if hit.stun_ms > 0 && !blocked && !next.buffs.get(&47).is_some_and(|b| now < b.until) {
+        next.buffs.insert(
+            47,
+            skills::Buff {
+                skill: hit.skill,
+                until: now + hit.stun_ms,
+            },
+        );
+        out.stunned = true;
+    }
+    out
 }
 
 pub(crate) fn absorb_damage_public(
@@ -764,5 +923,62 @@ mod tests {
                 assert_eq!(absorb_damage(&mut state, 1000, Some(&catalog)), 1000);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod monster_spell_tests {
+    use super::*;
+
+    #[test]
+    fn monster_spell_applies_dot_debuff_stun_mana_and_respects_immunity_and_death() {
+        let now = 1_000_000;
+        let hit = npc_magic::Hit {
+            skill: 300135,
+            mana: -30,
+            dot: Some((-50, 20_000, 6)),
+            debuff: Some(npc_magic::Debuff {
+                category: 5,
+                duration_ms: 300_000,
+                speed: 0,
+            }),
+            stun_ms: 2000,
+            ..Default::default()
+        };
+        let mut state = skills::State::default();
+        let out = apply_monster_spell(&mut state, &hit, 0, now, None);
+        assert_eq!(state.mana, 70);
+        assert!(out.periodic.is_some());
+        assert_eq!(state.periodic.values().next().unwrap().amount, -50);
+        assert_eq!(state.buffs[&5].skill, 300135);
+        assert_eq!(state.buffs[&5].until, now + 300_000);
+        assert!(out.stunned && state.buffs[&47].until == now + 2000);
+        assert_eq!(out.packets().len(), 2, "DoT status and stun status");
+
+        // Immunity buffs 29/30 block debuffs and stuns, not damage over time.
+        let mut immune = skills::State::default();
+        immune.buffs.insert(
+            29,
+            skills::Buff {
+                skill: 1,
+                until: now + 5000,
+            },
+        );
+        let out = apply_monster_spell(&mut immune, &hit, 0, now, None);
+        assert!(out.periodic.is_some() && out.debuff.is_none() && !out.stunned);
+        assert!(!immune.buffs.contains_key(&5) && !immune.buffs.contains_key(&47));
+
+        // A killed victim gets no lingering effects; drains heal the monster.
+        let mut dead = skills::State {
+            hp: 0,
+            ..Default::default()
+        };
+        let drain = npc_magic::Hit {
+            drain_percent: 20,
+            ..hit.clone()
+        };
+        let out = apply_monster_spell(&mut dead, &drain, 40, now, None);
+        assert_eq!(out.heal_monster, 40);
+        assert!(dead.periodic.is_empty() && dead.buffs.is_empty());
     }
 }

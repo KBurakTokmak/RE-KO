@@ -1,6 +1,6 @@
-//! Data-driven pursuit and physical attacks; owned by the world simulation.
+//! Data-driven pursuit, physical attacks and monster spells; owned by the world simulation.
 use super::{Event, Mob};
-use crate::{combat, movement::Position, skills, world_entry::Session};
+use crate::{combat, movement::Position, npc_magic, skills, world_entry::Session};
 use rusqlite::Connection;
 use std::collections::{HashMap, VecDeque};
 
@@ -18,6 +18,8 @@ struct Rule {
     trace: f32,
     bulk: f32,
     direct: u8,
+    magic: u32,
+    mode: u8,
 }
 #[derive(Clone)]
 struct Player {
@@ -49,7 +51,7 @@ async fn monster_disguise_blocks_proximity_aggro_but_keeps_damage_retaliation() 
     let world = super::World::load(&game).unwrap();
     world.load_population(&db, &game).unwrap();
     let mut brain = Brain::default();
-    brain.load(&db).unwrap();
+    brain.load(&db, None).unwrap();
     let mut inner = world.inner.lock().unwrap();
     let home = inner.mobs[&12000].position;
     let player = Player {
@@ -93,7 +95,7 @@ async fn monster_switches_aggro_when_another_player_deals_higher_damage() {
     let world = super::World::load(&game).unwrap();
     world.load_population(&db, &game).unwrap();
     let mut brain = Brain::default();
-    brain.load(&db).unwrap();
+    brain.load(&db, None).unwrap();
     let mut inner = world.inner.lock().unwrap();
     let home = inner.mobs[&12000].position;
     brain.players.insert(
@@ -176,16 +178,24 @@ struct Agent {
     next_roam: u64,
     pattern: i8,
     moving: bool,
+    cast: Option<Cast>,
+}
+#[derive(Clone, Copy)]
+struct Cast {
+    target: u16,
+    at: u64,
 }
 #[derive(Clone)]
 pub(crate) struct Strike {
     pub npc: u16,
     pub zone: u8,
     pub amount: u16,
+    pub spell: Option<npc_magic::Hit>,
 }
 #[derive(Default)]
 pub(super) struct Brain {
     rules: HashMap<u16, Rule>,
+    spells: HashMap<u32, npc_magic::Spell>,
     players: HashMap<u16, Player>,
     agents: HashMap<u16, Agent>,
     strikes: HashMap<u16, VecDeque<Strike>>,
@@ -235,6 +245,136 @@ fn physical(rule: &Rule, target: &Player, attack_percent: u16, seed: &mut u64) -
         damage = damage * 3 / 2;
     }
     damage.min((2.6 * f32::from(rule.damage)) as u32).min(32767) as u16
+}
+/// Resolves a landed monster spell: per-target effect packets, an area marker
+/// and queued per-victim hits that each victim's session applies atomically.
+fn cast_effect(
+    players: &HashMap<u16, Player>,
+    strikes: &mut HashMap<u16, VecDeque<Strike>>,
+    rng: &mut u64,
+    mob: &Mob,
+    spell: &npc_magic::Spell,
+    target: u16,
+    area: bool,
+) -> Vec<Event> {
+    let Some(victim) = players.get(&target) else {
+        return Vec::new();
+    };
+    let area = area && spell.area();
+    let center = victim.position;
+    let valid = |p: &Player| {
+        p.hp > 0 && !p.invisible && !p.is_admin && p.position.zone == mob.position.zone
+    };
+    let mut targets: Vec<u16> = if area {
+        let mut ids: Vec<u16> = players
+            .iter()
+            .filter(|(_, p)| {
+                valid(p)
+                    && distance(center, p.position) <= spell.radius
+                    && (spell.range <= 0.0 || distance(mob.position, p.position) <= spell.range)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    } else if valid(victim)
+        && (spell.range <= 0.0
+            || distance(mob.position, victim.position)
+                <= spell.range + std::f32::consts::FRAC_1_SQRT_2 / 10.0)
+    {
+        vec![target]
+    } else {
+        Vec::new()
+    };
+    targets.truncate(32);
+    let mut events = Vec::new();
+    for id in targets {
+        let player = &players[&id];
+        let resist = npc_magic::resistance(&player.stats, spell.element);
+        let mut hit = npc_magic::Hit {
+            skill: spell.id,
+            ..Default::default()
+        };
+        let mut amount = 0;
+        match spell.direct {
+            // A durational DirectType 2 spell takes its first amount as raw HP.
+            2 if spell.duration_s > 0 && spell.first < 0 => {
+                amount = spell.first.unsigned_abs().min(32000);
+            }
+            1 | 8 if spell.first < 0 => {
+                amount = npc_magic::damage(spell.first, resist, |max| random(rng, max));
+                hit.absorb = spell.direct == 8;
+            }
+            2 | 3 => hit.mana = spell.first,
+            9 if spell.first != 0 => hit.drain_percent = spell.first.unsigned_abs().min(100) as u8,
+            _ => {}
+        }
+        if spell.duration_s > 0 && spell.over_time < 0 {
+            let total = if spell.element == 4 {
+                spell.over_time.unsigned_abs()
+            } else {
+                npc_magic::damage(spell.over_time, resist, |max| random(rng, max))
+            };
+            let ticks = (spell.duration_s / 2).max(1);
+            let per_tick = (total / ticks).clamp(1, 32767) as i16;
+            hit.dot = Some((-per_tick, u64::from(spell.duration_s) * 1000, spell.element));
+        }
+        let mut result = 1i16;
+        if spell.element == 3 && spell.direct == 1 && amount > 0 {
+            // Lightning stuns unless the victim's lightning resistance wins the roll.
+            if npc_magic::stuns(player.stats.resistance[2], random(rng, 99)) {
+                hit.stun_ms = 2000;
+            } else {
+                result = 0;
+            }
+        }
+        if let Some(debuff) = spell.debuff {
+            let resisted = debuff.category == 6
+                && spell.element == 2
+                && random(rng, 99)
+                    >= 100u32
+                        .saturating_sub(u32::from(player.stats.resistance[1]) * 100 / 250)
+                        .clamp(15, 75);
+            if !resisted {
+                hit.debuff = Some(debuff);
+            }
+        }
+        let mut effect = skills::effect(spell.id, mob.id);
+        effect[8..10].copy_from_slice(&id.to_le_bytes());
+        effect[12..14].copy_from_slice(&result.to_le_bytes());
+        if let Some(debuff) = hit.debuff {
+            let seconds = (debuff.duration_ms / 1000).min(32767) as u16;
+            effect[16..18].copy_from_slice(&seconds.to_le_bytes());
+            effect[20..22].copy_from_slice(&debuff.speed.to_le_bytes());
+        }
+        events.push(Event {
+            personal_hp: Vec::new(),
+            zone: mob.position.zone,
+            packet: effect,
+        });
+        let queue = strikes.entry(id).or_default();
+        if queue.len() < 32 {
+            queue.push_back(Strike {
+                npc: mob.id,
+                zone: mob.position.zone,
+                amount,
+                spell: Some(hit),
+            });
+        }
+    }
+    if area {
+        let mut marker = skills::effect(spell.id, mob.id);
+        marker[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+        marker[10..12].copy_from_slice(&(center.x / 10).to_le_bytes());
+        marker[12..14].copy_from_slice(&0u16.to_le_bytes());
+        marker[14..16].copy_from_slice(&(center.z / 10).to_le_bytes());
+        events.push(Event {
+            personal_hp: Vec::new(),
+            zone: mob.position.zone,
+            packet: marker,
+        });
+    }
+    events
 }
 fn move_toward(
     mob: &mut Mob,
@@ -313,8 +453,13 @@ fn roam_destination(agent: &mut Agent, position: Position, rng: &mut u64) -> Pos
     }
 }
 impl Brain {
-    pub fn load(&mut self, db: &Connection) -> anyhow::Result<()> {
-        let mut q=db.prepare("SELECT prototype,act_type,damage,hit_rate,attack_delay,run_speed,attack_range,search_range,tracing_range,bulk,direct_attack,walk_speed,stand_ms FROM world_monster_ai")?;
+    pub fn load(
+        &mut self,
+        db: &Connection,
+        catalog: Option<&skills::Catalog>,
+    ) -> anyhow::Result<()> {
+        let modes = npc_magic::modes(db)?;
+        let mut q=db.prepare("SELECT prototype,act_type,damage,hit_rate,attack_delay,run_speed,attack_range,search_range,tracing_range,bulk,direct_attack,walk_speed,stand_ms,magic1 FROM world_monster_ai")?;
         for r in q.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -331,14 +476,30 @@ impl Brain {
                     direct: r.get(10)?,
                     walk: r.get::<_, u16>(11)? as f32,
                     stand: r.get(12)?,
+                    magic: r.get(13)?,
+                    mode: 0,
                 },
             ))
         })? {
-            let (id, rule) = r?;
+            let (id, mut rule) = r?;
+            rule.mode = modes.get(&id).copied().unwrap_or(0);
+            let casts = matches!(rule.mode, 2 | 4 | 5) || matches!(rule.direct, 1 | 2);
+            if casts
+                && rule.magic != 0
+                && let Some(spell) = catalog.and_then(|c| npc_magic::Spell::resolve(c, rule.magic))
+            {
+                self.spells.insert(rule.magic, spell);
+            } else {
+                rule.magic = 0;
+            }
             self.rules.insert(id, rule);
         }
         self.rng = skills::now_ms();
-        tracing::info!(prototypes = self.rules.len(), "monster AI rules loaded");
+        tracing::info!(
+            prototypes = self.rules.len(),
+            spells = self.spells.len(),
+            "monster AI rules loaded"
+        );
         Ok(())
     }
     pub fn observe(&mut self, s: &Session, now: u64) {
@@ -405,6 +566,7 @@ impl Brain {
                 next_roam: now.saturating_add(rule.stand),
                 pattern: 0,
                 moving: false,
+                cast: None,
             });
             let elapsed = now.saturating_sub(agent.last).min(500) as f32 / 1000.0;
             agent.last = now;
@@ -417,6 +579,7 @@ impl Brain {
                 agent.damage_floor.clear();
                 agent.last_damage_by.clear();
                 agent.moving = false;
+                agent.cast = None;
                 continue;
             }
             if !agent.alive {
@@ -430,6 +593,8 @@ impl Brain {
                 agent.moving = false;
             }
             if now < mob.stunned_until {
+                // A stun interrupts a cast in progress.
+                agent.cast = None;
                 if agent.moving {
                     events.push(movement_event(mob, 0.0, mob.position));
                     agent.moving = false;
@@ -558,14 +723,53 @@ impl Brain {
             }
             let speed = rule.run * f32::from(mob.speed_percent) / 100.0;
             let event_start = events.len();
-            if let Some(id) = agent.target {
+            if let Some(cast) = agent.cast {
+                // Casting roots the monster until the spell lands or fails.
+                if now >= cast.at {
+                    agent.cast = None;
+                    let bulk = rule.bulk * f32::from(s.size) / 100.0;
+                    if let Some(spell) = self.spells.get(&rule.magic)
+                        && self.players.get(&cast.target).is_some_and(|p| {
+                            p.hp > 0
+                                && !p.invisible
+                                && !p.is_admin
+                                && p.position.zone == mob.position.zone
+                                && distance(mob.position, p.position) <= rule.range + bulk + 2.0
+                        })
+                    {
+                        events.extend(cast_effect(
+                            &self.players,
+                            &mut self.strikes,
+                            &mut self.rng,
+                            mob,
+                            spell,
+                            cast.target,
+                            false,
+                        ));
+                    }
+                }
+            } else if let Some(id) = agent.target {
                 let target = &self.players[&id];
                 let bulk = rule.bulk * f32::from(s.size) / 100.0;
-                let reach = if rule.direct == 1 {
+                let spell = self.spells.get(&rule.magic);
+                let melee = if rule.direct == 1 && spell.is_none() {
                     5.0f32.min(rule.range)
                 } else {
                     1.0f32.min(rule.range)
                 } + bulk;
+                // byDirectAttack 1 always casts at range; 2 casts when outside melee.
+                let long_cast = spell.is_some() && matches!(rule.direct, 1 | 2);
+                // byDirectAttack 1 approaches to 5 m before casting; 2 casts from its
+                // attack range. Never start a cast beyond the spell's own range.
+                let mut cast_reach = if rule.direct == 1 {
+                    5.0f32.min(rule.range.max(1.0))
+                } else {
+                    rule.range.max(1.0)
+                } + bulk;
+                if let Some(spell) = spell.filter(|s| s.range > 0.0) {
+                    cast_reach = cast_reach.min(spell.range);
+                }
+                let reach = if long_cast { cast_reach } else { melee };
                 let dist = distance(mob.position, target.position);
                 // Positions round to 0.1 m per axis. The final diagonal step
                 // can land just outside reach with no further representable move.
@@ -580,21 +784,74 @@ impl Brain {
                     ) {
                         events.push(e);
                     }
+                } else if in_reach
+                    && now >= agent.next_attack
+                    && let Some(spell) = spell.filter(|_| {
+                        long_cast
+                            && (rule.direct == 1
+                                || dist > melee + std::f32::consts::FRAC_1_SQRT_2 / 10.0)
+                    })
+                {
+                    agent.next_attack = now.saturating_add(rule.delay.max(1));
+                    if spell.cast_ms > 0 {
+                        let mut casting = skills::effect(spell.id, mob.id);
+                        casting[1] = 1;
+                        casting[8..10].copy_from_slice(&id.to_le_bytes());
+                        events.push(Event {
+                            personal_hp: Vec::new(),
+                            zone: mob.position.zone,
+                            packet: casting,
+                        });
+                        agent.cast = Some(Cast {
+                            target: id,
+                            at: now.saturating_add(spell.cast_ms),
+                        });
+                    } else {
+                        events.extend(cast_effect(
+                            &self.players,
+                            &mut self.strikes,
+                            &mut self.rng,
+                            mob,
+                            spell,
+                            id,
+                            false,
+                        ));
+                    }
                 } else if in_reach && now >= agent.next_attack {
                     agent.next_attack = now.saturating_add(rule.delay.max(1));
-                    let percent = mob
-                        .modifiers
-                        .get(&9)
-                        .filter(|m| now < m.until)
-                        .map_or(100, |m| m.percent);
-                    let amount = physical(rule, target, percent, &mut self.rng);
-                    let queue = self.strikes.entry(id).or_default();
-                    if queue.len() < 32 {
-                        queue.push_back(Strike {
-                            npc: mob.id,
-                            zone: mob.position.zone,
-                            amount,
-                        });
+                    // byMagicAttack 2/4/5: about 10% of melee swings become an instant spell.
+                    let instant = spell.filter(|_| {
+                        matches!(rule.mode, 2 | 4 | 5) && random(&mut self.rng, 9999) < 999
+                    });
+                    if let Some(spell) = instant {
+                        if matches!(rule.mode, 4 | 5) {
+                            agent.next_attack = agent.next_attack.saturating_add(1000);
+                        }
+                        events.extend(cast_effect(
+                            &self.players,
+                            &mut self.strikes,
+                            &mut self.rng,
+                            mob,
+                            spell,
+                            id,
+                            matches!(rule.mode, 4 | 5),
+                        ));
+                    } else {
+                        let percent = mob
+                            .modifiers
+                            .get(&9)
+                            .filter(|m| now < m.until)
+                            .map_or(100, |m| m.percent);
+                        let amount = physical(rule, target, percent, &mut self.rng);
+                        let queue = self.strikes.entry(id).or_default();
+                        if queue.len() < 32 {
+                            queue.push_back(Strike {
+                                npc: mob.id,
+                                zone: mob.position.zone,
+                                amount,
+                                spell: None,
+                            });
+                        }
                     }
                 }
             } else if agent.returning {
@@ -713,7 +970,7 @@ mod tests {
             let mobs = &mut inner.mobs;
             let home = mobs[&12000].position;
             let mut brain = Brain::default();
-            brain.load(&db).unwrap();
+            brain.load(&db, None).unwrap();
             brain.rules.get_mut(&100).unwrap().act = act;
             let mut admin = Player {
                 name: "Admin".into(),
@@ -777,7 +1034,7 @@ mod tests {
         let world = super::super::World::load(&game).unwrap();
         world.load_population(&db, &game).unwrap();
         let mut brain = Brain::default();
-        brain.load(&db).unwrap();
+        brain.load(&db, None).unwrap();
         let mut inner = world.inner.lock().unwrap();
         let mobs = &mut inner.mobs;
         let home = mobs[&12000].position;
@@ -901,7 +1158,7 @@ mod tests {
         let world = super::super::World::load(&game).unwrap();
         world.load_population(&db, &game).unwrap();
         let mut brain = Brain::default();
-        brain.load(&db).unwrap();
+        brain.load(&db, None).unwrap();
         let mut inner = world.inner.lock().unwrap();
         let mobs = &mut inner.mobs;
         let home = mobs[&12000].position;
@@ -965,6 +1222,167 @@ mod tests {
         }
     }
     #[test]
+    fn monster_spells_cast_land_interrupt_and_apply_area_dot_and_debuffs() {
+        let game = reko_common::game_dir();
+        if !game.join("Data/NPC_Looks.tbl").exists()
+            || !game.join("Data/Skill_Magic_Main_us.tbl").exists()
+        {
+            return;
+        }
+        let catalog = skills::Catalog::load(&game).unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        crate::population::tests::seed(&db);
+        db.execute_batch(include_str!("npc_ai.sql")).unwrap();
+        // byDirectAttack 1 with Deruvish lightning: always casts within attack range.
+        db.execute(
+            "INSERT INTO world_monster_ai VALUES(100,3,100,100,1500,3,4,20,35,35,100,1,300123,0,0,1,1500)",
+            [],
+        )
+        .unwrap();
+        let world = super::super::World::load(&game).unwrap();
+        world.load_population(&db, &game).unwrap();
+        let mut brain = Brain::default();
+        brain.load(&db, Some(&catalog)).unwrap();
+        let lightning = brain.spells[&300123].clone();
+        assert!(lightning.cast_ms > 0 && lightning.first < 0 && lightning.element == 3);
+        let now = skills::now_ms();
+        let home = world.inner.lock().unwrap().mobs[&12000].position;
+        let player = |name: &str, dx: u16| Player {
+            name: name.into(),
+            position: Position {
+                x: home.x + dx,
+                ..home
+            },
+            hp: 100,
+            invisible: false,
+            disguised: false,
+            is_admin: false,
+            stats: combat::Stats::default(),
+            at: now,
+        };
+        // byDirectAttack 1 casters chase until within 5 m, then cast.
+        brain.players.insert(1, player("Caster", 40));
+        let mut inner = world.inner.lock().unwrap();
+        let events = {
+            let at = now;
+            for p in brain.players.values_mut() {
+                p.at = at;
+            }
+            brain.tick(&mut inner.mobs, at)
+        };
+        let casting: Vec<_> = events
+            .iter()
+            .filter(|e| e.packet[..2] == [0x31, 1])
+            .collect();
+        assert_eq!(casting.len(), 1, "ranged caster within 5 m starts one cast");
+        assert_eq!(&casting[0].packet[6..10], &[0xe0, 0x2e, 1, 0]);
+        assert!(
+            brain.take(1).is_empty(),
+            "nothing lands before the cast time"
+        );
+        // The cast lands after its cast time with a queued spell hit.
+        let events = {
+            let at = now + lightning.cast_ms;
+            for p in brain.players.values_mut() {
+                p.at = at;
+            }
+            brain.tick(&mut inner.mobs, at)
+        };
+        assert!(
+            events
+                .iter()
+                .any(|e| e.packet[..2] == [0x31, 3] && e.packet[8..10] == [1, 0])
+        );
+        let hits = brain.take(1);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].amount > 0);
+        assert_eq!(hits[0].spell.as_ref().unwrap().skill, 300123);
+        // A stun interrupts the next cast, and an invisible target escapes it.
+        {
+            let at = now + 1500 + lightning.cast_ms;
+            for p in brain.players.values_mut() {
+                p.at = at;
+            }
+            brain.tick(&mut inner.mobs, at)
+        };
+        assert!(brain.agents[&12000].cast.is_some());
+        inner.mobs.get_mut(&12000).unwrap().stunned_until = now + 1_000_000;
+        {
+            let at = now + 1600 + lightning.cast_ms;
+            for p in brain.players.values_mut() {
+                p.at = at;
+            }
+            brain.tick(&mut inner.mobs, at)
+        };
+        assert!(brain.agents[&12000].cast.is_none());
+        inner.mobs.get_mut(&12000).unwrap().stunned_until = 0;
+        {
+            let at = now + 4000 + lightning.cast_ms;
+            for p in brain.players.values_mut() {
+                p.at = at;
+            }
+            brain.tick(&mut inner.mobs, at)
+        };
+        brain.players.get_mut(&1).unwrap().invisible = true;
+        {
+            let at = now + 4000 + 2 * lightning.cast_ms;
+            for p in brain.players.values_mut() {
+                p.at = at;
+            }
+            brain.tick(&mut inner.mobs, at)
+        };
+        assert!(brain.take(1).is_empty());
+
+        // An area spell (Dread Mare lightning) hits everyone within its radius of the victim, not beyond.
+        let fire = npc_magic::Spell::resolve(&catalog, 300236).unwrap();
+        assert!(
+            !npc_magic::Spell::resolve(&catalog, 300139).unwrap().area(),
+            "moral 7 stays single-target"
+        );
+        assert!(fire.area());
+        brain.players.get_mut(&1).unwrap().invisible = false;
+        let near_far = |name: &str, dz: u16| Player {
+            position: Position {
+                z: home.z + dz,
+                ..player(name, 40).position
+            },
+            ..player(name, 40)
+        };
+        brain
+            .players
+            .insert(2, near_far("Near", (fire.radius as u16 - 1) * 10));
+        brain
+            .players
+            .insert(3, near_far("Far", (fire.radius as u16 + 5) * 10));
+        brain.players.insert(
+            4,
+            Player {
+                is_admin: true,
+                ..player("Admin", 100)
+            },
+        );
+        let mut strikes = HashMap::new();
+        let mob = inner.mobs[&12000].clone();
+        let events = cast_effect(&brain.players, &mut strikes, &mut 7, &mob, &fire, 1, true);
+        let mut hit: Vec<_> = strikes.keys().copied().collect();
+        hit.sort_unstable();
+        assert_eq!(hit, [1, 2]);
+        assert!(
+            events.iter().any(|e| e.packet[8..10] == [0xff, 0xff]),
+            "area marker"
+        );
+
+        // Harpy poison: damage over time plus an attack debuff; cold-free so never resisted.
+        let harpy = npc_magic::Spell::resolve(&catalog, 300135).unwrap();
+        let mut strikes = HashMap::new();
+        cast_effect(&brain.players, &mut strikes, &mut 7, &mob, &harpy, 1, false);
+        let hit = strikes[&1][0].spell.clone().unwrap();
+        let (per_tick, duration, _) = hit.dot.unwrap();
+        assert!(per_tick < 0 && duration == u64::from(harpy.duration_s) * 1000);
+        assert_eq!(hit.debuff, harpy.debuff);
+        assert!(hit.debuff.is_some_and(|d| d.duration_ms > 0));
+    }
+    #[test]
     fn lightning_stun_stops_npc_movement_and_attacks_then_expires_without_extending() {
         let game = reko_common::game_dir();
         if !game.join("Data/NPC_Looks.tbl").exists() {
@@ -981,7 +1399,7 @@ mod tests {
         let world = super::super::World::load(&game).unwrap();
         world.load_population(&db, &game).unwrap();
         let mut brain = Brain::default();
-        brain.load(&db).unwrap();
+        brain.load(&db, None).unwrap();
         let now = skills::now_ms();
         let home = world.inner.lock().unwrap().mobs[&12000].position;
         brain.players.insert(
@@ -1096,6 +1514,7 @@ mod tests {
                 npc: 10000,
                 zone: 21,
                 amount: 1000,
+                spell: None,
             }]),
         );
         lobby.monsters = Some(world.clone());
@@ -1116,6 +1535,7 @@ mod tests {
                 npc: 10000,
                 zone: 21,
                 amount: 1000,
+                spell: None,
             }]),
         );
         crate::utility::npc_strikes(&mut socket, peer, &lobby, "test", &mut s, skills::now_ms())
@@ -1140,6 +1560,7 @@ mod tests {
                 npc: 12000,
                 zone: 21,
                 amount: 17,
+                spell: None,
             }]),
         );
         lobby.monsters = Some(world.clone());
@@ -1182,6 +1603,7 @@ mod tests {
                 npc: 12000,
                 zone: 21,
                 amount: 99,
+                spell: None,
             }]),
         );
         crate::utility::npc_strikes(
@@ -1211,6 +1633,7 @@ mod tests {
                 npc: 12000,
                 zone: 21,
                 amount: 17,
+                spell: None,
             }]),
         );
         crate::utility::npc_strikes(
@@ -1241,7 +1664,7 @@ mod tests {
         let world = super::super::World::load(&game).unwrap();
         world.load_population(&db, &game).unwrap();
         let mut brain = Brain::default();
-        brain.load(&db).unwrap();
+        brain.load(&db, None).unwrap();
         let mut mobs = world.inner.lock().unwrap();
         let home = mobs.mobs[&12000].position;
         let mut player = Player {
@@ -1363,6 +1786,8 @@ mod tests {
             trace: 30.0,
             bulk: 1.0,
             direct: 0,
+            magic: 0,
+            mode: 0,
         };
         let mut p = Player {
             name: "test".into(),

@@ -1018,8 +1018,12 @@ impl MagicDamage {
 }
 
 impl World {
-    pub fn load_ai(&self, db: &rusqlite::Connection) -> anyhow::Result<()> {
-        self.ai.lock().unwrap().load(db)
+    pub fn load_ai(
+        &self,
+        db: &rusqlite::Connection,
+        catalog: Option<&crate::skills::Catalog>,
+    ) -> anyhow::Result<()> {
+        self.ai.lock().unwrap().load(db, catalog)
     }
     pub fn observe(&self, s: &crate::world_entry::Session, now: u64) {
         self.ai.lock().unwrap().observe(s, now);
@@ -1425,6 +1429,17 @@ impl World {
             Some(owner),
             || Ok(()),
         )
+    }
+
+    /// HP a monster absorbs or drains from a player with its spell.
+    pub(crate) fn heal(&self, id: u16, zone: u8, amount: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(mob) = inner.mobs.get_mut(&id)
+            && mob.hp > 0
+            && mob.position.zone == zone
+        {
+            mob.hp = mob.hp.saturating_add(amount).min(mob.max_hp);
+        }
     }
 
     pub fn health(&self, id: u16, zone: u8) -> Option<Vec<u8>> {

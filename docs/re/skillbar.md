@@ -42,8 +42,8 @@ saved empty bar does return a zero-count load reply.
 Reconnect and daemon restart preserve the last layout actually received by the
 server. They do not save unsent edits in the client's current bar. The client
 must send a save: exit/log out through its normal menu while the server is still
-running, before stopping/restarting it. Closing a window, losing the connection
-or forcibly stopping the daemon does not guarantee a native79/1 save. Normal
+running. Closing a window, losing the connection or stopping the daemon does not
+guarantee a native79/1 save. Normal
 save/load captures verify persistence, not autosave of every drag/drop operation.
 Logs label replies SKILLBAR_LOAD and
 accepted saves/loads record their character slot and entry count. A native exit
@@ -67,6 +67,6 @@ problem. Restart-time captures show the old saved records returned unchanged.
 Automatic transmission of changed layouts would require a client-side change or
 another independently verified native mechanism. The owner explicitly declined
 a new client modification for this issue. Keep the original/local clients and
-their approved existing remedies unchanged. The supported workflow is ordinary
-menu logout before a planned server shutdown; unexpected disconnects can lose
-unsent edits. Client-related helpers remain excluded from GitHub.
+their approved existing remedies unchanged. This is a development server: it is
+restarted whenever needed, and a restart while a player is online can lose that
+player's unsent skillbar edits. Client-related helpers remain excluded from GitHub.

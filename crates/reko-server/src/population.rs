@@ -190,6 +190,12 @@ pub(crate) fn event_visible(
         }
         return false;
     }
+    // Monster spell packets reach the victim and players who can see the caster.
+    if p.first() == Some(&0x31) && p.len() >= 10 {
+        let caster = u16::from_le_bytes([p[6], p[7]]);
+        let target = u16::from_le_bytes([p[8], p[9]]);
+        return target == session.player_id || session.visible_entities.contains(&caster);
+    }
     if matches!(p.first(), Some(0x22 | 0x11)) && p.len() >= 3 {
         return session
             .visible_entities

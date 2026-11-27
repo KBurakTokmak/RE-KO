@@ -41,7 +41,7 @@ async fn repaired_population_keeps_one_live_rare_boss_and_streams_both_ardream_t
     assert_eq!(scheduler.tick(2000 + 21600000).len(), 14);
     let world = Arc::new(monsters::World::load(&game).unwrap());
     world.load_population(&db, &game).unwrap();
-    world.load_ai(&db).unwrap();
+    world.load_ai(&db, None).unwrap();
     let live = world.spawns(71);
     let live_ids: HashSet<_> = live
         .iter()

@@ -254,11 +254,53 @@ def skill_type1_damage(db, historical, template):
     if db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='MAGIC_TYPE1'").fetchone()[0] < 200:
         raise ValueError('Skill Type1 rules are incomplete.')
 
+
+def monster_magic(db, historical, template):
+    """Primary1453 K_MONSTER byMagicAttack selects when monsters cast iMagic1."""
+    reference = ROOT / 'logs/reference1453/MONSTER_MAGIC.json'
+    if reference.is_file():
+        for row in json.loads(reference.read_text(encoding='utf-8-sig')):
+            key = int(row['sSid'])
+            value = dict(byMagicAttack=int(row['byMagicAttack']))
+            old = db.execute("SELECT data FROM world_reference_rules WHERE table_name='MONSTER_MAGIC' AND rule_id=?", (key,)).fetchone()
+            if old and json.loads(old[0]) != value:
+                raise ValueError(f'Monster magic customization conflicts: {key}.')
+            db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('MONSTER_MAGIC',?,?)", (key, json.dumps(value, sort_keys=True)))
+    else:
+        from_template(db, template, {'world_reference_rules': lambda r: r['table_name'] == 'MONSTER_MAGIC'}, minimum=700)
+    if db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='MONSTER_MAGIC'").fetchone()[0] < 700:
+        raise ValueError('Monster magic rules are incomplete.')
+
+
+def accessory_compound(db, historical, template):
+    """Accessory compound chains; the 1453 data has none, so supplementary 2086 rows
+    supply item chains, costs and scroll. Success rates are an owner rule in code."""
+    reference = ROOT / 'logs/reference2086/ACCESSORY_UPGRADE.json'
+    if reference.is_file():
+        for row in json.loads(reference.read_text(encoding='utf-8-sig')):
+            key = int(row['nIndex'])
+            value = {name: row[name] for name in ('strNote', 'nOriginType', 'nOriginItem', 'nReqItem1', 'nReqNoah', 'nGiveItem', 'nNPCNum')}
+            old = db.execute("SELECT data FROM world_reference_rules WHERE table_name='ACCESSORY_UPGRADE' AND rule_id=?", (key,)).fetchone()
+            if old and json.loads(old[0]) != value:
+                raise ValueError(f'Accessory recipe customization conflicts: {key}.')
+            db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('ACCESSORY_UPGRADE',?,?)", (key, json.dumps(value, sort_keys=True)))
+    elif template and template.is_file() and any(
+            row[0] == 'ACCESSORY_UPGRADE' for row in template_data(template)['tables']['world_reference_rules']['rows']):
+        from_template(db, template, {'world_reference_rules': lambda r: r['table_name'] == 'ACCESSORY_UPGRADE'}, minimum=300)
+    else:
+        # Optional supplementary data: without it the anvil refuses accessory compounds,
+        # but later 1453 migrations must still apply.
+        print('Accessory compound recipes unavailable; accessory compounding stays disabled.')
+        return
+    if db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='ACCESSORY_UPGRADE'").fetchone()[0] < 300:
+        raise ValueError('Accessory compound recipes are incomplete.')
+
 # Append new revisions in order; never rename/replay an already shipped revision.
 MIGRATIONS = ((REVISION, delos), ('002-mage-combat-travel', mage_travel),
               ('003-combat-zone-population', combat_zones), ('004-transformations', transformations),
               ('005-suppression-loot', suppression_loot), ('006-zone-metadata', zone_names),
-              ('007-potion-balance', potion_balance), ('008-skill-type1-damage', skill_type1_damage))
+              ('007-potion-balance', potion_balance), ('008-skill-type1-damage', skill_type1_damage),
+              ('009-monster-magic', monster_magic), ('010-accessory-compound', accessory_compound))
 
 
 def migrate_content(db, historical, template=None):
@@ -349,7 +391,7 @@ def ensure_stopped():
         running = subprocess.check_output(["powershell", "-NoProfile", "-Command",
             "Get-Process | Where-Object ProcessName -eq 'reko-serverd' | Select-Object -ExpandProperty Id"], text=True)
         if running.strip():
-            raise ValueError("Log out normally, then stop RE-KO before database maintenance.")
+            raise ValueError("Stop RE-KO before database maintenance.")
 
 
 def prepare(path, template, server, historical, reset=False):

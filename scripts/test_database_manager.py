@@ -182,6 +182,33 @@ class DatabaseTests(unittest.TestCase):
                 db.execute("DELETE FROM world_reference_rules WHERE table_name='MAGIC_TYPE1'")
                 manager.skill_type1_damage(db, self.historical, None)
 
+    def test_missing_optional_accessory_recipes_do_not_block_later_migrations(self):
+        with manager.connect(self.save) as db:
+            manager.accessory_compound(db, self.historical, None)
+            self.assertEqual(db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='ACCESSORY_UPGRADE'").fetchone()[0], 0)
+
+    def test_monster_magic_and_accessory_rules_are_idempotent_and_refuse_conflicts(self):
+        for folder, name, rows, migrate, category, field in (
+            ("reference1453", "MONSTER_MAGIC.json", [dict(sSid=100 + key, byMagicAttack=key % 6) for key in range(700)],
+             manager.monster_magic, "MONSTER_MAGIC", "byMagicAttack"),
+            ("reference2086", "ACCESSORY_UPGRADE.json",
+             [dict(nIndex=300000 + key, strNote="(+0 -> +1)", nOriginType=18, nOriginItem=10000 + key,
+                   nReqItem1=379159000, nReqNoah=500000, nGiveItem=100, nNPCNum=5001) for key in range(300)],
+             manager.accessory_compound, "ACCESSORY_UPGRADE", "nReqNoah"),
+        ):
+            (self.root / "logs" / folder).mkdir(parents=True, exist_ok=True)
+            (self.root / "logs" / folder / name).write_text(json.dumps(rows), encoding="utf-8")
+            with manager.connect(self.save) as db:
+                migrate(db, self.historical, None)
+                first = db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name=? ORDER BY rule_id", (category,)).fetchall()
+                migrate(db, self.historical, None)
+                self.assertEqual(first, db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name=? ORDER BY rule_id", (category,)).fetchall())
+                self.assertEqual(len(first), len(rows))
+                db.execute("UPDATE world_reference_rules SET data=? WHERE table_name=? AND rule_id=?", (json.dumps({field: 1}), category, first[0][0]))
+            with self.assertRaisesRegex(ValueError, 'conflicts'):
+                with manager.connect(self.save) as db:
+                    migrate(db, self.historical, None)
+
     def run(self, result=None):
         def initialize(arguments, **kwargs):
             path = Path(arguments[-1])

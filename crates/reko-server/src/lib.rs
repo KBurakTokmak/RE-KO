@@ -10,6 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
 mod abyss;
+mod accessory;
 mod admin;
 mod archery;
 mod auth;
@@ -53,6 +54,7 @@ mod merchant;
 mod model_radius;
 mod monsters;
 mod movement;
+mod npc_magic;
 mod npc_scripts;
 mod operator_chat;
 mod party;
@@ -2058,7 +2060,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     let targets = Arc::new(target_world);
     targets.load_population(&lobby.db.lock().unwrap(), &cfg.game_dir)?;
-    targets.load_ai(&lobby.db.lock().unwrap())?;
+    targets.load_ai(&lobby.db.lock().unwrap(), lobby.skills.as_ref())?;
     tokio::spawn(targets.clone().run());
     lobby.monsters = Some(targets);
     let lobby = Arc::new(lobby);

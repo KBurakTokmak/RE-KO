@@ -20,7 +20,7 @@ The common generic weapon recipe using scroll379021000 has these chances:
 Other scrolls and item classes have different recipes. Generate a local report
 with `python scripts/Export-UpgradeRates.py`. Its output
 `docs/re/upgrade-rates.csv` is ignored by Git. A recipe appearing in the report
-does not mean accessory or every special upgrade mode is implemented.
+does not mean every special upgrade mode is implemented.
 
 ## Reverse conversion
 
@@ -48,8 +48,8 @@ the source cost/rate. This extension is an explicit local rule, not a recovered
 retail recipe. Both source and derived results must exist as reverse class4
 items in the imported metadata and original client; low-class weapons without a
 reverse model are refused without consuming anything. No database rows are added.
-Accessory upgrades and full reverse-upgrade recipes outside existing supported
-item kinds remain separate from this conversion fix.
+Full reverse-upgrade recipes outside existing supported item kinds remain
+separate from this conversion fix.
 
 Evidence: primary `GameServer/UpgradeHandler.cpp::ItemUpgrade` uses
 `myrand(0,myrand(9000,10000))`, succeeds when the roll is at most sGenRate,
@@ -58,3 +58,28 @@ Thus sGenRate/100 is a table percentage, not precisely the effective probability
 The report averages min(rate+1,upper+1)/(upper+1) for all upper9000..10000;
 it assumes uniform draws and does not model finite-PRNG correlations/modulo bias.
 Preview always reports success and consumes no resources; it is not a rate test.
+
+## Accessory compounding
+
+The anvil's Upgrade Select window opens the native accessory compound window.
+Its request is `5B 03`, 30 bytes: mode (1 real, 2 preview), anvil NPC, three
+accessory entries and two material entries (item ID and bag slot). Replies use
+subtype3: preview `5B 03 02 01 <result id>`, real attempts `5B 03 01 <0|1>` with
+five entries, refusals `5B 03 <mode> <2|3|4>` (cannot upgrade, coins, mismatch).
+The window stays locked until a subtype3 reply arrives. Evidence: native client
+request builder `004B7AE0` and reply parser `004B7890`.
+
+- Three identical earrings, pendants, rings or belts (item kind91–94, unique
+  extension4/5) and one Accessory Compound Scroll379159000 are required.
+  Enchant scrolls379160000–379164000 are refused until their behavior is known.
+- The1453 data has no accessory recipes. Item chains, costs (500,000 Noah for
+  +0→+1, 240,000 after) and the scroll come from supplementary2086 rows
+  (migration010). A recipe's level is its position in the chain; +5 is the
+  maximum, as later client extension rows only repeat +0 stats.
+- Success rates are an owner rule: +0→+1, +1→+2 and +2→+3 always succeed,
+  +3→+4 succeeds50% and +4→+5 25%. The2086 rows contain only0/100% and are not
+  used for rates.
+- Success replaces the first accessory with the result; the other two and one
+  scroll are consumed. Failure destroys all three accessories and the scroll.
+  Coins are charged either way. Preview consumes nothing.
+
