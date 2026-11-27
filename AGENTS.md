@@ -14,6 +14,7 @@ RE-KO is a Rust server for the original 1453 client, for singleplayer and small 
 - The server owns gameplay and SQLite owns runtime persistence. Validate ownership, costs, scope and repeated requests. Commit transactions before reporting success. Keep administrative grants separate from ordinary defaults.
 - Register persistent data changes with the database manager, keep schema versions aligned, and test fresh creation, upgrades, rollback and repeat runs. Preserve local saves and customizations.
 - Keep gameplay portable and paths configurable. Isolate platform-specific unsafe code and explain its safety. Preserve source attribution.
+- Tracked docs and comments must not name private reference files or paths (supplied server sources, local exports, client dumps); others cannot obtain them. Describe the behavior and its evidence in general terms ("known 1453 server behavior", "native client"). Public sources such as [Open-KO](https://github.com/Open-KO/KnightOnline) may be linked. Many older entries still cite private files; replace them when touching those lines.
 - Keep maintained docs concise. Update existing subsystem notes and remove obsolete reports and broken references. Keep private assets, binaries, databases, captures, credentials, generated research and test output outside Git.
 
 ## Verification and review
@@ -27,7 +28,7 @@ RE-KO is a Rust server for the original 1453 client, for singleplayer and small 
 
 - Agents may work autonomously in this repository. Commit directly to `main`; there are no pull requests until the project is mostly complete.
 - Push after a patch is verified (fmt, tests, clippy, review and any relevant live check), or whenever the owner says to push.
-- Agents may start or restart the local server for live tests (`server_starter.bat` / `server_stopper.bat`). If players are connected, ask them to log out normally first so native skillbars and positions are saved.
+- This is a dev server: agents start, stop and restart it whenever needed without asking (`server_starter.bat` / `server_stopper.bat`). When the owner should test something in-game, just tell them to start or restart the server.
 - There is no handover file. Record durable findings in the relevant subsystem doc and cross-cutting rules here.
 
 ## High-impact gotchas
