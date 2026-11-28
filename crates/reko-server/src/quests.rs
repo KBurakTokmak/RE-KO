@@ -224,6 +224,30 @@ pub(crate) fn kill(
     prototype: u16,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
     let tx = db.unchecked_transaction()?;
+    let packets = kill_in(&tx, account, slot, prototype)?;
+    tx.commit()?;
+    Ok(packets)
+}
+
+/// Opposing-nation player kills count as QUEST_MONSTER target 1 (Karus) or
+/// 2 (El Morad), the victim's nation; no monster prototype uses these IDs.
+pub(crate) fn player_kill(
+    tx: &Connection,
+    account: &str,
+    slot: u8,
+    victim_nation: u8,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    anyhow::ensure!(matches!(victim_nation, 1 | 2), "invalid victim nation");
+    kill_in(tx, account, slot, u16::from(victim_nation))
+}
+
+/// Advances kill counters inside the caller's transaction.
+pub(crate) fn kill_in(
+    tx: &Connection,
+    account: &str,
+    slot: u8,
+    prototype: u16,
+) -> anyhow::Result<Vec<Vec<u8>>> {
     let mut q=tx.prepare("SELECT q.quest,r.data FROM character_quests q JOIN world_reference_rules r ON r.table_name='QUEST_MONSTER' AND r.rule_id=q.quest WHERE q.account=?1 AND q.slot=?2 AND q.state=1 ORDER BY q.quest")?;
     let active = q
         .query_map(params![account, slot], |r| {
@@ -245,18 +269,17 @@ pub(crate) fn kill(
                 continue;
             }
             let cap = n(format!("sCount{group}")).min(255) as u8;
-            let current = counts(&tx, account, slot, quest)?;
+            let current = counts(tx, account, slot, quest)?;
             let count = current[group - 1];
             if count < cap {
                 // Select the native counter context before its ID-less increment.
-                packets.push(monster_snapshot_for(&tx, account, slot, quest)?);
+                packets.push(monster_snapshot_for(tx, account, slot, quest)?);
                 tx.execute("INSERT INTO character_quest_kills VALUES (?1,?2,?3,?4,?5) ON CONFLICT(account,slot,quest,group_id) DO UPDATE SET count=excluded.count",params![account,slot,quest,group,count+1])?;
                 packets.push(vec![0x64, 9, 2, group as u8, count + 1]);
             }
             break;
         }
     }
-    tx.commit()?;
     Ok(packets)
 }
 

@@ -28,7 +28,31 @@ struct Helper {
     class: u8,
     nation: u8,
     file: String,
+    /// The exchange rewards the master job change (1453 `PromoteUser`).
+    promotion: bool,
+    /// The exchange rewards a skill unlock; the flag itself gates master skills.
+    skill_unlock: bool,
 }
+
+/// Ingredient quests whose turn-in saves the re-offer state (4) instead of
+/// completion (2). Supplementary 2086 scripts do this for the master and skill
+/// ingredients; 114/214 (Armband) and 316 (Holy Water of Poison) are included
+/// because 1453 exchanges consume their products twice (master and skill quest).
+const REPEATABLE_QUESTS: &[u16] = &[
+    114, 115, 116, 117, 118, 214, 215, 216, 217, 218, 307, 308, 309, 310, 311, 312, 313, 314, 315,
+    316, 317, 318,
+];
+
+/// Quest items handed over on acceptance. 1453 exchange 87 has no inputs and
+/// yields the Reconnaissance Order for quest 8; supplementary 2086 scripts give
+/// the seven-key order (9) and the Book of Suffering (430) the same way.
+const ACCEPT_ITEMS: &[(u16, u32)] = &[(8, 910044000), (9, 910050000), (430, 910127000)];
+
+/// 1453 `RunExchange` treats these pseudo-items as markers, never bag items.
+const MARKER_ITEMS: &[u32] = &[
+    900004000, 900005000, 900006000, 900007000, 900008000, 900009000, 900010000, 900011000,
+];
+
 fn number(v: &serde_json::Value, key: &str) -> i64 {
     v[key]
         .as_str()
@@ -36,23 +60,72 @@ fn number(v: &serde_json::Value, key: &str) -> i64 {
         .or_else(|| v[key].as_i64())
         .unwrap_or(0)
 }
+/// Parsed helpers keyed by a hash of the raw QUEST_HELPER rows and the
+/// job-change/skill exchanges, so repeated NPC requests skip JSON parsing but
+/// any content change (including tests that edit rules) reloads them.
+type HelperCache = Option<(u64, std::sync::Arc<Vec<Helper>>)>;
+static HELPER_CACHE: std::sync::Mutex<HelperCache> = std::sync::Mutex::new(None);
+
 fn helpers(db: &Connection) -> anyhow::Result<Vec<Helper>> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut q = db.prepare_cached("SELECT table_name,rule_id,data FROM world_reference_rules WHERE table_name='QUEST_HELPER' OR (table_name='ITEM_EXCHANGE' AND (data LIKE '%900006000%' OR data LIKE '%900007000%')) ORDER BY table_name,rule_id")?;
+    let mut rows = q.query([])?;
+    while let Some(row) = rows.next()? {
+        row.get_ref(0)?.as_str()?.hash(&mut hasher);
+        row.get::<_, i64>(1)?.hash(&mut hasher);
+        row.get_ref(2)?.as_str()?.hash(&mut hasher);
+    }
+    drop(rows);
+    drop(q);
+    let key = hasher.finish();
+    if let Some((cached, list)) = HELPER_CACHE.lock().unwrap().as_ref()
+        && *cached == key
+    {
+        return Ok(list.as_ref().clone());
+    }
+    let list = load_helpers(db)?;
+    *HELPER_CACHE.lock().unwrap() = Some((key, std::sync::Arc::new(list.clone())));
+    Ok(list)
+}
+
+fn load_helpers(db: &Connection) -> anyhow::Result<Vec<Helper>> {
+    let mut special = HashMap::<u32, (bool, bool)>::new();
+    let mut q = db.prepare("SELECT rule_id,data FROM world_reference_rules WHERE table_name='ITEM_EXCHANGE' AND (data LIKE '%900006000%' OR data LIKE '%900007000%')")?;
+    for row in q.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))? {
+        let (id, text) = row?;
+        let v: serde_json::Value = serde_json::from_str(&text)?;
+        let rewards: Vec<i64> = (1..=5)
+            .map(|i| number(&v, &format!("nExchangeItemNum{i}")))
+            .collect();
+        special.insert(
+            id,
+            (rewards.contains(&900006000), rewards.contains(&900007000)),
+        );
+    }
+    drop(q);
     let mut q=db.prepare("SELECT rule_id,data FROM world_reference_rules WHERE table_name='QUEST_HELPER' ORDER BY rule_id")?;
     let mut out = Vec::new();
     for row in q.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))? {
         let (id, text) = row?;
         let v: serde_json::Value = serde_json::from_str(&text)?;
+        let exchange = number(&v, "nExchangeIndex") as u32;
+        let level = number(&v, "bLevel") as u8;
+        let (job_change, skill_unlock) = special.get(&exchange).copied().unwrap_or_default();
         out.push(Helper {
             id,
+            // The level-10 Kaishan change is the novice step (PromoteUserNovice).
+            promotion: job_change && level >= 60,
+            skill_unlock,
             npc: number(&v, "sNpcId") as u16,
             event: number(&v, "nEventTriggerIndex") as i32,
             complete: number(&v, "nEventCompleteIndex") as i32,
-            exchange: number(&v, "nExchangeIndex") as u32,
+            exchange,
             talk: number(&v, "nEventTalkIndex") as i32,
             kind: number(&v, "bQuestType") as u8,
             flag: number(&v, "sEventDataIndex") as u16,
             status: number(&v, "bEventStatus") as u8,
-            level: number(&v, "bLevel") as u8,
+            level,
             experience: number(&v, "nExp") as u32,
             class: number(&v, "bClass") as u8,
             nation: number(&v, "bNation") as u8,
@@ -62,6 +135,18 @@ fn helpers(db: &Connection) -> anyhow::Result<Vec<Helper>> {
                 .trim()
                 .to_string(),
         });
+    }
+    // List entries (status 255) carry no exchange; they share their flag's gate.
+    let gated: HashMap<u16, (bool, bool)> = out
+        .iter()
+        .filter(|h| h.flag > 0 && (h.promotion || h.skill_unlock))
+        .map(|h| (h.flag, (h.promotion, h.skill_unlock)))
+        .collect();
+    for h in &mut out {
+        if let Some(&(promotion, skill_unlock)) = gated.get(&h.flag) {
+            h.promotion |= promotion;
+            h.skill_unlock |= skill_unlock;
+        }
     }
     Ok(out)
 }
@@ -77,6 +162,15 @@ fn eligible(h: &Helper, s: &Session) -> bool {
         && (h.class == 5 || h.class == 0 || h.class == job)
         && (h.level < s.progress.level
             || (h.level == s.progress.level && h.experience <= s.rewards.experience))
+}
+/// Offers additionally require the class stage: master promotion needs a
+/// novice and skill unlocks a master. Quests already held stay cancellable
+/// and completable through `eligible`.
+fn offerable(h: &Helper, s: &Session) -> bool {
+    let stage = s.character.class % 100;
+    eligible(h, s)
+        && (!h.promotion || matches!(stage, 5 | 7 | 9 | 11))
+        && (!h.skill_unlock || matches!(stage, 6 | 8 | 10 | 12))
 }
 fn open_state(status: u8, state: u8) -> bool {
     match status {
@@ -95,7 +189,52 @@ fn castle_quest_greeting(npc: u16) -> Option<i32> {
     }
 }
 
-fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper, s: &Session) -> &'a Helper {
+/// Resolves a native quest-list request to the helper that serves the saved
+/// state. The native client sends the status-255 list entry (captured `64 03`
+/// requests name such entries), so any list entry, or a helper whose status no
+/// longer matches the save, maps to the same NPC and flag's offer (state 0/4),
+/// active check (1/3) or completion (2) helper when that helper is a
+/// synthesized data quest. Other helpers keep their own reference script.
+fn entry_helper<'a>(all: &'a [Helper], h: &'a Helper, s: &Session, state: u8) -> &'a Helper {
+    let special = entry_helper_special(all, h, s);
+    if (!std::ptr::eq(special, h) && open_state(special.status, state))
+        || h.flag == 0
+        || (h.status != 255 && open_state(h.status, state))
+    {
+        return special;
+    }
+    let wanted: &[u8] = match state {
+        0 | 4 => &[0, 4],
+        1 | 3 => &[state, 1, 3],
+        2 => &[2],
+        _ => &[],
+    };
+    wanted
+        .iter()
+        .find_map(|status| {
+            all.iter().find(|other| {
+                other.npc == h.npc
+                    && other.flag == h.flag
+                    && other.status == *status
+                    && if matches!(state, 0 | 4) {
+                        offerable(other, s)
+                    } else {
+                        eligible(other, s)
+                    }
+                    && database_quest_script(
+                        all,
+                        &Context {
+                            helper: other.id,
+                            ..Context::default()
+                        },
+                    )
+                    .is_some()
+            })
+        })
+        .unwrap_or(h)
+}
+
+fn entry_helper_special<'a>(all: &'a [Helper], h: &'a Helper, s: &Session) -> &'a Helper {
     if h.status == 255
         && (castle_quest_greeting(h.npc).is_some()
             || matches!((h.npc, h.flag), (24406, 813 | 836) | (14406, 814 | 835)))
@@ -200,6 +339,27 @@ end
             && other.nation == h.nation
             && other.status == 2
     })?;
+    // Repeatable ingredients return to the re-offer state after each turn-in.
+    let done = if REPEATABLE_QUESTS.contains(&h.flag) {
+        all.iter()
+            .find(|other| {
+                other.flag == h.flag
+                    && other.npc == h.npc
+                    && other.class == h.class
+                    && other.nation == h.nation
+                    && other.status == 4
+            })
+            .unwrap_or(done)
+    } else {
+        done
+    };
+    let accept_item = ACCEPT_ITEMS
+        .iter()
+        .find(|(flag, _)| *flag == h.flag)
+        .map_or_else(String::new, |(_, item)| {
+            format!("if HowmuchItem(UID,{item})==0 then GiveItem(UID,{item},1) end;")
+        });
+    let promote = if h.promotion { "PromoteUser(UID);" } else { "" };
     let suppression = matches!(h.npc, 11510 | 21510) && matches!(h.flag, 603 | 605);
     let enter = if suppression {
         "EnterSuppression(UID)"
@@ -223,12 +383,12 @@ end
             r#"
 local status=GetQuestStatus(UID,{flag})
 if EVENT==2147483001 then
-    if status==0 or status==4 then SaveEvent(UID,{active}); {enter}; end
+    if status==0 or status==4 then SaveEvent(UID,{active}); {accept_item} {enter}; end
 elseif EVENT==2147483004 then
     if status==1 or status==3 then {enter}; end
 elseif EVENT==2147483002 then
     if (status==1 or status==3) and CheckQuestExchange(UID,{exchange}) then
-        RunQuestExchange(UID,{exchange}); SaveEvent(UID,{done});
+        RunQuestExchange(UID,{exchange}); {promote} SaveEvent(UID,{done});
     end
 elseif EVENT~=2147483003 then
     if status==0 or status==4 then
@@ -251,7 +411,9 @@ end
             talk = h.talk,
             npc = h.npc,
             enter = enter,
-            incomplete = incomplete
+            incomplete = incomplete,
+            accept_item = accept_item,
+            promote = promote
         )
         .into_bytes(),
     )
@@ -268,6 +430,20 @@ struct Changes {
     context: Context,
 }
 impl Changes {
+    /// A disposable copy for capacity previews.
+    fn scratch(&self) -> Changes {
+        Changes {
+            travel: None,
+            rewards: self.rewards.clone(),
+            level_state: None,
+            class: None,
+            bag: self.bag,
+            coins: self.coins,
+            quests: HashMap::new(),
+            packets: Vec::new(),
+            context: Context::default(),
+        }
+    }
     fn count(&self, id: u32) -> u32 {
         if id == 900000000 {
             self.coins
@@ -304,11 +480,12 @@ impl Changes {
     }
     fn give(&mut self, c: &combat::Catalog, id: u32, mut quantity: u32) -> anyhow::Result<()> {
         anyhow::ensure!(quantity > 0, "invalid item quantity");
-        // Skill unlocks are represented by completing the quest flag.
-        if id == 900007000 {
+        if self.rewards.gain(id, quantity)? {
             return Ok(());
         }
-        if self.rewards.gain(id, quantity)? {
+        // Skill unlocks and job changes are represented by the quest flag and
+        // `PromoteUser`; 1453 never places these markers in the bag.
+        if MARKER_ITEMS.contains(&id) {
             return Ok(());
         }
         if id == 900000000 {
@@ -370,7 +547,7 @@ fn objectives_met(
             continue;
         }
         if count == 0
-            || if item == 900005000 {
+            || if matches!(item, 900005000 | 900008000) {
                 !crate::quests::fulfilled(db, account, slot, &state.quests, count as u16)?
             } else {
                 state.count(item) < count
@@ -480,7 +657,8 @@ fn exchange(
         let id = number(&v, &format!("nOriginItemNum{i}")) as u32;
         let count = number(&v, &format!("nOriginItemCount{i}")) as u32;
         if id != 0 {
-            if id == 900005000 {
+            if matches!(id, 900005000 | 900008000) {
+                // Monster (5) and opposing-nation player (8) kill objectives.
                 anyhow::ensure!(
                     crate::quests::fulfilled(db, owner.0, owner.1, &state.quests, count as u16)?,
                     "monster objective incomplete"
@@ -852,7 +1030,7 @@ fn execute(
                         && h.status < 5 && h.status != 2
                         && (!castle_quests || h.exchange != 0 && h.talk > 0)
                         && h.level <= s.progress.level
-                        && eligible(h, s)
+                        && offerable(h, s)
                         && open_state(h.status, *st.quests.get(&h.flag).unwrap_or(&0))
                 }) {
                     2
@@ -1096,6 +1274,45 @@ fn execute(
             let c=lobby.combat.as_ref().ok_or_else(||mlua::Error::runtime("item catalog unavailable"))?;
             let (bag,coins,rewards)=exchange(&tx,(account,s.character.slot),c,&state.borrow(),*a.get(1).unwrap_or(&0) as u32,false,Some(action.1)).map_err(mlua::Error::external)?;
             let mut st=state.borrow_mut();st.bag=bag;st.coins=coins;st.rewards=rewards;Ok(true)
+        });
+        // Reference scripts use the selection variant for fixed 1453 exchanges.
+        function!("RunSelectExchange", |_,a:Variadic<i64>| {
+            let c=lobby.combat.as_ref().ok_or_else(||mlua::Error::runtime("item catalog unavailable"))?;
+            let (bag,coins,rewards)=exchange(&tx,(account,s.character.slot),c,&state.borrow(),*a.get(1).unwrap_or(&0) as u32,false,Some(action.1)).map_err(mlua::Error::external)?;
+            let mut st=state.borrow_mut();st.bag=bag;st.coins=coins;st.rewards=rewards;Ok(true)
+        });
+        function!("isRoomForItem", |_,a:Variadic<i64>| {
+            let c=lobby.combat.as_ref().ok_or_else(||mlua::Error::runtime("item catalog unavailable"))?;
+            let id=u32::try_from(*a.get(1).unwrap_or(&0)).unwrap_or(0);
+            let count=u32::try_from(*a.get(2).unwrap_or(&1)).unwrap_or(0);
+            Ok(if id!=0 && state.borrow().scratch().give(c,id,count).is_ok() {0} else {-1})
+        });
+        function!("CheckSkillPoint", |_,a:Variadic<i64>| {
+            let category=usize::try_from(*a.get(1).unwrap_or(&0)).unwrap_or(usize::MAX);
+            Ok(state.borrow().rewards.progress.points.get(category).copied().unwrap_or(0))
+        });
+        function!("CheckLoyalty", |_, _: Variadic<i64>| Ok(state.borrow().rewards.totals.loyalty));
+        function!("CheckKnight", |_, _: Variadic<i64>| Ok(0));
+        function!("CheckClanGrade", |_, _: Variadic<i64>| Ok(0));
+        // 1453 QuestHandler PromoteUser: novice 5/7/9/11 -> master 6/8/10/12,
+        // then the base-class flag (1..4) is saved as completed.
+        function!("PromoteUser", |_, _: Variadic<i64>| {
+            let mut st=state.borrow_mut();
+            let helper=all.iter().find(|h|h.id==st.context.helper && h.promotion && h.npc==merchant.prototype)
+                .ok_or_else(||mlua::Error::runtime("master promotion unavailable"))?;
+            let stage=s.character.class%100;
+            if !matches!(stage,5|7|9|11) || !eligible(helper,s) || st.class.is_some()
+                || !matches!(st.quests.get(&helper.flag),Some(1|3)) {
+                return Err(mlua::Error::runtime("master promotion unavailable"));
+            }
+            st.class=Some(s.character.class/100*100+stage+1);
+            let base=stage/2-1;
+            st.quests.insert(base,2);
+            let mut p=vec![0x64,2];
+            p.extend(base.to_le_bytes());
+            p.push(2);
+            st.packets.push(p);
+            Ok(true)
         });
         let filename = state.borrow().context.file.clone();
         lua.load(script).set_name(filename).exec()
@@ -1346,9 +1563,13 @@ pub(crate) async fn handle(
                             }
                     })
                     .ok_or_else(|| anyhow::anyhow!("no compatible NPC event"))?;
-                let h = entry_helper(&all, h, s);
+                let state=lobby.db.lock().unwrap().query_row("SELECT COALESCE((SELECT state FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3),0)",params![account,s.character.slot,h.flag],|r|r.get::<_,u8>(0))?;
+                let h = entry_helper(&all, h, s, state);
+                anyhow::ensure!(
+                    h.flag == 0 || !matches!(state, 0 | 4) || offerable(h, s),
+                    "quest needs another class stage"
+                );
                 if requested != 0 && h.flag != 0 {
-                    let state=lobby.db.lock().unwrap().query_row("SELECT COALESCE((SELECT state FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3),0)",params![account,s.character.slot,h.flag],|r|r.get::<_,u8>(0))?;
                     anyhow::ensure!(open_state(h.status, state), "quest state mismatch");
                 }
                 (
@@ -1411,7 +1632,12 @@ pub(crate) async fn handle(
                     .iter()
                     .find(|h| h.id == id && h.level <= s.progress.level && eligible(h, s))
                     .ok_or_else(|| anyhow::anyhow!("invalid quest helper"))?;
-                let h = entry_helper(&all, h, s);
+                let state=lobby.db.lock().unwrap().query_row("SELECT COALESCE((SELECT state FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3),0)",params![account,s.character.slot,h.flag],|r|r.get::<_,u8>(0))?;
+                let h = entry_helper(&all, h, s, state);
+                anyhow::ensure!(
+                    h.flag == 0 || !matches!(state, 0 | 4) || offerable(h, s),
+                    "quest needs another class stage"
+                );
                 let merchant = lobby
                     .merchants
                     .iter()
@@ -1427,7 +1653,6 @@ pub(crate) async fn handle(
                         "quest was not offered"
                     );
                 }
-                let state=lobby.db.lock().unwrap().query_row("SELECT COALESCE((SELECT state FROM character_quests WHERE account=?1 AND slot=?2 AND quest=?3),0)",params![account,s.character.slot,h.flag],|r|r.get::<_,u8>(0))?;
                 anyhow::ensure!(
                     h.flag == 0
                         || if p[1] == 4 {
@@ -1510,7 +1735,13 @@ pub(crate) async fn handle(
                 let mut packet = vec![0x34, 6];
                 packet.extend(class.to_le_bytes());
                 packet.extend(s.player_id.to_le_bytes());
-                super::send_response(sock, peer, &None, &packet, "FIRST_JOB_CHANGE").await;
+                super::send_response(sock, peer, &None, &packet, "JOB_CHANGE").await;
+                // 1453 sends the class change to the region, then refreshes the hub copy.
+                let mut hub = lobby.social.lock().unwrap();
+                hub.broadcast_visual(s.player_id, None, None, &packet);
+                if let Some(player) = hub.players.get_mut(&s.player_id) {
+                    player.s.character.class = class;
+                }
             }
             if result.rewards.max_exp > 0 {
                 s.max_exp = result.rewards.max_exp;
@@ -3117,3 +3348,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quest_walkthrough_tests.rs"]
+mod quest_walkthrough_tests;

@@ -187,6 +187,23 @@ class DatabaseTests(unittest.TestCase):
             manager.accessory_compound(db, self.historical, None)
             self.assertEqual(db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='ACCESSORY_UPGRADE'").fetchone()[0], 0)
 
+    def test_quest_corrections_fix_lich_target_reopen_repeatables_and_refuse_conflicts(self):
+        with manager.connect(self.save) as db:
+            db.execute("CREATE TABLE character_quests(account TEXT,slot INTEGER,quest INTEGER,state INTEGER)")
+            db.executemany("INSERT INTO character_quests VALUES('a',0,?,?)", [(118, 2), (51, 2), (316, 1)])
+            row = dict(sQuestNum='883', sNum1a='4501', sNum1b='1551', sCount1='10')
+            db.execute("INSERT INTO world_reference_rules VALUES('QUEST_MONSTER',883,?)", (json.dumps(row),))
+            for _ in range(2):
+                manager.quest_corrections(db, None, None)
+            data = json.loads(db.execute("SELECT data FROM world_reference_rules WHERE rule_id=883").fetchone()[0])
+            self.assertEqual((data['sNum1a'], data['sNum1b'], data['sCount1']), ('4501', '4551', '10'))
+            states = dict(db.execute("SELECT quest,state FROM character_quests"))
+            self.assertEqual(states, {118: 4, 51: 2, 316: 1})
+            data['sNum1b'] = '9999'
+            db.execute("UPDATE world_reference_rules SET data=? WHERE rule_id=883", (json.dumps(data),))
+            with self.assertRaises(ValueError):
+                manager.quest_corrections(db, None, None)
+
     def test_monster_magic_and_accessory_rules_are_idempotent_and_refuse_conflicts(self):
         for folder, name, rows, migrate, category, field in (
             ("reference1453", "MONSTER_MAGIC.json", [dict(sSid=100 + key, byMagicAttack=key % 6) for key in range(700)],

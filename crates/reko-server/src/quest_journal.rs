@@ -5,11 +5,47 @@ use rusqlite::params;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
-fn guide() -> Vec<Vec<CellValue>> {
-    std::fs::read(reko_common::game_dir().join("Data/Quest_guide_us.tbl"))
+fn table(name: &str) -> Vec<Vec<CellValue>> {
+    std::fs::read(reko_common::game_dir().join("Data").join(name))
         .ok()
         .and_then(|b| Table::from_encrypted_bytes(&b).ok())
         .map_or_else(Vec::new, |t| t.rows)
+}
+
+/// Quest_guide_us.tbl column 0 is a guide ID, not a quest flag. The client
+/// Quest_Helper_us.tbl links them: column 9 is the flag, 16 the guide ID and
+/// 4/5 the class/nation, so pick the guide shown to this character's variant.
+fn guide_row<'a>(
+    guide: &'a [Vec<CellValue>],
+    helpers: &[Vec<CellValue>],
+    s: &Session,
+    id: u16,
+) -> Option<&'a [CellValue]> {
+    let job = match s.character.class % 100 {
+        1 | 5 | 6 => 1,
+        2 | 7 | 8 => 2,
+        3 | 9 | 10 => 3,
+        4 | 11 | 12 => 4,
+        _ => 0,
+    };
+    let nation = i32::from(s.character.nation());
+    let mut ids: Vec<(bool, i32)> = helpers
+        .iter()
+        .filter(|r| combat::integer(r, 9) == i32::from(id) && combat::integer(r, 16) > 0)
+        .map(|r| {
+            let class = combat::integer(r, 4);
+            let side = combat::integer(r, 5);
+            let own = (class == 5 || class == job) && (side == 3 || side == nation);
+            (!own, combat::integer(r, 16))
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.iter().find_map(|&(_, guide_id)| {
+        guide
+            .iter()
+            .find(|r| combat::integer(r, 0) == guide_id)
+            .map(Vec::as_slice)
+    })
 }
 fn text(row: &[CellValue], column: usize) -> &str {
     match row.get(column) {
@@ -31,11 +67,10 @@ fn lines(
             Ok((r.get::<_, u16>(0)?, r.get::<_, u8>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let guide = guide();
+    let guide = table("Quest_guide_us.tbl");
+    let helpers = table("Quest_Helper_us.tbl");
     let title = |id: u16| {
-        guide
-            .iter()
-            .find(|r| combat::integer(r, 2) == i32::from(id))
+        guide_row(&guide, &helpers, s, id)
             .map(|r| text(r, 3))
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
@@ -76,10 +111,7 @@ fn lines(
         title(id),
         if state == 3 { "Ready" } else { "Accepted" }
     )];
-    if let Some(row) = guide
-        .iter()
-        .find(|r| combat::integer(r, 2) == i32::from(id))
-    {
+    if let Some(row) = guide_row(&guide, &helpers, s, id) {
         let description = text(row, 5).replace(['\r', '\n'], " ");
         // Keep each native chat line bounded while preserving the original description.
         let words = description.split_whitespace().collect::<Vec<_>>();
@@ -176,6 +208,24 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn journal_titles_follow_the_client_helper_guide_column() {
+        if !reko_common::game_dir()
+            .join("Data/Quest_Helper_us.tbl")
+            .exists()
+        {
+            return;
+        }
+        let lobby = crate::social::tests::lobby();
+        let s = crate::social::tests::player(&lobby, "Guide", 1, 80);
+        let guide = table("Quest_guide_us.tbl");
+        let helpers = table("Quest_Helper_us.tbl");
+        let title = |id| guide_row(&guide, &helpers, &s, id).map(|r| text(r, 3).to_owned());
+        // Guide 415 belongs to quest 9; quest flag 415 is the clan promotion.
+        assert_eq!(title(9).as_deref(), Some("Guardian of 7 Keys"));
+        assert_ne!(title(415).as_deref(), Some("Guardian of 7 Keys"));
+        assert_eq!(title(101).as_deref(), Some("Worm hunt"));
+    }
     #[tokio::test]
     async fn private_journal_cancels_only_the_selected_owned_active_quest() {
         let lobby = crate::social::tests::lobby();

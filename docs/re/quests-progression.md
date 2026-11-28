@@ -42,7 +42,9 @@ remains the reward when its extension is present.
 In ordinary chat, type `quests` (or `quests 2` for the next page) to privately
 list this character's accepted/ready quests, eight per page. `quest <ID>` shows
 the original Quest_guide_us.tbl title/accepted description and independent
-monster counters. Quests without a matching guide title retain their numeric
+monster counters. The guide row comes from the client Quest_Helper_us.tbl
+guide column (16) for the character's class and nation; guide IDs are not quest
+flags. Quests without a matching guide title retain their numeric
 ID. Completed, abandoned and internal32000+ flags are excluded.
 
 `questcancel <ID>` abandons an active ordinary quest using the same native
@@ -194,7 +196,81 @@ earned points/items/XP, then send native3406/class:u16/player:u16 to refresh
 skill UI (006C5450). Verified native menu text IDs are4064prompt,4062confirm,
 4063decline,4065fee failure,4068already,4069low level,4066/4067nation success.
 
-High-level skill gates use persisted completed quest flags. Admin fixture
-unlock scripts are separate from normal quest completion; mastery and specialist
-unlock chains are not all implemented. Consult the feature backlog before
-claiming an entire NPC or class is complete.
+High-level skill gates use persisted completed quest flags
+(`Skill_Magic_Main_us.tbl` column 29). Admin fixture unlocks stay separate.
+
+## Master promotion and skill-unlock chains
+
+Quest 408 (level 60) runs at each nation's class master: Skaki, Clarence, Drake
+and Minerva (24201-24204 in Luferson, 14201-14204 in El Morad). Exchanges
+461-464 take the class items. Turn-in follows known 1453 server
+`PromoteUser` behavior in one transaction:
+
+- Novice 5/7/9/11 becomes master 6/8/10/12 in the same nation.
+- Base-class flag 1-4 and quest 408 are saved as completed.
+- The native class packet is `34 06 class:u16 player:u16`, sent to the player
+  and to visible players in the region.
+
+The job-change (900006000) and skill (900007000) rewards are markers, as in 1453
+`RunExchange`, and never enter the bag. A 408 offer needs a novice. Offers whose
+exchange unlocks skills (51-54, 510-523) need a master. Quests already held
+stay cancellable and completable. Master skill points
+(branch 8) open after promotion.
+
+Ingredient quests 114-118, 214-218 and 307-318 are repeatable. Each turn-in
+returns the quest to the re-offer state (4), so Magic Jewel Powder (quest
+118/218, exchange 41) and the stamps, nostrums and scrolls can be crafted as
+often as the skill quests consume them. Supplementary 2086 scripts save state 4
+for these quests. 114/214 (Armband) and 316 (Holy Water of Poison) are a local
+rule: 1453 exchanges consume their products in both 408 and a skill quest.
+Migration 012 reopens these quests on saves that completed them under the old
+one-shot rule.
+
+## Native list entries and generic quest steps
+
+The native client sends the status-255 list entry helper in `64 03`/`64 06`
+(confirmed by captured requests). For every data-synthesized quest, the server
+maps that entry, or a helper whose status no longer matches the save, to the
+same NPC and flag helper for the saved state: offer (0/4), active (1/3) or done
+(2). Other NPCs keep their reference scripts.
+
+- **Accept-side items:** accepting quest 8 gives the Reconnaissance Order
+  (1453 exchange 87 has no inputs), quest 9 the Order of seven key and quest 430
+  the Book of Suffering (supplementary 2086 scripts). An item already held is
+  not duplicated.
+- **Exchange steps (type 3):** the seven key sentinels (416-422), the suffering
+  watchers (431-437) and the Recons (137/237) use their reference scripts with the
+  bound `isRoomForItem`. The level-50 chain is: accept 9, swap keys 1 to 7, then
+  hand the Seventh key to Fargo or Falkwine (15,218,948 XP).
+- **PvP objectives:** quests 438/439/442/443 count opposing-nation player kills
+  (QUEST_MONSTER target 1 or 2 is the victim's nation; `900008000` is the
+  objective). Direct PvP kills count. Arena deaths do not count, as in 1453.
+  Damage-over-time kills do not count yet.
+- **Bound script functions:** `PromoteUser` (only for the 408 helper), `isRoomForItem`,
+  `CheckSkillPoint`, `RunSelectExchange` (runs a fixed 1453 exchange),
+  `CheckLoyalty`, and stubs for `CheckKnight` and `CheckClanGrade`.
+- **Quest 883:** the data names nonexistent prototype 1551. Its Karus twin, quest
+  882, uses the spawned LICH 4551, so migration 012 corrects the target.
+
+`quest_walkthrough_tests.rs` walks every synthesized quest variant from the
+native list entry through acceptance, kills, items, turn-in, rewards and replay.
+It also covers the four class chains from novice to every skill quest, crafted
+only from raw drops, plus the key, suffering, reconnaissance and PvP chains.
+
+## Remaining quest gaps
+
+These need evidence or an owner decision before they can be implemented:
+
+- **No item source in 1453 data:** Teeth of Bandicoot (102), El Morad Symbol
+  (69), Secret Scrolls (63/64), Proof of Orc Bandit Boss (600), Black silk spool
+  (125/225), Rotten Eye (564), Ork Talisman (569) and Prayer of favors (412).
+- **Moira's treasure chests (402, 409, 448, 557):** need `RunCountExchange`,
+  `GetMaxExchange` and `RollDice`, and the chests have no drop source.
+- **Helena and Murka's holy water (400, 410-412):** the reference events are
+  incomplete.
+- **Kaishan's redistribution (407):** needs the stat and skill reset (PROG-02).
+- **Heppa crafting (130, 141, 146):** rewards are absent from 1453 ITEM.
+- **Other unsynthesized quests:** Rothen (423/424), Laek (445), alternate
+  suppression flags 602/604/606/608, and NPCs that are not populated (525,
+  537-544, Prisia event 574-578).
+- **Out of scope:** Hemes name services and client-only quests 529-535/701/702.

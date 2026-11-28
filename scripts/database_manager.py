@@ -332,13 +332,36 @@ def world_events(db, historical, template):
     for key, value in EVENT_SCHEDULE.items():
         db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('EVENT_SCHEDULE',?,?)", (key, json.dumps(value, sort_keys=True)))
 
+
+# Quest flags whose turn-in now returns to the re-offer state (4), mirrored from
+# npc_scripts.rs REPEATABLE_QUESTS.
+REPEATABLE_QUESTS = (114, 115, 116, 117, 118, 214, 215, 216, 217, 218, 307, 308, 309, 310, 311,
+                     312, 313, 314, 315, 316, 317, 318)
+
+
+def quest_corrections(db, historical, template):
+    """Quest 883 names LICH 4501 and nonexistent prototype 1551; its Karus twin
+    882 uses the spawned LICH 4551, so 1551 is read as 4551. Repeatable ingredient
+    quests completed under the earlier one-shot rule return to state 4."""
+    row = db.execute("SELECT data FROM world_reference_rules WHERE table_name='QUEST_MONSTER' AND rule_id=883").fetchone()
+    if row:
+        data = json.loads(row[0])
+        if str(data.get('sNum1b')) == '1551':
+            data['sNum1b'] = '4551'
+            db.execute("UPDATE world_reference_rules SET data=? WHERE table_name='QUEST_MONSTER' AND rule_id=883", (json.dumps(data),))
+        elif str(data.get('sNum1b')) != '4551':
+            raise ValueError('Quest 883 target customization conflicts.')
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='character_quests'").fetchone():
+        marks = ','.join('?' * len(REPEATABLE_QUESTS))
+        db.execute(f"UPDATE character_quests SET state=4 WHERE state=2 AND quest IN ({marks})", REPEATABLE_QUESTS)
+
 # Append new revisions in order; never rename/replay an already shipped revision.
 MIGRATIONS = ((REVISION, delos), ('002-mage-combat-travel', mage_travel),
               ('003-combat-zone-population', combat_zones), ('004-transformations', transformations),
               ('005-suppression-loot', suppression_loot), ('006-zone-metadata', zone_names),
               ('007-potion-balance', potion_balance), ('008-skill-type1-damage', skill_type1_damage),
               ('009-monster-magic', monster_magic), ('010-accessory-compound', accessory_compound),
-              ('011-world-events', world_events))
+              ('011-world-events', world_events), ('012-quest-corrections', quest_corrections))
 
 
 def migrate_content(db, historical, template=None):

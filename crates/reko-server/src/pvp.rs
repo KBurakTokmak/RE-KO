@@ -416,6 +416,7 @@ pub(crate) fn hit_player(
         reflected: Option<ReflectOutcome>,
         killer_np: Option<(u32, u32)>,
         victim_np: Option<(u32, u32)>,
+        quest_packets: Vec<Vec<u8>>,
     }
 
     let result = (|| -> anyhow::Result<HitOutcome> {
@@ -584,8 +585,37 @@ pub(crate) fn hit_player(
             }
         }
 
+        // Opposing-nation kills advance "kill opponent country" quests.
+        // 1453 skips arena deaths; a failed credit never undoes the kill.
+        let quest_packets = if dead
+            && caster.character.nation() != target_player.s.character.nation()
+            && caster.position.zone != crate::challenge::ZONE_ARENA
+        {
+            // A savepoint keeps partial counter writes from committing with the kill.
+            tx.execute_batch("SAVEPOINT pvp_quest_credit")?;
+            match crate::quests::player_kill(
+                &tx,
+                attacker_account,
+                caster.character.slot,
+                target_player.s.character.nation(),
+            ) {
+                Ok(packets) => {
+                    tx.execute_batch("RELEASE pvp_quest_credit")?;
+                    packets
+                }
+                Err(error) => {
+                    tracing::error!(%error, "PvP quest progress could not be saved");
+                    tx.execute_batch("ROLLBACK TO pvp_quest_credit; RELEASE pvp_quest_credit")?;
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         tx.commit()?;
         Ok(HitOutcome {
+            quest_packets,
             next,
             actual,
             dead,
@@ -610,6 +640,7 @@ pub(crate) fn hit_player(
         reflected,
         killer_np,
         victim_np,
+        quest_packets,
     } = match result {
         Ok(ok) => ok,
         Err(_) => return Err("The target is unavailable."),
@@ -707,6 +738,9 @@ pub(crate) fn hit_player(
 
     if dead {
         hub.player_died(target_id);
+    }
+    for packet in quest_packets {
+        hub.send(caster.player_id, packet);
     }
 
     if let Some((loyalty, monthly)) = killer_np {
@@ -1153,6 +1187,16 @@ mod tests {
                 y: 0,
             };
         }
+        // Karus kill-opponent quest 438 counts El Morad (nation 2) victims.
+        lobby
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                r#"INSERT INTO world_reference_rules VALUES('QUEST_MONSTER',438,'{"sNum1a":"2","sCount1":"30"}');
+                INSERT INTO character_quests VALUES('k1',0,438,1);"#,
+            )
+            .unwrap();
         let hit = hit_player(
             &lobby,
             "k1",
@@ -1171,6 +1215,26 @@ mod tests {
         );
         let saved_hp = skills::load(&lobby.db.lock().unwrap(), "e1", 0).unwrap().hp;
         assert_eq!(u32::from(saved_hp), 500u32.saturating_sub(hit.damage));
+
+        if !hit.dead {
+            let finish = hit_player(
+                &lobby,
+                "k1",
+                &k,
+                e.player_id,
+                make_atk(k.position),
+                false,
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            assert!(finish.dead);
+        }
+        // 1453 never credits arena deaths to kill-opponent quests.
+        assert_eq!(
+            crate::quests::counts(&lobby.db.lock().unwrap(), "k1", 0, 438).unwrap(),
+            [0; 4]
+        );
 
         // Colony Zone (71) kill awards +50 NP to killer and -25 NP to victim,
         // clears ordinary buffs, and preserves item-backed scroll buffs.
@@ -1195,6 +1259,8 @@ mod tests {
                 },
             );
             skills::save(&db, "cze", 0, &state).unwrap();
+            db.execute("INSERT INTO character_quests VALUES('czk',0,438,1)", [])
+                .unwrap();
         }
         let lethal = monsters::Attack {
             position: cz_k.position,
@@ -1223,6 +1289,10 @@ mod tests {
         let db = lobby.db.lock().unwrap();
         assert_eq!(quest_rewards::load(&db, "czk", 0).unwrap().loyalty, 350);
         assert_eq!(quest_rewards::load(&db, "cze", 0).unwrap().loyalty, 275);
+        assert_eq!(
+            crate::quests::counts(&db, "czk", 0, 438).unwrap(),
+            [1, 0, 0, 0]
+        );
         let victim_after = skills::load(&db, "cze", 0).unwrap();
         assert!(!victim_after.buffs.contains_key(&6));
         assert_eq!(
