@@ -79,6 +79,44 @@ from a 2.10 m target.
 Movement1/2 performs bounded idle roaming;0/4 do not. Terrain pathfinding,
 movement3 patrol and family assistance remain incomplete.
 
+### Town guards
+
+Guards (`byType`11 spawns) in zones1, 2, 11, 12, 21 and72 are simulated world
+entities (`Role::Guard` in `monsters.rs`, logic in `npc_ai.rs`). Their spawn
+packet is unchanged from the former static NPC. War-zone guards (61-64) stay
+static. Combat stats come from the imported 1453 NPC table (`OBJECT_NPC`).
+- Search: the nearest living hostile monster within14m (`GUARD_AGGRO_M`),
+  passive monsters included. Hostility follows known1453 server behavior: guards
+  of nation0 are friendly, otherwise other nations (and nation3) are hostile;
+  all imported monsters are nation0. Known1453 servers pick the farthest unit in
+  range; RE-KO picks the nearest (owner choice).
+- Guards ignore players, other guards, rare-boss candidates, one-life/event
+  spawns and GM summons (regen type1); suppression rooms lie outside guard zones.
+- Leash: a target farther than20m from the post (`GUARD_LEASH_M`) is dropped
+  and the guard walks back. Guards never chase beyond that; only movement1/2
+  guards idle-roam around the post, and movement4 guards do not chase.
+- Melee: reach `1 + bulk×size/100`, the attack delay paces swings. Known1453
+  NPC-versus-NPC damage: hit-rate/evasion selects great success (70-130% of
+  damage, armor ignored), success (70-130% of damage minus armor, or0) or miss;
+  capped at32000. Monster evasion is not imported yet, so a monster's hit rate
+  stands in for its evasion (approximation).
+- The world applies strikes under its lock, re-validating zone, reach and life,
+  and broadcasts `[0x08,1,result,guard,target]` (0 miss, 1 hit, 2 kill) to
+  sessions that see either side, an observer `0x22` HP update and, on a kill, the
+  shared death path (`0x11`, boss timers, gate-out, respawn).
+- Monsters do not fight back and keep their player target (known1453 behavior).
+- Credit rule (owner requirement): once a guard lands damage on a monster, its
+  death grants no XP, NP, loot or quest kill to anyone, solo or party, even
+  after regeneration or a leash reset, until it respawns. Known1453 servers only
+  reduce XP proportionally and still give loot to the top player.
+- Players cannot hit, area-target, debuff, stun, slow, provoke or heal-target
+  guards; the target bar still works. Known1453 servers let enemy-nation players
+  attack guards in PvP zones and guards attack enemy players; both await an
+  owner decision. Supplied1453 data flags Moradon guards friendly to monsters;
+  RE-KO follows Open-KO and the owner requirement instead.
+- Live checks pending: native guard attack animation on a monster, the death
+  animation on result2 with `0x11`, and smooth speed-7 runs.
+
 ### Monster spells
 
 Monsters cast their first magic slot (`npc_magic.rs`, `npc_ai.rs`), following

@@ -4,6 +4,16 @@ use reko_assets::{CellValue, Table};
 use rusqlite::Connection;
 use std::{collections::HashSet, path::Path};
 
+/// Zones whose town guards are simulated and attack nearby monsters. War-zone
+/// guards (61-64) stay static NPCs.
+pub(crate) const GUARD_ZONES: [u8; 6] = [1, 2, 11, 12, 21, 72];
+
+/// A guard spawn (`byType` 11) that the world simulates instead of the static
+/// NPC list.
+pub(crate) fn simulated_guard(s: &Spawn) -> bool {
+    !s.monster && s.kind == 11 && GUARD_ZONES.contains(&s.position.zone)
+}
+
 pub(crate) fn same_region_view(a: Position, b: Position) -> bool {
     a.zone == b.zone && (a.x / 480).abs_diff(b.x / 480) <= 1 && (a.z / 480).abs_diff(b.z / 480) <= 1
 }
@@ -195,6 +205,13 @@ pub(crate) fn event_visible(
         let caster = u16::from_le_bytes([p[6], p[7]]);
         let target = u16::from_le_bytes([p[8], p[9]]);
         return target == session.player_id || session.visible_entities.contains(&caster);
+    }
+    // Guard-versus-monster attacks reach players who see either side.
+    if p.first() == Some(&0x08) && p.len() == 7 {
+        let attacker = u16::from_le_bytes([p[3], p[4]]);
+        let target = u16::from_le_bytes([p[5], p[6]]);
+        return session.visible_entities.contains(&attacker)
+            || session.visible_entities.contains(&target);
     }
     if matches!(p.first(), Some(0x22 | 0x11)) && p.len() >= 3 {
         return session
@@ -473,6 +490,40 @@ pub(crate) mod tests {
         ));
         assert!(s.visible_entities.contains(&10000));
     }
+    #[test]
+    fn guard_attacks_reach_only_sessions_that_see_the_guard_or_its_target() {
+        let lobby = crate::lobby::Lobby::new(
+            Connection::open_in_memory().unwrap(),
+            crate::characters::CreationRules::fixture(),
+            crate::world_entry::Bootstrap { next_level_exp: 50 },
+        )
+        .unwrap();
+        let c = crate::characters::Character {
+            slot: 0,
+            name: "GuardWatcher".into(),
+            race: 2,
+            class: 102,
+            face: 0,
+            hair: 0,
+            stats: [60, 60, 80, 50, 50],
+        };
+        let mut s = crate::world_entry::Session::new(c).unwrap();
+        s.entered = true;
+        s.position.zone = 21;
+        let event = crate::monsters::Event {
+            personal_hp: Vec::new(),
+            zone: 21,
+            packet: vec![0x08, 1, 1, 0xe1, 0x2e, 0xe0, 0x2e],
+        };
+        assert!(!event_visible(&event, &lobby, &mut s));
+        s.visible_entities.insert(12001);
+        assert!(event_visible(&event, &lobby, &mut s));
+        s.visible_entities.clear();
+        s.visible_entities.insert(12000);
+        assert!(event_visible(&event, &lobby, &mut s));
+        s.position.zone = 1;
+        assert!(!event_visible(&event, &lobby, &mut s));
+    }
     #[tokio::test]
     async fn native_missing_entity_request_resends_details_and_rejects_foreign_ids() {
         let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
@@ -525,7 +576,8 @@ pub(crate) mod tests {
         assert!(original.iter().any(|n| n.id == 11000));
         assert!(original.iter().any(|n| n.id == 11001));
         let npcs = crate::shops::load_population(&db, &game).unwrap();
-        assert_eq!(npcs.len(), 59);
+        // 34 Moradon guards are simulated world entities, not static NPCs.
+        assert_eq!(npcs.len(), 25);
         for npc in &npcs {
             let packet = npc.spawn();
             let definition = definitions.iter().find(|s| s.id == npc.id).unwrap();
@@ -541,7 +593,7 @@ pub(crate) mod tests {
         }
         let world = crate::monsters::World::load(&game).unwrap();
         world.load_population(&db, &game).unwrap();
-        assert_eq!(world.spawns(21).len(), 477);
+        assert_eq!(world.spawns(21).len(), 511);
         assert!(world.nearby_spawns(Position::default()).len() < 100);
     }
 }

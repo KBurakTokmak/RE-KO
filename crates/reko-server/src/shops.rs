@@ -81,32 +81,37 @@ pub(crate) fn load(db: &Connection, game: &Path) -> anyhow::Result<Vec<Merchant>
 pub(crate) fn load_population(db: &Connection, game: &Path) -> anyhow::Result<Vec<Merchant>> {
     Ok(crate::population::load(db, game)?
         .into_iter()
-        .filter(|s| !s.monster)
-        .map(|s| Merchant {
-            id: s.id,
-            prototype: s.prototype,
-            appearance: s.appearance,
-            name: s.name,
-            group: if s.prototype == 27011 && s.position.zone == 21 {
-                255000
-            } else {
-                s.group
-            },
-            nation: s.nation,
-            level: s.level,
-            kind: if s.prototype == 27011 && s.position.zone == 21 {
-                22
-            } else {
-                s.kind
-            },
-            position: s.position,
-            size: s.size,
-            weapons: s.weapons,
-            direction: s.direction,
-            object: false,
-            object_status: 0,
-        })
+        .filter(|s| !s.monster && !crate::population::simulated_guard(s))
+        .map(merchant)
         .collect())
+}
+
+/// Static NPC built from an imported spawn row.
+pub(crate) fn merchant(s: crate::population::Spawn) -> Merchant {
+    Merchant {
+        id: s.id,
+        prototype: s.prototype,
+        appearance: s.appearance,
+        name: s.name,
+        group: if s.prototype == 27011 && s.position.zone == 21 {
+            255000
+        } else {
+            s.group
+        },
+        nation: s.nation,
+        level: s.level,
+        kind: if s.prototype == 27011 && s.position.zone == 21 {
+            22
+        } else {
+            s.kind
+        },
+        position: s.position,
+        size: s.size,
+        weapons: s.weapons,
+        direction: s.direction,
+        object: false,
+        object_status: 0,
+    }
 }
 
 pub(crate) fn load_objects(db: &Connection) -> anyhow::Result<Vec<Merchant>> {

@@ -8,6 +8,9 @@ fn basic_reach(weapon: f32, body: f32) -> f32 {
 }
 #[path = "npc_ai.rs"]
 mod ai;
+#[cfg(test)]
+#[path = "guard_tests.rs"]
+mod guard_tests;
 
 #[derive(Clone)]
 pub(crate) struct Event {
@@ -550,6 +553,8 @@ mod tests {
             modifiers: HashMap::new(),
             definition: None,
             damage_by: HashMap::new(),
+            role: Role::Monster,
+            guarded: false,
         };
         let packet = mob.spawn();
         assert_eq!(packet.len(), 48);
@@ -849,6 +854,16 @@ struct Mob {
     modifiers: HashMap<u8, Modifier>,
     definition: Option<crate::population::Spawn>,
     damage_by: HashMap<String, u32>,
+    role: Role,
+    /// A guard damaged this monster: its death rewards nobody until it respawns.
+    guarded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Monster,
+    /// Town guard: simulated, attacks monsters, immune to players.
+    Guard,
 }
 
 #[derive(Debug, Clone)]
@@ -858,6 +873,33 @@ struct Modifier {
 }
 
 impl Mob {
+    fn from_spawn(s: crate::population::Spawn, role: Role) -> Self {
+        Self {
+            id: s.id,
+            resource: s.appearance,
+            name: s.name.clone(),
+            position: s.position,
+            level: s.level,
+            hp: s.hp,
+            max_hp: s.hp,
+            armor: s.armor,
+            respawn: 0,
+            next_regen: skills::now_ms() + 10000,
+            dots: Vec::new(),
+            speed_percent: 100,
+            slow_until: 0,
+            stunned_until: 0,
+            modifiers: HashMap::new(),
+            definition: Some(s),
+            damage_by: HashMap::new(),
+            role,
+            guarded: false,
+        }
+    }
+    /// Players may attack, debuff, heal-target or otherwise affect this entity.
+    fn player_targetable(&self) -> bool {
+        self.role == Role::Monster
+    }
     fn gate_out(&self) -> Option<Vec<u8>> {
         let s = self.definition.as_ref()?;
         if !matches!((s.position.zone, s.prototype), (82, 7033) | (83, 7034)) {
@@ -1052,7 +1094,7 @@ impl World {
     ) -> Result<(), &'static str> {
         let mut inner = self.inner.lock().unwrap();
         let mob = inner.mobs.get_mut(&id).ok_or("Unknown combat target.")?;
-        if mob.position.zone != position.zone || mob.hp == 0 {
+        if mob.position.zone != position.zone || mob.hp == 0 || !mob.player_targetable() {
             return Err("The target is unavailable.");
         }
         if f32::from(mob.position.x.abs_diff(position.x))
@@ -1097,6 +1139,7 @@ impl World {
         let mut inner = self.inner.lock().unwrap();
         if let Some(mob) = inner.mobs.get_mut(&id)
             && mob.hp > 0
+            && mob.player_targetable()
         {
             mob.stunned_until = mob.stunned_until.max(skills::now_ms() + duration_ms);
         }
@@ -1111,7 +1154,7 @@ impl World {
             .unwrap()
             .mobs
             .get(&id)
-            .is_some_and(|m| m.hp > 0);
+            .is_some_and(|m| m.hp > 0 && m.player_targetable());
         if alive {
             self.ai.lock().unwrap().provoke(id, player_id);
         }
@@ -1127,7 +1170,7 @@ impl World {
     ) -> Result<Position, &'static str> {
         let inner = self.inner.lock().unwrap();
         let mob = inner.mobs.get(&id).ok_or("Unknown combat target.")?;
-        if mob.position.zone != position.zone || mob.hp == 0 {
+        if mob.position.zone != position.zone || mob.hp == 0 || !mob.player_targetable() {
             return Err("The target is unavailable.");
         }
         if f32::from(mob.position.x.abs_diff(position.x))
@@ -1147,6 +1190,7 @@ impl World {
             .values()
             .filter(|m| {
                 m.hp > 0
+                    && m.player_targetable()
                     && m.position.zone == center.zone
                     && f32::from(m.position.x.abs_diff(center.x))
                         .hypot(f32::from(m.position.z.abs_diff(center.z)))
@@ -1197,6 +1241,8 @@ impl World {
                     modifiers: HashMap::new(),
                     definition: None,
                     damage_by: HashMap::new(),
+                    role: Role::Monster,
+                    guarded: false,
                 },
             );
         }
@@ -1255,25 +1301,7 @@ impl World {
             })?;
         s.id = id;
         s.regen_type = 1;
-        let mob = Mob {
-            id,
-            resource: s.appearance,
-            name: s.name.clone(),
-            position: s.position,
-            level: s.level,
-            hp: s.hp,
-            max_hp: s.hp,
-            armor: s.armor,
-            respawn: 0,
-            next_regen: skills::now_ms() + 10000,
-            dots: Vec::new(),
-            speed_percent: 100,
-            slow_until: 0,
-            stunned_until: 0,
-            modifiers: HashMap::new(),
-            definition: Some(s),
-            damage_by: HashMap::new(),
-        };
+        let mob = Mob::from_spawn(s, Role::Monster);
         let event = Event {
             personal_hp: Vec::new(),
             zone: mob.position.zone,
@@ -1292,35 +1320,27 @@ impl World {
         let controlled = bosses.members();
         let active = bosses.active();
         let mut inner = self.inner.lock().unwrap();
-        for s in definitions.into_iter().filter(|s| s.monster) {
+        let mut guards = 0;
+        for s in definitions
+            .into_iter()
+            .filter(|s| s.monster || crate::population::simulated_guard(s))
+        {
             anyhow::ensure!(
                 !inner.mobs.contains_key(&s.id),
                 "duplicate world entity {}",
                 s.id
             );
-            inner.mobs.insert(
-                s.id,
-                Mob {
-                    id: s.id,
-                    resource: s.appearance,
-                    name: s.name.clone(),
-                    position: s.position,
-                    level: s.level,
-                    hp: s.hp,
-                    max_hp: s.hp,
-                    armor: s.armor,
-                    respawn: 0,
-                    next_regen: skills::now_ms() + 10000,
-                    dots: Vec::new(),
-                    speed_percent: 100,
-                    slow_until: 0,
-                    stunned_until: 0,
-                    modifiers: HashMap::new(),
-                    definition: Some(s),
-                    damage_by: HashMap::new(),
-                },
-            );
+            let role = if s.monster {
+                Role::Monster
+            } else {
+                guards += 1;
+                Role::Guard
+            };
+            inner.mobs.insert(s.id, Mob::from_spawn(s, role));
         }
+        // Guards never engage rare-boss candidates; suppression rooms and
+        // one-life spawns are excluded by zone and regen type in the AI.
+        self.ai.lock().unwrap().exempt = controlled.clone();
         for id in &controlled {
             let mob = inner.mobs.get_mut(id).unwrap();
             mob.hp = 0;
@@ -1334,7 +1354,8 @@ impl World {
         }
         *self.bosses.lock().unwrap() = Some(bosses);
         tracing::info!(
-            monsters = inner.mobs.len(),
+            monsters = inner.mobs.len() - guards,
+            guards,
             "world combat population loaded"
         );
         Ok(())
@@ -1375,6 +1396,7 @@ impl World {
         let now = skills::now_ms();
         if let Some(mob) = self.inner.lock().unwrap().mobs.get_mut(&id)
             && mob.hp > 0
+            && mob.player_targetable()
             && (refresh || now >= mob.slow_until)
         {
             mob.speed_percent = percent;
@@ -1396,7 +1418,7 @@ impl World {
                 .mobs
                 .get(&id)
                 .ok_or("Reflection target unavailable.")?;
-            if mob.hp == 0 || mob.position.zone != position.zone {
+            if mob.hp == 0 || mob.position.zone != position.zone || !mob.player_targetable() {
                 return Err("Reflection target unavailable.");
             }
             mob.resistance(element)
@@ -1436,6 +1458,7 @@ impl World {
         let mut inner = self.inner.lock().unwrap();
         if let Some(mob) = inner.mobs.get_mut(&id)
             && mob.hp > 0
+            && mob.player_targetable()
             && mob.position.zone == zone
         {
             mob.hp = mob.hp.saturating_add(amount).min(mob.max_hp);
@@ -1528,7 +1551,7 @@ impl World {
         inner.rng ^= inner.rng << 17;
         let random = inner.rng;
         let mob = inner.mobs.get_mut(&id).ok_or("Unknown combat target.")?;
-        if mob.position.zone != position.zone || mob.hp == 0 {
+        if mob.position.zone != position.zone || mob.hp == 0 || !mob.player_targetable() {
             return Err("The target is unavailable.");
         }
         let position = motion.map_or(position, |m| {
@@ -1617,8 +1640,9 @@ impl World {
                 next: skills::now_ms() + 2000,
             });
         }
+        let now = skills::now_ms();
         let natural_boss = if damage == mob.hp {
-            self.boss_death(id, skills::now_ms())?
+            self.boss_death(id, now)?
         } else {
             false
         };
@@ -1635,19 +1659,13 @@ impl World {
             *mob.damage_by.entry(owner.to_owned()).or_default() += damage;
         }
         let dead = mob.hp == 0;
-        if dead {
-            mob.respawn = if natural_boss {
-                u64::MAX
-            } else {
-                mob.respawn_at(skills::now_ms())
-            };
-            mob.dots.clear();
-            self.quest_death(mob, skills::now_ms());
-        }
         let health = mob.health(-(damage.min(32767) as i16), false);
         let zone = mob.position.zone;
-        let gate_out = dead.then(|| mob.gate_out()).flatten();
-        let loot_packet = if dead { self.drop(mob) } else { None };
+        let deaths = if dead {
+            self.finish_death(mob, now, natural_boss)
+        } else {
+            Vec::new()
+        };
         drop(inner);
         let _ = self.events.send(Event {
             personal_hp: owner
@@ -1656,36 +1674,107 @@ impl World {
             zone,
             packet: health,
         });
-        if dead {
-            let mut packet = vec![0x11];
-            packet.extend(id.to_le_bytes());
-            let _ = self.events.send(Event {
-                personal_hp: Vec::new(),
-                zone,
-                packet,
-            });
-        }
-        if let Some(packet) = gate_out {
-            let _ = self.events.send(Event {
-                personal_hp: Vec::new(),
-                zone,
-                packet,
-            });
-        }
-        if let Some(packet) = loot_packet {
-            let _ = self.events.send(Event {
-                personal_hp: Vec::new(),
-                zone,
-                packet,
-            });
+        for event in deaths {
+            let _ = self.events.send(event);
         }
         Ok(Hit { damage, dead })
     }
     pub(crate) fn suppression_deadline(&self, zone: u8) -> Option<u64> {
         self.suppression.lock().unwrap().deadline(zone)
     }
+    /// Shared death bookkeeping for player hits, damage over time and guard
+    /// strikes. The caller has already scheduled any natural-boss timer and set
+    /// `hp` to zero. Returns the death, gate-out and loot packets in order.
+    fn finish_death(&self, mob: &mut Mob, now: u64, natural_boss: bool) -> Vec<Event> {
+        mob.respawn = if natural_boss {
+            u64::MAX
+        } else {
+            mob.respawn_at(now)
+        };
+        mob.dots.clear();
+        self.quest_death(mob, now);
+        let zone = mob.position.zone;
+        let event = |packet| Event {
+            personal_hp: Vec::new(),
+            zone,
+            packet,
+        };
+        let mut events = vec![event(crate::social::death_packet(mob.id).to_vec())];
+        events.extend(mob.gate_out().map(event));
+        events.extend(self.drop(mob).map(event));
+        events
+    }
+    /// Applies guard swings under the world lock. Each strike is re-validated
+    /// so a monster killed earlier in the same tick is finalised only once.
+    fn apply_guard_strikes(
+        &self,
+        inner: &mut Inner,
+        strikes: Vec<ai::GuardStrike>,
+        now: u64,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        for strike in strikes {
+            let Some(guard) = inner
+                .mobs
+                .get(&strike.guard)
+                .filter(|g| g.role == Role::Guard && g.hp > 0)
+                .map(|g| g.position)
+            else {
+                continue;
+            };
+            let Some(mob) = inner.mobs.get_mut(&strike.target) else {
+                continue;
+            };
+            if mob.role != Role::Monster
+                || mob.hp == 0
+                || mob.position.zone != guard.zone
+                || f32::from(mob.position.x.abs_diff(guard.x))
+                    .hypot(f32::from(mob.position.z.abs_diff(guard.z)))
+                    > (strike.reach + 2.0) * 10.0
+            {
+                continue;
+            }
+            let damage = strike.amount.min(mob.hp);
+            let natural_boss = if damage == mob.hp {
+                match self.boss_death(mob.id, now) {
+                    Ok(boss) => boss,
+                    Err(_) => continue,
+                }
+            } else {
+                false
+            };
+            mob.hp -= damage;
+            if damage > 0 {
+                mob.guarded = true;
+            }
+            let result = if mob.hp == 0 { 2 } else { u8::from(damage > 0) };
+            let mut packet = vec![0x08, 1, result];
+            packet.extend(strike.guard.to_le_bytes());
+            packet.extend(strike.target.to_le_bytes());
+            events.push(Event {
+                personal_hp: Vec::new(),
+                zone: mob.position.zone,
+                packet,
+            });
+            if damage > 0 {
+                events.push(Event {
+                    personal_hp: Vec::new(),
+                    zone: mob.position.zone,
+                    packet: mob.health(-(damage.min(32767) as i16), false),
+                });
+            }
+            if mob.hp == 0 {
+                events.extend(self.finish_death(mob, now, natural_boss));
+            }
+        }
+        events
+    }
     fn quest_death(&self, mob: &Mob, now: u64) {
         self.suppression.lock().unwrap().death(mob.id, now);
+        if mob.guarded {
+            // Guard-damaged kills grant no XP, NP or quest credit to anyone.
+            return;
+        }
         if let (Some(hub), Some(definition)) = (&self.social, &mob.definition) {
             let hub = hub.lock().unwrap();
             let (credits, kills) = hub.death(
@@ -1751,6 +1840,9 @@ impl World {
             .unwrap_or_default()
     }
     fn drop(&self, mob: &Mob) -> Option<Vec<u8>> {
+        if mob.guarded {
+            return None;
+        }
         let owner = mob.damage_by.iter().max_by_key(|(_, damage)| *damage)?.0;
         self.loot.as_ref()?.create(
             mob.definition.as_ref()?.prototype,
@@ -1796,6 +1888,7 @@ impl World {
             mob.hp = mob.max_hp;
             mob.respawn = 0;
             mob.damage_by.clear();
+            mob.guarded = false;
             mob.modifiers.clear();
             mob.dots.clear();
             mob.speed_percent = 100;
@@ -1843,6 +1936,7 @@ impl World {
                 }
                 mob.hp = mob.max_hp;
                 mob.damage_by.clear();
+                mob.guarded = false;
                 mob.modifiers.clear();
                 mob.respawn = 0;
                 mob.speed_percent = 100;
@@ -1907,34 +2001,7 @@ impl World {
                         packet: mob.health(-(loss as i16), false),
                     });
                     if mob.hp == 0 {
-                        self.quest_death(mob, now);
-                        mob.dots.clear();
-                        mob.respawn = if natural_boss {
-                            u64::MAX
-                        } else {
-                            mob.respawn_at(now)
-                        };
-                        let mut death = vec![0x11];
-                        death.extend(mob.id.to_le_bytes());
-                        events.push(Event {
-                            personal_hp: Vec::new(),
-                            zone: mob.position.zone,
-                            packet: death,
-                        });
-                        if let Some(packet) = mob.gate_out() {
-                            events.push(Event {
-                                personal_hp: Vec::new(),
-                                zone: mob.position.zone,
-                                packet,
-                            });
-                        }
-                        if let Some(packet) = self.drop(mob) {
-                            events.push(Event {
-                                personal_hp: Vec::new(),
-                                zone: mob.position.zone,
-                                packet,
-                            });
-                        }
+                        events.extend(self.finish_death(mob, now, natural_boss));
                         continue;
                     }
                 }
@@ -1953,7 +2020,12 @@ impl World {
                 }
             }
         }
-        events.extend(self.ai.lock().unwrap().tick(&mut inner.mobs, now));
+        let strikes = {
+            let mut ai = self.ai.lock().unwrap();
+            events.extend(ai.tick(&mut inner.mobs, now));
+            ai.take_guard_strikes()
+        };
+        events.extend(self.apply_guard_strikes(&mut inner, strikes, now));
         events
     }
 

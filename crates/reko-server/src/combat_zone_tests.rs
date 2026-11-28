@@ -58,11 +58,12 @@ async fn repaired_population_keeps_one_live_rare_boss_and_streams_both_ardream_t
             mob.name
         );
     }
-    assert_eq!(world.spawns(72).len(), 379);
+    // 379 monsters plus 16 simulated Ardream guards.
+    assert_eq!(world.spawns(72).len(), 395);
     let merchants = shops::load_population(&db, &game).unwrap();
     assert_eq!(
         merchants.iter().filter(|m| m.position.zone == 72).count(),
-        63
+        47
     );
     let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
         return;

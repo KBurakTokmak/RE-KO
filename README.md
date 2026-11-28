@@ -25,7 +25,8 @@ renderer/client and an in-process game host have not been implemented.
   chasing, physical attacks, monster spells (damage, area, poison and other
   damage over time, debuffs, stuns, drains), regeneration and source-based respawn timers. Rare
   bosses pick one source location per zone, respawn six hours after death, and
-  reset on server startup.
+  reset on server startup. Town guards attack monsters near their posts; guard-damaged
+  monsters give no rewards.
 - Monster loot boxes, drop tables, item pickup, optional `/autoloot`, coins,
   solo/party XP and leveling to 80.
 - Ordinary kill/item quests, rewards, progress notifications, level10 first job

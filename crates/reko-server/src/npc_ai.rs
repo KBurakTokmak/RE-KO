@@ -1,8 +1,13 @@
 //! Data-driven pursuit, physical attacks and monster spells; owned by the world simulation.
-use super::{Event, Mob};
+use super::{Event, Mob, Role};
 use crate::{combat, movement::Position, npc_magic, skills, world_entry::Session};
 use rusqlite::Connection;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Owner cap on a guard's monster search radius (the 1453 guards use 14 m).
+const GUARD_AGGRO_M: f32 = 14.0;
+/// Guards never chase a monster farther than this from their post.
+const GUARD_LEASH_M: f32 = 20.0;
 
 #[derive(Clone)]
 struct Rule {
@@ -192,6 +197,34 @@ pub(crate) struct Strike {
     pub amount: u16,
     pub spell: Option<npc_magic::Hit>,
 }
+/// A guard swing at a monster, applied and re-validated by the world.
+#[derive(Clone, Debug)]
+pub(crate) struct GuardStrike {
+    pub guard: u16,
+    pub target: u16,
+    pub amount: u32,
+    /// Melee reach in metres used for re-validation.
+    pub reach: f32,
+}
+struct GuardAgent {
+    post: Position,
+    target: Option<u16>,
+    next_attack: u64,
+    last: u64,
+    returning: bool,
+    roam: Option<Position>,
+    next_roam: u64,
+    pattern: i8,
+    moving: bool,
+}
+/// A living monster guards may engage, captured at the start of a tick.
+struct Prey {
+    id: u16,
+    position: Position,
+    defence: u32,
+    evade: Option<f32>,
+    nation: u8,
+}
 #[derive(Default)]
 pub(super) struct Brain {
     rules: HashMap<u16, Rule>,
@@ -200,6 +233,11 @@ pub(super) struct Brain {
     agents: HashMap<u16, Agent>,
     strikes: HashMap<u16, VecDeque<Strike>>,
     rng: u64,
+    guard_rules: HashMap<u16, Rule>,
+    guards: HashMap<u16, GuardAgent>,
+    guard_strikes: Vec<GuardStrike>,
+    /// Monsters guards ignore (rare-boss pool candidates).
+    pub exempt: HashSet<u16>,
 }
 fn distance(a: Position, b: Position) -> f32 {
     f32::from(a.x.abs_diff(b.x)).hypot(f32::from(a.z.abs_diff(b.z))) / 10.0
@@ -210,14 +248,9 @@ fn random(seed: &mut u64, max: u32) -> u32 {
         .wrapping_add(1442695040888963407);
     (*seed >> 16) as u32 % (max + 1)
 }
-fn physical(rule: &Rule, target: &Player, attack_percent: u16, seed: &mut u64) -> u16 {
-    let ac = u32::from(target.stats.defence);
-    let hit = u32::from(rule.damage) * u32::from(attack_percent) * 2 / (ac + 240);
-    if hit == 0 {
-        return 0;
-    }
-    let ratio = rule.hit / target.stats.evasion.max(0.001);
-    let (critical, success) = if ratio >= 5.0 {
+/// Critical and success thresholds out of 10000 for a hit-rate/evasion ratio.
+fn hit_chances(ratio: f32) -> (u32, u32) {
+    if ratio >= 5.0 {
         (3500, 9800)
     } else if ratio >= 3.0 {
         (2500, 9600)
@@ -235,7 +268,15 @@ fn physical(rule: &Rule, target: &Player, attack_percent: u16, seed: &mut u64) -
         (400, 6000)
     } else {
         (200, 5000)
-    };
+    }
+}
+fn physical(rule: &Rule, target: &Player, attack_percent: u16, seed: &mut u64) -> u16 {
+    let ac = u32::from(target.stats.defence);
+    let hit = u32::from(rule.damage) * u32::from(attack_percent) * 2 / (ac + 240);
+    if hit == 0 {
+        return 0;
+    }
+    let (critical, success) = hit_chances(rule.hit / target.stats.evasion.max(0.001));
     let roll = random(seed, 9999) + 1;
     if roll > success {
         return 0;
@@ -245,6 +286,27 @@ fn physical(rule: &Rule, target: &Player, attack_percent: u16, seed: &mut u64) -
         damage = damage * 3 / 2;
     }
     damage.min((2.6 * f32::from(rule.damage)) as u32).min(32767) as u16
+}
+/// Known 1453 NPC-versus-NPC melee: a great success deals 70-130% of the
+/// attacker's damage ignoring armor, a normal success 70-130% of damage minus
+/// the target's armor, and a miss deals nothing.
+fn npc_physical(rule: &Rule, defence: u32, evade: f32, seed: &mut u64) -> u32 {
+    let (great, success) = hit_chances(rule.hit / evade.max(0.001));
+    let roll = random(seed, 9999) + 1;
+    if roll > success {
+        return 0;
+    }
+    let hit = u32::from(rule.damage);
+    let base = if roll <= great {
+        hit
+    } else {
+        hit.saturating_sub(defence)
+    };
+    if base == 0 {
+        return 0;
+    }
+    let spread = random(seed, (0.6 * base as f32) as u32);
+    ((0.7 * base as f32) as u32 + spread).min(32000)
 }
 /// Resolves a landed monster spell: per-target effect packets, an area marker
 /// and queued per-victim hits that each victim's session applies atomically.
@@ -431,20 +493,25 @@ fn movement_event(mob: &Mob, speed: f32, destination: Position) -> Event {
         packet: p,
     }
 }
-fn roam_destination(agent: &mut Agent, position: Position, rng: &mut u64) -> Position {
-    if agent.pattern == 0 {
-        agent.pattern = random(rng, 2) as i8 - 1;
-        return agent.home;
+fn roam_destination(
+    pattern: &mut i8,
+    home: Position,
+    position: Position,
+    rng: &mut u64,
+) -> Position {
+    if *pattern == 0 {
+        *pattern = random(rng, 2) as i8 - 1;
+        return home;
     }
-    let offset = if matches!(agent.pattern, -2 | -1 | 1 | 2) {
+    let offset = if matches!(*pattern, -2 | -1 | 1 | 2) {
         20
     } else {
         -20
     };
-    agent.pattern = match agent.pattern {
+    *pattern = match *pattern {
         -4 | 4 => 0,
-        -3..=-1 => agent.pattern - 1,
-        _ => agent.pattern + 1,
+        -3..=-1 => *pattern - 1,
+        _ => *pattern + 1,
     };
     Position {
         x: position.x.saturating_add_signed(offset),
@@ -494,13 +561,248 @@ impl Brain {
             }
             self.rules.insert(id, rule);
         }
+        self.load_guards(db)?;
         self.rng = skills::now_ms();
         tracing::info!(
             prototypes = self.rules.len(),
             spells = self.spells.len(),
+            guards = self.guard_rules.len(),
             "monster AI rules loaded"
         );
         Ok(())
+    }
+    /// Guard combat rules come from the imported 1453 NPC table (`byType`
+    /// 11-13); guards have no `world_monster_ai` rows.
+    fn load_guards(&mut self, db: &Connection) -> anyhow::Result<()> {
+        let present: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='world_reference_rules')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !present {
+            return Ok(());
+        }
+        let mut q = db.prepare(
+            "SELECT rule_id,json_extract(data,'$.sDamage'),json_extract(data,'$.sHitRate'),json_extract(data,'$.sAttackDelay'),json_extract(data,'$.bySpeed1'),json_extract(data,'$.bySpeed2'),json_extract(data,'$.byAttackRange'),json_extract(data,'$.bySearchRange'),json_extract(data,'$.byTracingRange'),json_extract(data,'$.sBulk'),json_extract(data,'$.sStandtime') FROM world_reference_rules WHERE table_name='OBJECT_NPC' AND CAST(json_extract(data,'$.byType') AS INTEGER) IN (11,12,13)",
+        )?;
+        let rows = q.query_map([], |r| {
+            let n = |i: usize| -> rusqlite::Result<u64> {
+                Ok(match r.get::<_, rusqlite::types::Value>(i)? {
+                    rusqlite::types::Value::Integer(v) => v.max(0) as u64,
+                    rusqlite::types::Value::Real(v) => v.max(0.0) as u64,
+                    rusqlite::types::Value::Text(v) => v.trim().parse().unwrap_or(0),
+                    _ => 0,
+                })
+            };
+            let small = |i: usize| -> rusqlite::Result<f32> { Ok(n(i)?.min(65535) as f32) };
+            Ok((
+                r.get::<_, u16>(0)?,
+                Rule {
+                    act: 7,
+                    damage: n(1)?.min(u64::from(u16::MAX)) as u16,
+                    hit: small(2)?,
+                    delay: n(3)?,
+                    walk: small(4)?,
+                    run: small(5)?,
+                    range: small(6)?,
+                    search: small(7)?.min(GUARD_AGGRO_M),
+                    trace: small(8)?,
+                    bulk: small(9)? / 100.0,
+                    stand: n(10)?,
+                    direct: 0,
+                    magic: 0,
+                    mode: 0,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, rule) = row?;
+            self.guard_rules.insert(id, rule);
+        }
+        Ok(())
+    }
+    pub fn take_guard_strikes(&mut self) -> Vec<GuardStrike> {
+        std::mem::take(&mut self.guard_strikes)
+    }
+    /// Snapshot of monsters guards may engage, by zone, sorted by id.
+    fn prey(&self, mobs: &HashMap<u16, Mob>) -> HashMap<u8, Vec<Prey>> {
+        let mut prey: HashMap<u8, Vec<Prey>> = HashMap::new();
+        if self.guard_rules.is_empty() {
+            return prey;
+        }
+        for mob in mobs.values() {
+            let Some(s) = mob.definition.as_ref() else {
+                continue;
+            };
+            // One-life event spawns and GM summons (regen type 1) and rare
+            // bosses are never engaged, nor objects the monster AI skips;
+            // suppression rooms lie outside guard zones.
+            if mob.role != Role::Monster
+                || mob.hp == 0
+                || s.regen_type == 1
+                || matches!(s.kind, 50..=55 | 60 | 61 | 65..=68 | 171)
+                || self.exempt.contains(&mob.id)
+                || !crate::population::GUARD_ZONES.contains(&mob.position.zone)
+            {
+                continue;
+            }
+            prey.entry(mob.position.zone).or_default().push(Prey {
+                id: mob.id,
+                position: mob.position,
+                defence: mob.defence(),
+                evade: self.rules.get(&s.prototype).map(|r| r.hit),
+                nation: s.nation,
+            });
+        }
+        for list in prey.values_mut() {
+            list.sort_unstable_by_key(|p| p.id);
+        }
+        prey
+    }
+    /// Guards pick the nearest hostile monster within their search range,
+    /// chase it no farther than the leash from their post, then walk back.
+    fn guard_tick(
+        &mut self,
+        mob: &mut Mob,
+        prey: &HashMap<u8, Vec<Prey>>,
+        now: u64,
+        events: &mut Vec<Event>,
+    ) {
+        let Some(s) = mob.definition.as_ref() else {
+            return;
+        };
+        let (nation, move_type, size) = (s.nation, s.move_type, s.size);
+        let Some(rule) = self.guard_rules.get(&s.prototype) else {
+            return;
+        };
+        if mob.hp == 0 || rule.damage == 0 {
+            return;
+        }
+        let agent = self.guards.entry(mob.id).or_insert(GuardAgent {
+            post: mob.position,
+            target: None,
+            next_attack: now,
+            last: now,
+            returning: false,
+            roam: None,
+            next_roam: now.saturating_add(rule.stand),
+            pattern: 0,
+            moving: false,
+        });
+        let elapsed = now.saturating_sub(agent.last).min(500) as f32 / 1000.0;
+        agent.last = now;
+        let candidates = prey.get(&mob.position.zone).map_or(&[][..], Vec::as_slice);
+        let find = |id: u16| {
+            candidates
+                .binary_search_by_key(&id, |p| p.id)
+                .ok()
+                .map(|i| &candidates[i])
+        };
+        // 1453 hostility: a nation-0 guard is friendly to all, otherwise units
+        // of another nation (or nation 3) are hostile.
+        let hostile = |p: &Prey| nation != 0 && (p.nation != nation || p.nation == 3);
+        if let Some(id) = agent.target {
+            let keep = find(id).is_some_and(|p| {
+                distance(agent.post, p.position) <= GUARD_LEASH_M
+                    && (move_type != 4 || distance(mob.position, p.position) <= rule.search)
+            });
+            if !keep {
+                agent.target = None;
+                agent.returning = distance(mob.position, agent.post) >= 0.2;
+                agent.roam = None;
+            }
+        }
+        if agent.target.is_none() && !agent.returning {
+            agent.target = candidates
+                .iter()
+                .filter(|p| {
+                    hostile(p)
+                        && distance(mob.position, p.position) <= rule.search
+                        && distance(agent.post, p.position) <= GUARD_LEASH_M
+                })
+                .min_by(|a, b| {
+                    distance(mob.position, a.position)
+                        .total_cmp(&distance(mob.position, b.position))
+                        .then(a.id.cmp(&b.id))
+                })
+                .map(|p| p.id);
+            if agent.target.is_some() {
+                agent.roam = None;
+            }
+        }
+        let speed = rule.run * f32::from(mob.speed_percent) / 100.0;
+        let event_start = events.len();
+        if let Some(target) = agent.target.and_then(find) {
+            let reach = 1.0f32.min(rule.range) + rule.bulk * f32::from(size) / 100.0;
+            let dist = distance(mob.position, target.position);
+            if dist > reach + std::f32::consts::FRAC_1_SQRT_2 / 10.0 {
+                if move_type != 4
+                    && let Some(e) = move_toward(
+                        mob,
+                        target.position,
+                        (speed * elapsed).min((dist - reach).max(0.0)),
+                        speed,
+                        reach,
+                    )
+                {
+                    events.push(e);
+                }
+            } else if now >= agent.next_attack {
+                agent.next_attack = now.saturating_add(rule.delay.max(1));
+                let amount = npc_physical(
+                    rule,
+                    target.defence,
+                    target.evade.unwrap_or(rule.hit),
+                    &mut self.rng,
+                );
+                self.guard_strikes.push(GuardStrike {
+                    guard: mob.id,
+                    target: target.id,
+                    amount,
+                    reach,
+                });
+            }
+        } else if agent.returning {
+            if distance(mob.position, agent.post) < 0.2 {
+                agent.returning = false;
+                agent.pattern = 0;
+                agent.roam = None;
+                agent.next_roam = now.saturating_add(rule.stand);
+            } else if let Some(e) = move_toward(mob, agent.post, speed * elapsed, speed, 0.0) {
+                events.push(e);
+            }
+        } else if matches!(move_type, 1 | 2)
+            && self.players.values().any(|p| {
+                p.position.zone == mob.position.zone && distance(p.position, mob.position) < 100.0
+            })
+        {
+            if agent.roam.is_none() && now >= agent.next_roam {
+                let destination =
+                    roam_destination(&mut agent.pattern, agent.post, mob.position, &mut self.rng);
+                if distance(mob.position, destination) >= 0.2 {
+                    agent.roam = Some(destination);
+                } else {
+                    agent.next_roam = now.saturating_add(rule.stand);
+                }
+            }
+            if let Some(destination) = agent.roam {
+                let walk = rule.walk * f32::from(mob.speed_percent) / 100.0;
+                if let Some(e) = move_toward(mob, destination, walk * elapsed, walk, 0.0) {
+                    events.push(e);
+                }
+                if distance(mob.position, destination) < 0.2 {
+                    agent.roam = None;
+                    agent.next_roam = now.saturating_add(rule.stand);
+                    events.push(movement_event(mob, 0.0, mob.position));
+                }
+            }
+        }
+        if events.len() > event_start {
+            agent.moving = events.last().is_some_and(|e| e.packet[9..11] != [0, 0]);
+        } else if agent.moving {
+            events.push(movement_event(mob, 0.0, mob.position));
+            agent.moving = false;
+        }
     }
     pub fn observe(&mut self, s: &Session, now: u64) {
         self.players.insert(
@@ -541,7 +843,12 @@ impl Brain {
     pub fn tick(&mut self, mobs: &mut HashMap<u16, Mob>, now: u64) -> Vec<Event> {
         self.players.retain(|_, p| now.saturating_sub(p.at) < 2000);
         let mut events = Vec::new();
+        let prey = self.prey(mobs);
         for mob in mobs.values_mut() {
+            if mob.role == Role::Guard {
+                self.guard_tick(mob, &prey, now, &mut events);
+                continue;
+            }
             let Some(s) = mob.definition.as_ref() else {
                 continue;
             };
@@ -871,7 +1178,12 @@ impl Brain {
                 })
             {
                 if agent.roam.is_none() && now >= agent.next_roam {
-                    let destination = roam_destination(agent, mob.position, &mut self.rng);
+                    let destination = roam_destination(
+                        &mut agent.pattern,
+                        agent.home,
+                        mob.position,
+                        &mut self.rng,
+                    );
                     let in_bounds = s.kind != 4
                         || (s.bounds[0].min(s.bounds[2])..=s.bounds[0].max(s.bounds[2]))
                             .contains(&destination.x)
@@ -1814,6 +2126,193 @@ mod tests {
         assert!(unarmored > armored * 2);
         for _ in 0..10000 {
             assert!(physical(&rule, &p, 100, &mut seed) <= 260);
+        }
+    }
+
+    fn bystander(position: Position, at: u64) -> Player {
+        Player {
+            name: "Bystander".into(),
+            position,
+            hp: 100,
+            invisible: false,
+            disguised: false,
+            is_admin: false,
+            stats: combat::Stats::default(),
+            at,
+        }
+    }
+
+    #[test]
+    fn guards_ignore_players_other_guards_and_same_nation_units() {
+        use super::super::guard_tests::{GUARD, MONSTER, POST, fixture, place};
+        let Some((world, _db)) = fixture() else {
+            return;
+        };
+        {
+            let mut inner = world.inner.lock().unwrap();
+            let mut other = inner.mobs[&GUARD].clone();
+            other.id = 12002;
+            other.position.x = POST.x + 30;
+            other.definition.as_mut().unwrap().nation = 2;
+            inner.mobs.insert(other.id, other);
+        }
+        let mut now = skills::now_ms();
+        let quiet = |now: &mut u64| {
+            for _ in 0..8 {
+                *now += 250;
+                world
+                    .ai
+                    .lock()
+                    .unwrap()
+                    .players
+                    .insert(1, bystander(POST, *now));
+                assert!(world.tick(*now).iter().all(|e| e.packet[0] != 0x08));
+            }
+        };
+        // An enemy-nation guard and a player stand next to the guard.
+        quiet(&mut now);
+        {
+            let mut ai = world.ai.lock().unwrap();
+            assert_eq!(ai.guards[&GUARD].target, None);
+            assert_eq!(ai.guards[&12002].target, None, "guards never fight guards");
+            assert!(ai.take(1).is_empty(), "guards never attack players");
+        }
+        // A monster of the guard's own nation is not hostile.
+        world.inner.lock().unwrap().mobs.remove(&12002);
+        place(&world, MONSTER, 50, 0);
+        world
+            .inner
+            .lock()
+            .unwrap()
+            .mobs
+            .get_mut(&MONSTER)
+            .unwrap()
+            .definition
+            .as_mut()
+            .unwrap()
+            .nation = 1;
+        quiet(&mut now);
+        assert_eq!(world.ai.lock().unwrap().guards[&GUARD].target, None);
+        assert_eq!(world.inner.lock().unwrap().mobs[&GUARD].position, POST);
+        world
+            .inner
+            .lock()
+            .unwrap()
+            .mobs
+            .get_mut(&MONSTER)
+            .unwrap()
+            .definition
+            .as_mut()
+            .unwrap()
+            .nation = 0;
+        now += 250;
+        world.tick(now);
+        assert_eq!(
+            world.ai.lock().unwrap().guards[&GUARD].target,
+            Some(MONSTER)
+        );
+    }
+
+    #[test]
+    fn guards_pick_the_nearest_eligible_monster_and_skip_bosses_and_one_life_spawns() {
+        use super::super::guard_tests::{GUARD, MONSTER, fixture, place};
+        let Some((world, _db)) = fixture() else {
+            return;
+        };
+        place(&world, MONSTER, 120, 0);
+        {
+            let mut inner = world.inner.lock().unwrap();
+            for (id, dx) in [(12003u16, 40i32), (12004, 60), (12005, 80)] {
+                let mut extra = inner.mobs[&MONSTER].clone();
+                extra.id = id;
+                extra.position.x = (i32::from(extra.position.x) - 120 + dx) as u16;
+                inner.mobs.insert(id, extra);
+            }
+            // 12003 is a rare-boss candidate, 12004 a one-life/summoned spawn.
+            inner
+                .mobs
+                .get_mut(&12004)
+                .unwrap()
+                .definition
+                .as_mut()
+                .unwrap()
+                .regen_type = 1;
+        }
+        world.ai.lock().unwrap().exempt.insert(12003);
+        world.tick(skills::now_ms() + 250);
+        assert_eq!(world.ai.lock().unwrap().guards[&GUARD].target, Some(12005));
+        world.inner.lock().unwrap().mobs.get_mut(&12005).unwrap().hp = 0;
+        let ai_target =
+            |world: &super::super::World| world.ai.lock().unwrap().guards[&GUARD].target;
+        world.tick(skills::now_ms() + 500);
+        // The guard was still at its post, so it re-acquires the next nearest.
+        assert_eq!(ai_target(&world), Some(MONSTER));
+    }
+
+    #[test]
+    fn monster_keeps_its_player_target_while_a_guard_hits_it() {
+        use super::super::guard_tests::{GUARD, MONSTER, fixture, place};
+        let Some((world, _db)) = fixture() else {
+            return;
+        };
+        world.ai.lock().unwrap().rules.get_mut(&100).unwrap().act = 3;
+        place(&world, MONSTER, 50, 1_000_000);
+        let spot = world.inner.lock().unwrap().mobs[&MONSTER].position;
+        let mut now = skills::now_ms();
+        let mut guarded = false;
+        for _ in 0..40 {
+            now += 250;
+            world
+                .ai
+                .lock()
+                .unwrap()
+                .players
+                .insert(1, bystander(spot, now));
+            world.tick(now);
+            let ai = world.ai.lock().unwrap();
+            assert_eq!(ai.agents[&MONSTER].target, Some(1));
+            guarded = world.inner.lock().unwrap().mobs[&MONSTER].guarded;
+            if guarded {
+                assert_eq!(ai.guards[&GUARD].target, Some(MONSTER));
+                break;
+            }
+        }
+        assert!(guarded, "the guard must land a hit");
+        let inner = world.inner.lock().unwrap();
+        assert!(inner.mobs[&MONSTER].damage_by.is_empty());
+        assert!(inner.mobs[&MONSTER].hp < 1_000_000);
+    }
+
+    #[test]
+    fn npc_versus_npc_damage_follows_armor_and_great_success_rules() {
+        let rule = Rule {
+            act: 7,
+            damage: 3000,
+            hit: 194.0,
+            delay: 1500,
+            run: 7.0,
+            walk: 2.0,
+            stand: 1000,
+            range: 7.0,
+            search: 14.0,
+            trace: 35.0,
+            bulk: 0.9,
+            direct: 0,
+            magic: 0,
+            mode: 0,
+        };
+        let mut seed = 3;
+        let mut misses = 0;
+        for _ in 0..10000 {
+            let damage = npc_physical(&rule, 5000, 194.0, &mut seed);
+            // Armor above the attack only lets great successes through.
+            assert!(damage == 0 || (2100..=3900).contains(&damage));
+            misses += u32::from(damage == 0);
+        }
+        assert!(misses > 8000);
+        for _ in 0..10000 {
+            let damage = npc_physical(&rule, 500, 194.0, &mut seed);
+            assert!(damage == 0 || (1750..=3900).contains(&damage));
         }
     }
 }
