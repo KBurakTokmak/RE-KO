@@ -8,10 +8,19 @@ use std::{collections::HashSet, path::Path};
 /// guards (61-64) stay static NPCs.
 pub(crate) const GUARD_ZONES: [u8; 6] = [1, 2, 11, 12, 21, 72];
 
-/// A guard spawn (`byType` 11) that the world simulates instead of the static
-/// NPC list.
+/// Zones whose Guard Towers (`byType` 62) are simulated. Towers never move and
+/// only shoot enemy-nation players where guards are hostile to players.
+pub(crate) const TOWER_ZONES: [u8; 6] = [1, 2, 11, 12, 71, 72];
+
+/// Guard Tower NPC type.
+pub(crate) const TOWER_KIND: u8 = 62;
+
+/// A guard (`byType` 11) or Guard Tower spawn that the world simulates instead
+/// of the static NPC list.
 pub(crate) fn simulated_guard(s: &Spawn) -> bool {
-    !s.monster && s.kind == 11 && GUARD_ZONES.contains(&s.position.zone)
+    !s.monster
+        && ((s.kind == 11 && GUARD_ZONES.contains(&s.position.zone))
+            || (s.kind == TOWER_KIND && TOWER_ZONES.contains(&s.position.zone)))
 }
 
 pub(crate) fn same_region_view(a: Position, b: Position) -> bool {

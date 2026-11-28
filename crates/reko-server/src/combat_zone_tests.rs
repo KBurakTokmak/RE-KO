@@ -58,12 +58,12 @@ async fn repaired_population_keeps_one_live_rare_boss_and_streams_both_ardream_t
             mob.name
         );
     }
-    // 379 monsters plus 16 simulated Ardream guards.
-    assert_eq!(world.spawns(72).len(), 395);
+    // 379 monsters plus 16 simulated Ardream guards and 39 Guard Towers.
+    assert_eq!(world.spawns(72).len(), 434);
     let merchants = shops::load_population(&db, &game).unwrap();
     assert_eq!(
         merchants.iter().filter(|m| m.position.zone == 72).count(),
-        47
+        8
     );
     let Some((mut lobby, mut s)) = crate::world_service_tests::setup() else {
         return;
@@ -103,15 +103,22 @@ async fn repaired_population_keeps_one_live_rare_boss_and_streams_both_ardream_t
         if position == monster.position {
             assert!(s.visible_entities.contains(&monster.id));
         } else {
-            for kind in [21, 22, 31, 62] {
+            for kind in [21, 22, 31] {
                 assert!(
                     lobby
                         .merchants
                         .iter()
                         .any(|m| m.kind == kind && s.visible_entities.contains(&m.id)),
-                    "Both Ardream towns need potion, sundries, storage and tower population"
+                    "Both Ardream towns need potion, sundries and storage population"
                 );
             }
+            // Guard Towers are simulated world entities now.
+            assert!(
+                definitions.iter().any(|d| d.kind == population::TOWER_KIND
+                    && d.position.zone == 72
+                    && s.visible_entities.contains(&d.id)),
+                "Both Ardream towns need tower population"
+            );
         }
         use tokio::io::AsyncReadExt;
         let mut received = HashSet::new();

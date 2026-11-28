@@ -15,6 +15,7 @@ RE-KO is a Rust server for the original 1453 client, for singleplayer and small 
 - Register persistent data changes with the database manager, keep schema versions aligned, and test fresh creation, upgrades, rollback and repeat runs. Preserve local saves and customizations.
 - Keep gameplay portable and paths configurable. Isolate platform-specific unsafe code and explain its safety. Preserve source attribution.
 - Tracked docs and comments must not name private reference files or paths (supplied server sources, local exports, client dumps); others cannot obtain them. Describe the behavior and its evidence in general terms ("known 1453 server behavior", "native client"). Public sources such as [Open-KO](https://github.com/Open-KO/KnightOnline) may be linked. Many older entries still cite private files; replace them when touching those lines.
+- Every new chat command (admin or player) gets a row in [chat commands](docs/re/admin-commands.md).
 - Keep maintained docs concise. Update existing subsystem notes and remove obsolete reports and broken references. Keep private assets, binaries, databases, captures, credentials, generated research and test output outside Git.
 
 ## Verification and review

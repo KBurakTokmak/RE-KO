@@ -1,5 +1,7 @@
 # Administrative combat and native GM movement
 
+For a one-page list of every command, see [chat commands](admin-commands.md).
+
 The sole privilege source remains `character_privileges.is_admin`, scoped by
 account/character slot. Names, account names and client authority requests cannot
 grant this role. No new per-feature permission flags or automatic grants exist.

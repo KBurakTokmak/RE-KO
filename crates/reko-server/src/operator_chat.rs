@@ -49,6 +49,9 @@ pub(crate) fn command(
                 .set_weather(args, &chrono::Local::now()),
         ));
     }
+    if command.eq_ignore_ascii_case(b"invade") {
+        return Some(notice(&invade(lobby, args)));
+    }
     let mut hub = lobby.social.lock().unwrap();
     if command.eq_ignore_ascii_case(b"players") {
         return Some(players(&hub, args));
@@ -187,6 +190,42 @@ fn players(hub: &Hub, args: &[u8]) -> Vec<u8> {
         }
     }
     notice(message.as_bytes())
+}
+
+/// `op invade <zone> on|off`: make a homeland zone's guards and towers attack
+/// enemy-nation players (events do the same during invasions).
+fn invade(lobby: &Lobby, args: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(args);
+    let mut parts = text.split_whitespace();
+    let (Some(Ok(zone)), Some(state), None) = (
+        parts.next().map(str::parse::<u8>),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return b"Use op invade <zone> on|off.".to_vec();
+    };
+    let on = match state.to_ascii_lowercase().as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return b"Use op invade <zone> on|off.".to_vec(),
+    };
+    if matches!(zone, 71 | 72) {
+        return b"Guards in zones 71 and 72 always attack enemy-nation players.".to_vec();
+    }
+    if !crate::population::GUARD_ZONES.contains(&zone)
+        && !crate::population::TOWER_ZONES.contains(&zone)
+    {
+        return b"That zone has no simulated guards or towers.".to_vec();
+    }
+    let Some(world) = lobby.monsters.as_ref() else {
+        return b"Monster world unavailable.".to_vec();
+    };
+    world.set_guard_invaded(zone, on);
+    format!(
+        "Zone {zone} guards now {} enemy-nation players.",
+        if on { "attack" } else { "ignore" }
+    )
+    .into_bytes()
 }
 
 #[cfg(test)]

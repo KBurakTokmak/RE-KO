@@ -1073,6 +1073,20 @@ impl World {
     pub fn incoming(&self, id: u16) -> Vec<ai::Strike> {
         self.ai.lock().unwrap().take(id)
     }
+    /// Marks invaded homeland zones (`op invade`; war invasions will call it);
+    /// their guards and towers then attack enemy-nation players. Not persisted.
+    /// Whether Mage Armor can reflect onto this NPC (guards and towers cannot be hit).
+    pub(crate) fn reflectable(&self, id: u16) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .mobs
+            .get(&id)
+            .is_some_and(Mob::player_targetable)
+    }
+    pub(crate) fn set_guard_invaded(&self, zone: u8, invaded: bool) {
+        self.ai.lock().unwrap().set_invaded(zone, invaded);
+    }
     pub fn forget(&self, id: u16) {
         self.ai.lock().unwrap().remove(id);
     }

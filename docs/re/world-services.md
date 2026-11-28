@@ -81,8 +81,8 @@ movement3 patrol and family assistance remain incomplete.
 
 ### Town guards
 
-Guards (`byType`11 spawns) in zones1, 2, 11, 12, 21 and72 are simulated world
-entities (`Role::Guard` in `monsters.rs`, logic in `npc_ai.rs`). Their spawn
+Guards (`byType`11 spawns) in zones1, 2, 11, 12, 21 and72, and Guard Towers
+(`byType`62) in zones1, 2, 11, 12, 71 and72, are simulated world entities (`Role::Guard` in `monsters.rs`, logic in `npc_ai.rs`). Their spawn
 packet is unchanged from the former static NPC. War-zone guards (61-64) stay
 static. Combat stats come from the imported 1453 NPC table (`OBJECT_NPC`).
 - Search: the nearest living hostile monster within14m (`GUARD_AGGRO_M`),
@@ -90,8 +90,17 @@ static. Combat stats come from the imported 1453 NPC table (`OBJECT_NPC`).
   of nation0 are friendly, otherwise other nations (and nation3) are hostile;
   all imported monsters are nation0. Known1453 servers pick the farthest unit in
   range; RE-KO picks the nearest (owner choice).
-- Guards ignore players, other guards, rare-boss candidates, one-life/event
-  spawns and GM summons (regen type1); suppression rooms lie outside guard zones.
+- Guards ignore other guards, rare-boss candidates, one-life/event spawns and GM
+  summons (regen type1); suppression rooms lie outside guard zones.
+- Enemy players (owner requirement): in Colony Zone71 and Ardream72, and in any
+  zone an event or `op invade <zone> on` marks as invaded, guards and towers
+  attack living, visible, non-GM players of the other nation, preferring players
+  over monsters. The invaded flag is in memory only (lost on restart); war
+  invasions are to set it once events are implemented. Guards chase within their14m aggro range and20m leash and
+  strike in melee; towers never move or target monsters and cast their first
+  magic slot (1453 fire spells) at players within their attack and spell range
+  (≤30m).
+  Same-nation players are never attacked; elsewhere guards ignore players.
 - Leash: a target farther than20m from the post (`GUARD_LEASH_M`) is dropped
   and the guard walks back. Guards never chase beyond that; only movement1/2
   guards idle-roam around the post, and movement4 guards do not chase.
@@ -110,12 +119,12 @@ static. Combat stats come from the imported 1453 NPC table (`OBJECT_NPC`).
   after regeneration or a leash reset, until it respawns. Known1453 servers only
   reduce XP proportionally and still give loot to the top player.
 - Players cannot hit, area-target, debuff, stun, slow, provoke or heal-target
-  guards; the target bar still works. Known1453 servers let enemy-nation players
-  attack guards in PvP zones and guards attack enemy players; both await an
-  owner decision. Supplied1453 data flags Moradon guards friendly to monsters;
+  guards; the target bar still works. Known1453 servers also let enemy-nation
+  players attack guards in PvP zones; that awaits an owner decision. Supplied1453 data flags Moradon guards friendly to monsters;
   RE-KO follows Open-KO and the owner requirement instead.
 - Live checks pending: native guard attack animation on a monster, the death
-  animation on result2 with `0x11`, and smooth speed-7 runs.
+  animation on result2 with `0x11`, smooth speed-7 runs and tower spell visuals
+  on enemy players.
 
 ### Monster spells
 

@@ -29,6 +29,7 @@ struct Rule {
 #[derive(Clone)]
 struct Player {
     name: String,
+    nation: u8,
     position: Position,
     hp: u16,
     invisible: bool,
@@ -60,6 +61,7 @@ async fn monster_disguise_blocks_proximity_aggro_but_keeps_damage_retaliation() 
     let mut inner = world.inner.lock().unwrap();
     let home = inner.mobs[&12000].position;
     let player = Player {
+        nation: 1,
         name: "Disguised".into(),
         position: home,
         hp: 100,
@@ -106,6 +108,7 @@ async fn monster_switches_aggro_when_another_player_deals_higher_damage() {
     brain.players.insert(
         1,
         Player {
+            nation: 1,
             name: "KarusTank".into(),
             position: home,
             hp: 500,
@@ -119,6 +122,7 @@ async fn monster_switches_aggro_when_another_player_deals_higher_damage() {
     brain.players.insert(
         2,
         Player {
+            nation: 1,
             name: "ElmoDps".into(),
             position: home,
             hp: 500,
@@ -238,7 +242,13 @@ pub(super) struct Brain {
     guard_strikes: Vec<GuardStrike>,
     /// Monsters guards ignore (rare-boss pool candidates).
     pub exempt: HashSet<u16>,
+    /// Zones made hostile by events (homeland invasions): guards and towers
+    /// there attack enemy-nation players, as in the PvP zones.
+    invaded: HashSet<u8>,
 }
+
+/// Zones where guards and towers always attack enemy-nation players.
+const GUARD_PVP_ZONES: [u8; 2] = [71, 72];
 fn distance(a: Position, b: Position) -> f32 {
     f32::from(a.x.abs_diff(b.x)).hypot(f32::from(a.z.abs_diff(b.z))) / 10.0
 }
@@ -438,6 +448,15 @@ fn cast_effect(
     }
     events
 }
+/// Whether the last movement packet among new events keeps the NPC moving;
+/// `None` when the NPC sent no movement (spell or attack packets only).
+fn last_movement(events: &[Event]) -> Option<bool> {
+    events
+        .iter()
+        .rev()
+        .find(|e| e.packet.first() == Some(&0x0b) && e.packet.len() >= 11)
+        .map(|e| e.packet[9..11] != [0, 0])
+}
 fn move_toward(
     mob: &mut Mob,
     target: Position,
@@ -561,7 +580,7 @@ impl Brain {
             }
             self.rules.insert(id, rule);
         }
-        self.load_guards(db)?;
+        self.load_guards(db, catalog)?;
         self.rng = skills::now_ms();
         tracing::info!(
             prototypes = self.rules.len(),
@@ -573,7 +592,11 @@ impl Brain {
     }
     /// Guard combat rules come from the imported 1453 NPC table (`byType`
     /// 11-13); guards have no `world_monster_ai` rows.
-    fn load_guards(&mut self, db: &Connection) -> anyhow::Result<()> {
+    fn load_guards(
+        &mut self,
+        db: &Connection,
+        catalog: Option<&skills::Catalog>,
+    ) -> anyhow::Result<()> {
         let present: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='world_reference_rules')",
             [],
@@ -583,7 +606,7 @@ impl Brain {
             return Ok(());
         }
         let mut q = db.prepare(
-            "SELECT rule_id,json_extract(data,'$.sDamage'),json_extract(data,'$.sHitRate'),json_extract(data,'$.sAttackDelay'),json_extract(data,'$.bySpeed1'),json_extract(data,'$.bySpeed2'),json_extract(data,'$.byAttackRange'),json_extract(data,'$.bySearchRange'),json_extract(data,'$.byTracingRange'),json_extract(data,'$.sBulk'),json_extract(data,'$.sStandtime') FROM world_reference_rules WHERE table_name='OBJECT_NPC' AND CAST(json_extract(data,'$.byType') AS INTEGER) IN (11,12,13)",
+            "SELECT rule_id,json_extract(data,'$.sDamage'),json_extract(data,'$.sHitRate'),json_extract(data,'$.sAttackDelay'),json_extract(data,'$.bySpeed1'),json_extract(data,'$.bySpeed2'),json_extract(data,'$.byAttackRange'),json_extract(data,'$.bySearchRange'),json_extract(data,'$.byTracingRange'),json_extract(data,'$.sBulk'),json_extract(data,'$.sStandtime'),json_extract(data,'$.iMagic1') FROM world_reference_rules WHERE table_name='OBJECT_NPC' AND CAST(json_extract(data,'$.byType') AS INTEGER) IN (11,12,13,62)",
         )?;
         let rows = q.query_map([], |r| {
             let n = |i: usize| -> rusqlite::Result<u64> {
@@ -610,16 +633,43 @@ impl Brain {
                     bulk: small(9)? / 100.0,
                     stand: n(10)?,
                     direct: 0,
-                    magic: 0,
+                    magic: n(11)?.min(u64::from(u32::MAX)) as u32,
                     mode: 0,
                 },
             ))
         })?;
         for row in rows {
-            let (id, rule) = row?;
+            let (id, mut rule) = row?;
+            // Towers cast their first magic slot; guards fight in melee.
+            if rule.magic != 0
+                && let Some(spell) = catalog.and_then(|c| npc_magic::Spell::resolve(c, rule.magic))
+            {
+                self.spells.insert(rule.magic, spell);
+            } else {
+                if rule.magic != 0 {
+                    tracing::warn!(
+                        npc = id,
+                        skill = rule.magic,
+                        "guard spell unavailable; tower stays idle"
+                    );
+                }
+                rule.magic = 0;
+            }
             self.guard_rules.insert(id, rule);
         }
         Ok(())
+    }
+    /// Marks a zone as invaded (or clears it) so its guards and towers attack
+    /// enemy-nation players.
+    pub fn set_invaded(&mut self, zone: u8, invaded: bool) {
+        if invaded {
+            self.invaded.insert(zone);
+        } else {
+            self.invaded.remove(&zone);
+        }
+    }
+    fn guards_hostile_to_players(&self, zone: u8) -> bool {
+        GUARD_PVP_ZONES.contains(&zone) || self.invaded.contains(&zone)
     }
     pub fn take_guard_strikes(&mut self) -> Vec<GuardStrike> {
         std::mem::take(&mut self.guard_strikes)
@@ -672,10 +722,12 @@ impl Brain {
             return;
         };
         let (nation, move_type, size) = (s.nation, s.move_type, s.size);
+        let tower = s.kind == crate::population::TOWER_KIND;
+        let pvp = nation != 0 && self.guards_hostile_to_players(mob.position.zone);
         let Some(rule) = self.guard_rules.get(&s.prototype) else {
             return;
         };
-        if mob.hp == 0 || rule.damage == 0 {
+        if mob.hp == 0 || (rule.damage == 0 && rule.magic == 0) {
             return;
         }
         let agent = self.guards.entry(mob.id).or_insert(GuardAgent {
@@ -700,7 +752,116 @@ impl Brain {
         };
         // 1453 hostility: a nation-0 guard is friendly to all, otherwise units
         // of another nation (or nation 3) are hostile.
-        let hostile = |p: &Prey| nation != 0 && (p.nation != nation || p.nation == 3);
+        let hostile = |p: &Prey| !tower && nation != 0 && (p.nation != nation || p.nation == 3);
+        // Enemy-nation players in PvP or invaded zones; towers use their attack range.
+        let players = &self.players;
+        let tower_spell = self.spells.get(&rule.magic).filter(|_| rule.magic != 0);
+        let reach_search = if tower {
+            let range = rule.range.min(30.0);
+            tower_spell
+                .filter(|s| s.range > 0.0)
+                .map_or(range, |s| range.min(s.range))
+        } else {
+            rule.search
+        };
+        let enemy = |p: &Player| {
+            pvp && p.hp > 0
+                && !p.invisible
+                && !p.is_admin
+                && p.nation != nation
+                && p.position.zone == mob.position.zone
+        };
+        if let Some(id) = agent.target.filter(|id| crate::pvp::is_player_id(*id)) {
+            let keep = players.get(&id).is_some_and(|p| {
+                enemy(p)
+                    && distance(agent.post, p.position) <= GUARD_LEASH_M.max(reach_search)
+                    && (move_type != 4 || distance(mob.position, p.position) <= reach_search)
+            });
+            if !keep {
+                agent.target = None;
+                agent.returning = distance(mob.position, agent.post) >= 0.2;
+                agent.roam = None;
+            }
+        }
+        let chasing_monster = agent.target.is_some_and(|id| !crate::pvp::is_player_id(id));
+        if (agent.target.is_none() || chasing_monster) && !agent.returning {
+            let enemy_player = players
+                .iter()
+                .filter(|(_, p)| {
+                    enemy(p)
+                        && distance(mob.position, p.position) <= reach_search
+                        && distance(agent.post, p.position) <= GUARD_LEASH_M.max(reach_search)
+                })
+                .min_by(|(ia, a), (ib, b)| {
+                    distance(mob.position, a.position)
+                        .total_cmp(&distance(mob.position, b.position))
+                        .then(ia.cmp(ib))
+                })
+                .map(|(id, _)| *id);
+            // Known 1453 guards check players before monsters.
+            if enemy_player.is_some() {
+                agent.target = enemy_player;
+                agent.roam = None;
+            }
+        }
+        if let Some(id) = agent.target.filter(|id| crate::pvp::is_player_id(*id)) {
+            let target = &players[&id];
+            let reach = if tower {
+                reach_search
+            } else {
+                1.0f32.min(rule.range) + rule.bulk * f32::from(size) / 100.0
+            };
+            let dist = distance(mob.position, target.position);
+            let speed = rule.run * f32::from(mob.speed_percent) / 100.0;
+            let event_start = events.len();
+            if dist > reach + std::f32::consts::FRAC_1_SQRT_2 / 10.0 {
+                if move_type != 4
+                    && let Some(e) = move_toward(
+                        mob,
+                        target.position,
+                        (speed * elapsed).min((dist - reach).max(0.0)),
+                        speed,
+                        reach,
+                    )
+                {
+                    events.push(e);
+                }
+            } else if now >= agent.next_attack {
+                agent.next_attack = now.saturating_add(rule.delay.max(1));
+                if let Some(spell) = tower_spell {
+                    events.extend(cast_effect(
+                        players,
+                        &mut self.strikes,
+                        &mut self.rng,
+                        mob,
+                        spell,
+                        id,
+                        false,
+                    ));
+                } else if rule.damage > 0 {
+                    let amount = physical(rule, target, 100, &mut self.rng);
+                    let queue = self.strikes.entry(id).or_default();
+                    if queue.len() < 32 {
+                        queue.push_back(Strike {
+                            npc: mob.id,
+                            zone: mob.position.zone,
+                            amount,
+                            spell: None,
+                        });
+                    }
+                }
+            }
+            if let Some(moving) = last_movement(&events[event_start..]) {
+                agent.moving = moving;
+            } else if agent.moving {
+                events.push(movement_event(mob, 0.0, mob.position));
+                agent.moving = false;
+            }
+            return;
+        }
+        if tower {
+            return;
+        }
         if let Some(id) = agent.target {
             let keep = find(id).is_some_and(|p| {
                 distance(agent.post, p.position) <= GUARD_LEASH_M
@@ -797,8 +958,8 @@ impl Brain {
                 }
             }
         }
-        if events.len() > event_start {
-            agent.moving = events.last().is_some_and(|e| e.packet[9..11] != [0, 0]);
+        if let Some(moving) = last_movement(&events[event_start..]) {
+            agent.moving = moving;
         } else if agent.moving {
             events.push(movement_event(mob, 0.0, mob.position));
             agent.moving = false;
@@ -810,6 +971,7 @@ impl Brain {
             Player {
                 is_admin: s.is_admin,
                 name: s.character.name.clone(),
+                nation: s.character.nation(),
                 position: s
                     .movement
                     .current_position(s.position, std::time::Instant::now()),
@@ -1207,8 +1369,8 @@ impl Brain {
                     }
                 }
             }
-            if events.len() > event_start {
-                agent.moving = events.last().is_some_and(|e| e.packet[9..11] != [0, 0]);
+            if let Some(moving) = last_movement(&events[event_start..]) {
+                agent.moving = moving;
             } else if agent.moving {
                 events.push(movement_event(mob, 0.0, mob.position));
                 agent.moving = false;
@@ -1286,6 +1448,7 @@ mod tests {
             brain.rules.get_mut(&100).unwrap().act = act;
             let mut admin = Player {
                 name: "Admin".into(),
+                nation: 1,
                 position: home,
                 hp: 100,
                 invisible: false,
@@ -1352,6 +1515,7 @@ mod tests {
         let home = mobs[&12000].position;
         let mut p = Player {
             name: "Ranged attacker".into(),
+            nation: 1,
             position: Position {
                 x: home.x + 300,
                 ..home
@@ -1476,6 +1640,7 @@ mod tests {
         let home = mobs[&12000].position;
         let mut p = Player {
             name: "Observer".into(),
+            nation: 1,
             position: Position {
                 x: home.x + 500,
                 ..home
@@ -1561,6 +1726,7 @@ mod tests {
         let home = world.inner.lock().unwrap().mobs[&12000].position;
         let player = |name: &str, dx: u16| Player {
             name: name.into(),
+            nation: 1,
             position: Position {
                 x: home.x + dx,
                 ..home
@@ -1669,6 +1835,7 @@ mod tests {
         brain.players.insert(
             4,
             Player {
+                nation: 1,
                 is_admin: true,
                 ..player("Admin", 100)
             },
@@ -1718,6 +1885,7 @@ mod tests {
             1,
             Player {
                 name: "StunTest".into(),
+                nation: 1,
                 position: Position {
                     x: home.x + 100,
                     ..home
@@ -1981,6 +2149,7 @@ mod tests {
         let home = mobs.mobs[&12000].position;
         let mut player = Player {
             name: "AI test".into(),
+            nation: 1,
             position: Position {
                 x: home.x + 100,
                 ..home
@@ -2103,6 +2272,7 @@ mod tests {
         };
         let mut p = Player {
             name: "test".into(),
+            nation: 1,
             position: Position::default(),
             hp: 100,
             invisible: false,
@@ -2132,6 +2302,7 @@ mod tests {
     fn bystander(position: Position, at: u64) -> Player {
         Player {
             name: "Bystander".into(),
+            nation: 2,
             position,
             hp: 100,
             invisible: false,
@@ -2140,6 +2311,64 @@ mod tests {
             stats: combat::Stats::default(),
             at,
         }
+    }
+
+    #[test]
+    fn guards_attack_enemy_players_only_in_pvp_or_invaded_zones() {
+        use super::super::guard_tests::{GUARD, POST, fixture};
+        let Some((world, _db)) = fixture() else {
+            return;
+        };
+        let mut now = skills::now_ms();
+        let near = Position {
+            x: POST.x + 40,
+            ..POST
+        };
+        let mut run = |player: Player, ticks: usize| {
+            let mut hits = 0;
+            for _ in 0..ticks {
+                now += 250;
+                let mut p = player.clone();
+                p.at = now;
+                world.ai.lock().unwrap().players.insert(1, p);
+                world.tick(now);
+                hits += world.ai.lock().unwrap().take(1).len();
+            }
+            hits
+        };
+        // Moradon is not a PvP zone: an enemy-nation player is ignored.
+        assert_eq!(run(bystander(near, 0), 12), 0);
+        // An invasion makes the guard chase and strike the enemy player.
+        world.set_guard_invaded(21, true);
+        assert!(run(bystander(near, 0), 24) > 0, "guard attacks the invader");
+        assert!(crate::pvp::is_player_id(
+            world.ai.lock().unwrap().guards[&GUARD].target.unwrap_or(1)
+        ));
+        // Same-nation players are never attacked, even during an invasion.
+        let friend = Player {
+            nation: 1,
+            ..bystander(near, 0)
+        };
+        world
+            .ai
+            .lock()
+            .unwrap()
+            .guards
+            .get_mut(&GUARD)
+            .unwrap()
+            .target = None;
+        assert_eq!(run(friend, 12), 0);
+        // Ending the invasion stops attacks on enemies.
+        world.set_guard_invaded(21, false);
+        world
+            .ai
+            .lock()
+            .unwrap()
+            .guards
+            .get_mut(&GUARD)
+            .unwrap()
+            .target = None;
+        assert_eq!(run(bystander(near, 0), 12), 0);
     }
 
     #[test]

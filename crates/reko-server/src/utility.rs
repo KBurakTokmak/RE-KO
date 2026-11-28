@@ -269,6 +269,8 @@ pub(crate) async fn npc_strikes(
             continue;
         }
         let spell = strike.spell.clone();
+        // Guards and towers cannot be hit, so their strikes keep Mage Armor intact.
+        let reflectable = world.reflectable(strike.npc);
         let mut spell_outcome = SpellOutcome::default();
         let result = (|| -> rusqlite::Result<(skills::State, u16, Option<u8>, bool)> {
             let db = lobby.db.lock().unwrap();
@@ -306,7 +308,7 @@ pub(crate) async fn npc_strikes(
             let instant = spell.as_ref().is_none_or(|h| {
                 h.dot.is_none() && h.mana == 0 && !h.absorb && h.drain_percent == 0
             });
-            let reflected = if amount > 0 && instant {
+            let reflected = if amount > 0 && instant && reflectable {
                 next.buffs
                     .get(&25)
                     .filter(|b| now < b.until)
