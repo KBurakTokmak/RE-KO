@@ -601,6 +601,11 @@ fn execute(
         && merchant.prototype == 15002
         && s.position.zone == 21
         && merchant.nearby(s);
+    let iris_script = context.file == "13015_Iris.lua"
+        && merchant.prototype == 13015
+        && s.position.zone == 21
+        && merchant.nearby(s);
+    let (temple, temple_inside) = crate::event_runtime::temple_window(lobby, s);
     let mut abyss_hub = abyss_trigger.map(|_| lobby.social.lock().unwrap());
     let party = abyss_hub.as_ref().map_or_else(Vec::new, |hub| {
         hub.group(s.player_id)
@@ -862,7 +867,40 @@ fn execute(
         function!("isInClan", |_, _: Variadic<i64>| Ok(false));
         function!("isClanLeader", |_, _: Variadic<i64>| Ok(false));
         function!("GetLoyalty", |_, _: Variadic<i64>| Ok(state.borrow().rewards.totals.loyalty));
-        function!("CheckMonsterChallengeTime", |_, _: Variadic<i64>| Ok(-1));
+        // 1453 meaning: non-zero while the player's temple bracket accepts entries.
+        function!("CheckMonsterChallengeTime", |_, _: Variadic<i64>| Ok(i64::from(temple.is_some())));
+        function!("CheckMonsterChallengeUserCount", |_, _: Variadic<i64>| Ok(temple_inside as i64));
+        if iris_script {
+            function!("EnterForgottenTemple", |_, a: Variadic<i64>| {
+                if a.as_slice() != [i64::from(s.player_id)] {
+                    return Err(mlua::Error::runtime("Invalid temple entry request"));
+                }
+                let mut st = state.borrow_mut();
+                if st.travel.is_some() {
+                    return Err(mlua::Error::runtime("Travel already selected"));
+                }
+                let (code, fee) = crate::event_runtime::temple_entry(temple.as_ref(), temple_inside, st.coins);
+                if code != 0 {
+                    return Ok(code);
+                }
+                if s.skills.buffs.get(&22).is_some_and(|b| crate::skills::now_ms() < b.until) {
+                    return Err(mlua::Error::runtime("You cannot teleport while frozen"));
+                }
+                st.take(crate::events::NOAH, fee).map_err(mlua::Error::external)?;
+                let (x, z): (u16, u16) = tx.query_row(
+                    "SELECT karus_x,karus_z FROM world_town_starts WHERE zone=?1",
+                    [crate::events::TEMPLE_ZONE],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ).map_err(mlua::Error::external)?;
+                st.travel = Some(crate::movement::Position {
+                    zone: crate::events::TEMPLE_ZONE,
+                    x: x.saturating_mul(10),
+                    z: z.saturating_mul(10),
+                    y: 0,
+                });
+                Ok(0)
+            });
+        }
         function!("SelectMsg", |_, a: Variadic<i64>| {
             if a.len() < 5 {
                 return Err(mlua::Error::runtime("invalid menu"));
@@ -1436,7 +1474,13 @@ pub(crate) async fn handle(
             .ok_or_else(|| anyhow::anyhow!("game directory unavailable"))?
             .join("kn_2086_patch_private_server/lCAFILES/Quests")
             .join(&context.file);
-        let script = if let Some(script) = crate::hemes::script(&context.file) {
+        let script = if let Some(script) = crate::event_runtime::iris_script(&context.file) {
+            anyhow::ensure!(
+                merchant.prototype == 13015 && s.position.zone == 21,
+                "Forgotten Temple entry unavailable"
+            );
+            script
+        } else if let Some(script) = crate::hemes::script(&context.file) {
             anyhow::ensure!(
                 merchant.prototype == 16085 && merchant.kind == 132 && s.position.zone == 21,
                 "Peddler service unavailable"

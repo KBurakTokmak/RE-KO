@@ -75,6 +75,14 @@ pub(crate) fn is_hostile(hub: &Hub, caster: &Session, target: &Session) -> bool 
             !same_party && !same_clan
         }
         31 | 61..=69 | 71 | 72 => caster.character.nation() != target.character.nation(),
+        // Invaded homeland after a lost nation war.
+        1 | 2 if hub.events.gates.invasion == Some(caster.position.zone) => {
+            caster.character.nation() != target.character.nation()
+        }
+        // Castle Siege battle: members of different clans fight in Delos.
+        crate::events::DELOS if hub.events.gates.siege_battle() => {
+            caster.clan.id != 0 && target.clan.id != 0 && caster.clan.id != target.clan.id
+        }
         _ => false,
     }
 }
@@ -525,17 +533,32 @@ pub(crate) fn hit_player(
 
         let mut killer_np = None;
         let mut victim_np = None;
+        let war_np = hub.events.gates.war_np(caster.position.zone);
         if dead
-            && matches!(caster.position.zone, 71 | 72)
+            && war_np.is_some()
+            && caster.character.nation() != target_player.s.character.nation()
+            && let Some(index) = target_player.s.character.nation().checked_sub(1)
+            && let Some(count) = hub.events.deaths.get_mut(usize::from(index))
+        {
+            // War casualty count for status notices and kill-based results.
+            *count += 1;
+        }
+        let np_rule = if matches!(caster.position.zone, 71 | 72) {
+            Some((50, 25))
+        } else {
+            war_np
+        };
+        if dead
+            && let Some((gain, loss)) = np_rule
             && caster.character.nation() != target_player.s.character.nation()
         {
             let mut v_tot =
                 quest_rewards::load(&tx, &target_player.account, target_player.s.character.slot)?;
             if v_tot.loyalty > 0 {
                 let mut k_tot = quest_rewards::load(&tx, attacker_account, caster.character.slot)?;
-                v_tot.loyalty = v_tot.loyalty.saturating_sub(25);
-                k_tot.loyalty = k_tot.loyalty.saturating_add(50).min(2_100_000_000);
-                k_tot.monthly = k_tot.monthly.saturating_add(50).min(2_100_000_000);
+                v_tot.loyalty = v_tot.loyalty.saturating_sub(loss);
+                k_tot.loyalty = k_tot.loyalty.saturating_add(gain).min(2_100_000_000);
+                k_tot.monthly = k_tot.monthly.saturating_add(gain).min(2_100_000_000);
                 tx.execute(
                     "INSERT INTO character_quest_rewards VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account,slot) DO UPDATE SET experience=excluded.experience,loyalty=excluded.loyalty,monthly=excluded.monthly",
                     params![

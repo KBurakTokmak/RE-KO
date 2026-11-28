@@ -17,6 +17,12 @@ the same text is sent as ordinary chat. Details and evidence are in
 | `op unmute` | `op unmute <name>` | Remove a mute |
 | `op invade` | `op invade <zone> on\|off` | Make a zone's guards and towers attack enemy-nation players |
 | `op weather` | `op weather clear\|rain\|snow <0-100>` | Set world weather until the next hour |
+| `op event list` | `op event list` | Configured event schedule rows |
+| `op event status` | `op event status` | Running events: phase, stage, scores, owner |
+| `op event start` | `op event start temple [level]\|lunar [61\|62\|64]\|darklunar\|siege` | Start an event now; the temple level picks the bracket |
+| `op event stop` | `op event stop <event>` | Stop at once: despawn, no rewards, players leave |
+| `op event advance` | `op event advance <event>` | Skip temple sign-up or to the next wave, war to the half-time result, siege countdown |
+| `op event result` | `op event result karus\|elmorad\|draw` | Decide the running war |
 | `gmvisible` | `gmvisible on\|off\|status` | Show or hide this admin to normal players (session only) |
 | `teleport`, `tp` | `tp <x> <z>` | Warp within the current zone to map coordinates |
 | `zonechange` | `zonechange [id\|name]` | Move to a zone; no argument lists zones |

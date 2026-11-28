@@ -36,7 +36,9 @@ renderer/client and an in-process game host have not been implemented.
 - Mage party transport/Blink, NPC lightning stun/reactive armor and class
   player effects.
 - PvP in Arena48 pits, Colony Zone/Ardream and war zones, plus native 1v1 and
-  clan Arena challenges. Nation wars, sieges and challenge results remain open.
+  clan Arena challenges. Challenge results remain open.
+- Scheduled events with operator control: Forgotten Temple waves and chests,
+  Lunar and Dark Lunar Wars with invasion, and the Castle Siege War for Delos.
 - HP/MP potions, natural regeneration, weapon durability and recovery updates.
 - Eight-member parties with invitations, chat, shared XP/quest kills and loot routing.
 - Private messages with the client’s whisper target and block controls.
@@ -54,8 +56,8 @@ renderer/client and an in-process game host have not been implemented.
 
 These are working subsets, not a claim of complete retail behavior. Some NPC
 services, specialist quests, skills and multiplayer mechanics remain incomplete.
-Terrain pathfinding, monster family assistance, advanced clan systems and war events are
-among the remaining systems. See the [feature backlog](docs/design/1453-feature-backlog.md).
+Terrain pathfinding, monster family assistance, advanced clan systems, Border Defence War and
+King events are among the remaining systems. See the [feature backlog](docs/design/1453-feature-backlog.md).
 
 ## Run and develop
 

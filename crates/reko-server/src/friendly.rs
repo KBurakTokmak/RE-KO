@@ -68,7 +68,7 @@ fn apply(
             || !dead_player.s.entered
             || dead_player.s.zone_loading
             || dead_player.s.skills.hp != 0
-            || !friendly(s, &dead_player.s)
+            || !friendly(&hub, s, &dead_player.s)
             || !social::near(s.position, dead_player.s.position, radius)
         {
             return Err("Select a dead friendly player within range.");
@@ -160,14 +160,14 @@ fn apply(
                 && (id == s.player_id
                     || radius > 0 && social::near(s.position, state.position, radius))
                 && if area_friend {
-                    friendly(s, state)
+                    friendly(&hub, s, state)
                 } else if group_cast {
                     members.contains(&id)
                 } else {
                     id == target
                         && match spell.moral {
-                            2 => friendly(s, state),
-                            3 => id != s.player_id && friendly(s, state),
+                            2 => friendly(&hub, s, state),
+                            3 => id != s.player_id && friendly(&hub, s, state),
                             4 => members.contains(&id),
                             _ => false,
                         }
@@ -318,11 +318,22 @@ fn apply(
     Ok((paid, effects))
 }
 
-fn friendly(caster: &Session, target: &Session) -> bool {
-    caster.player_id == target.player_id
-        || caster.position.zone != 48
-            && (!matches!(caster.position.zone, 71 | 72)
-                || caster.character.nation() == target.character.nation())
+/// Friendly skills never help a player the caster may fight here.
+fn friendly(hub: &social::Hub, caster: &Session, target: &Session) -> bool {
+    if caster.player_id == target.player_id {
+        return true;
+    }
+    let same_nation = caster.character.nation() == target.character.nation();
+    let gates = &hub.events.gates;
+    match caster.position.zone {
+        48 => false,
+        61..=69 | 71 | 72 => same_nation,
+        zone @ (1 | 2) if gates.invasion == Some(zone) => same_nation,
+        crate::events::DELOS if gates.siege_battle() => {
+            caster.clan.id == 0 || target.clan.id == 0 || caster.clan.id == target.clan.id
+        }
+        _ => true,
+    }
 }
 
 pub(crate) async fn handle(

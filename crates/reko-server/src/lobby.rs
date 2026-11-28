@@ -26,6 +26,8 @@ pub(crate) struct Lobby {
     pub combat: Option<super::combat::Catalog>,
     pub monsters: Option<std::sync::Arc<super::monsters::World>>,
     pub login_slots: Arc<tokio::sync::Semaphore>,
+    /// Scheduled events; never hold while locking `db` or `social`.
+    pub events: Mutex<crate::events::Controller>,
     pending: Mutex<HashMap<IpAddr, Vec<PendingLogin>>>,
     active_accounts: Mutex<HashSet<String>>,
 }
@@ -68,6 +70,7 @@ impl Lobby {
             combat: None,
             monsters: None,
             login_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            events: Mutex::default(),
             pending: Mutex::new(HashMap::new()),
             active_accounts: Mutex::new(HashSet::new()),
         })

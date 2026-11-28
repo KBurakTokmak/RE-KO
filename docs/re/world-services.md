@@ -95,8 +95,8 @@ static. Combat stats come from the imported 1453 NPC table (`OBJECT_NPC`).
 - Enemy players (owner requirement): in Colony Zone71 and Ardream72, and in any
   zone an event or `op invade <zone> on` marks as invaded, guards and towers
   attack living, visible, non-GM players of the other nation, preferring players
-  over monsters. The invaded flag is in memory only (lost on restart); war
-  invasions are to set it once events are implemented. Guards chase within their14m aggro range and20m leash and
+  over monsters. The invaded flag is in memory only (lost on restart); a
+  Lunar War invasion sets and clears it ([events](events.md)). Guards chase within their14m aggro range and20m leash and
   strike in melee; towers never move or target monsters and cast their first
   magic slot (1453 fire spells) at players within their attack and spell range
   (≤30m).

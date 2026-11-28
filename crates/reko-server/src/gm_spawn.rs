@@ -115,27 +115,52 @@ fn execute(
         }
         return Ok(messages);
     }
-    let (id, _, data) = matches[0];
-    let t: Template = serde_json::from_str(data)?;
-    anyhow::ensure!(t.prototype == *id, "Monster catalog ID mismatch.");
+    let (id, _, _) = matches[0];
+    let definition = template_spawn(db, *id, s.position)?;
+    let mut reserved = reserved_ids(db)?;
+    reserved.insert(s.player_id);
+    let name = definition.name.clone();
+    let entity = world.summon(definition, &reserved)?;
+    tracing::info!(account, character=%s.character.name, prototype=id, entity,
+        zone=s.position.zone, x=s.position.x, z=s.position.z, "admin monster summoned");
+    Ok(vec![format!(
+        "Spawned {name} (ID {id}, entity {entity}); no respawn."
+    )])
+}
+
+/// IDs owned by imported spawns and merchants, never used for temporary entities.
+pub(crate) fn reserved_ids(db: &Connection) -> rusqlite::Result<HashSet<u16>> {
+    db.prepare("SELECT id FROM world_spawns UNION SELECT id FROM world_merchants")?
+        .query_map([], |r| r.get(0))?
+        .collect()
+}
+
+/// One-life spawn of an imported 1453 monster prototype with AI data.
+pub(crate) fn template_spawn(
+    db: &Connection,
+    prototype: u16,
+    position: crate::movement::Position,
+) -> anyhow::Result<Spawn> {
+    let data: String = db.query_row(
+        "SELECT data FROM world_reference_rules WHERE table_name='MONSTER_TEMPLATE' AND rule_id=?1",
+        [prototype],
+        |r| r.get(0),
+    )?;
+    let t: Template = serde_json::from_str(&data)?;
+    anyhow::ensure!(t.prototype == prototype, "Monster catalog ID mismatch.");
     let ai: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM world_monster_ai WHERE prototype=?1)",
-        [id],
+        [prototype],
         |r| r.get(0),
     )?;
     anyhow::ensure!(ai, "This monster's AI data is not imported.");
-    let mut reserved: HashSet<u16> = db
-        .prepare("SELECT id FROM world_spawns UNION SELECT id FROM world_merchants")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    reserved.insert(s.player_id);
-    let definition = Spawn {
+    Ok(Spawn {
         id: 0,
         monster: true,
-        position: s.position,
+        position,
         prototype: t.prototype,
         appearance: t.appearance,
-        name: t.name.clone(),
+        name: t.name,
         kind: t.kind,
         group: t.group,
         nation: t.nation,
@@ -143,21 +168,14 @@ fn execute(
         size: t.size,
         weapons: t.weapons,
         direction: 0,
-        bounds: [s.position.x, s.position.z, s.position.x, s.position.z],
+        bounds: [position.x, position.z, position.x, position.z],
         hp: t.hp,
         armor: t.armor,
         resistance: t.resistance,
         respawn_ms: 1000,
         regen_type: 1,
         move_type: 1,
-    };
-    let entity = world.summon(definition, &reserved)?;
-    tracing::info!(account, character=%s.character.name, prototype=id, entity,
-        zone=s.position.zone, x=s.position.x, z=s.position.z, "admin monster summoned");
-    Ok(vec![format!(
-        "Spawned {} (ID {}, entity {entity}); no respawn.",
-        t.name, t.prototype
-    )])
+    })
 }
 
 fn parse(text: &str) -> Option<(&'static str, &str)> {

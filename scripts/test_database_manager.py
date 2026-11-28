@@ -209,6 +209,43 @@ class DatabaseTests(unittest.TestCase):
                 with manager.connect(self.save) as db:
                     migrate(db, self.historical, None)
 
+    def test_world_events_import_waves_keep_owner_schedule_edits_and_use_template_fallback(self):
+        rows = [dict(sIndex=key, bLevel=2 if key < 56 else 3, bStage=key % 56 + 1, bStageLevel=1, sTime=310,
+                     sSid=1000 + key, sCount=5, sPosX=126, sPosZ=126, bRange=45) for key in range(224)]
+        (self.root / "logs/reference1453").mkdir(parents=True)
+        (self.root / "logs/reference1453/MONSTER_CHALLENGE_SUMMON_LIST.json").write_text(json.dumps(rows), encoding="utf-8")
+        with manager.connect(self.save) as db:
+            db.execute("INSERT INTO lobby_accounts VALUES('private','secret')")
+            manager.world_events(db, self.historical, None)
+            db.execute("UPDATE world_reference_rules SET data=? WHERE table_name='EVENT_SCHEDULE' AND rule_id=1",
+                       (json.dumps(dict(event="temple", time="21:00")),))
+            manager.world_events(db, self.historical, None)
+            self.assertEqual(db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='MONSTER_CHALLENGE_SUMMON_LIST'").fetchone()[0], 224)
+            self.assertEqual(json.loads(db.execute("SELECT data FROM world_reference_rules WHERE table_name='EVENT_SCHEDULE' AND rule_id=1").fetchone()[0])["time"], "21:00")
+            schedule = {key: json.loads(data) for key, data in db.execute("SELECT rule_id,data FROM world_reference_rules WHERE table_name='EVENT_SCHEDULE'")}
+            self.assertEqual(schedule[2]["level_min"], 45)
+            self.assertEqual(schedule[3]["zones"], [61, 62, 64])
+            self.assertEqual(db.execute("SELECT password FROM lobby_accounts").fetchone()[0], 'secret')
+        manager.export_template(self.save, self.template)
+        with manager.connect(self.save) as db:
+            db.execute("UPDATE world_reference_rules SET data=? WHERE table_name='MONSTER_CHALLENGE_SUMMON_LIST' AND rule_id=3",
+                       (json.dumps(dict(sSid=1)),))
+        with self.assertRaisesRegex(ValueError, 'wave customization'):
+            with manager.connect(self.save) as db:
+                manager.world_events(db, self.historical, None)
+        (self.root / "logs/reference1453/MONSTER_CHALLENGE_SUMMON_LIST.json").unlink()
+        target = self.root / "friend.db"
+        world(target)
+        with manager.connect(target) as db:
+            manager.world_events(db, self.historical, self.template)
+            self.assertEqual(db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='MONSTER_CHALLENGE_SUMMON_LIST'").fetchone()[0], 224)
+        partial = self.root / "partial.db"
+        world(partial)
+        (self.root / "logs/reference1453/MONSTER_CHALLENGE_SUMMON_LIST.json").write_text(json.dumps(rows[:56]), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            with manager.connect(partial) as db:
+                manager.world_events(db, self.historical, None)
+
     def run(self, result=None):
         def initialize(arguments, **kwargs):
             path = Path(arguments[-1])

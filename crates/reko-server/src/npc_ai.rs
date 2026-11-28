@@ -995,6 +995,11 @@ impl Brain {
         self.players.remove(&id);
         self.strikes.remove(&id);
     }
+    /// Drops all state of a removed entity so its ID can be reused.
+    pub fn forget_mob(&mut self, id: u16) {
+        self.agents.remove(&id);
+        self.guards.remove(&id);
+    }
     pub fn take(&mut self, id: u16) -> Vec<Strike> {
         self.strikes
             .remove(&id)

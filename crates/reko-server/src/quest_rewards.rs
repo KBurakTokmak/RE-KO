@@ -226,6 +226,10 @@ impl State {
             stat_total: s.character.stats.iter().map(|v| u16::from(*v)).sum(),
         })
     }
+    /// Pseudo-items applied by `gain` (experience and national points).
+    pub fn handles(&self, id: u32) -> bool {
+        matches!(id, 900001000 | 900002000 | 900003000)
+    }
     pub fn gain(&mut self, id: u32, amount: u32) -> anyhow::Result<bool> {
         match id {
             900001000 => self.experience(amount, &thresholds()?)?,

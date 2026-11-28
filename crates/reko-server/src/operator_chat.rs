@@ -52,6 +52,17 @@ pub(crate) fn command(
     if command.eq_ignore_ascii_case(b"invade") {
         return Some(notice(&invade(lobby, args)));
     }
+    if command.eq_ignore_ascii_case(b"event") {
+        let text: String = args.iter().map(|b| char::from(*b)).collect();
+        let lines = crate::event_runtime::command(lobby, &text);
+        tracing::info!(operator=%actor.character.name, command=%text, ?lines, "operator event command");
+        let mut hub = lobby.social.lock().unwrap();
+        let (last, rest) = lines.split_last()?;
+        for line in rest {
+            hub.send(actor.player_id, notice(line.as_bytes()));
+        }
+        return Some(notice(last.as_bytes()));
+    }
     let mut hub = lobby.social.lock().unwrap();
     if command.eq_ignore_ascii_case(b"players") {
         return Some(players(&hub, args));
@@ -151,7 +162,7 @@ pub(crate) fn command(
 }
 
 fn usage() -> Vec<u8> {
-    notice(b"Use op players [page], op kick <character>, op announce <message>, op mute <character> <1-60 minutes>, op unmute <character>, or op weather clear|rain|snow <0-100>.")
+    notice(b"Use op players [page], op kick <character>, op announce <message>, op mute <character> <1-60 minutes>, op unmute <character>, op weather clear|rain|snow <0-100>, or op event list|status|start|stop|advance|result.")
 }
 
 fn players(hub: &Hub, args: &[u8]) -> Vec<u8> {

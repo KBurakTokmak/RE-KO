@@ -152,6 +152,19 @@ fn select(
         .into_iter()
         .find(|w| w.id == id)
         .ok_or_else(|| anyhow::anyhow!("destination not offered"))?;
+    if !s.is_admin
+        && lobby
+            .social
+            .lock()
+            .unwrap()
+            .events
+            .gates
+            .war
+            .as_ref()
+            .is_some_and(|war| war.lockout.contains(&w.zone))
+    {
+        anyhow::bail!("This zone is closed during the war.");
+    }
     if !s.is_admin && matches!(w.zone, 71 | 72) {
         anyhow::ensure!(
             s.progress.level >= 35,
@@ -447,8 +460,7 @@ fn movement_destination(
                 .unwrap_or(0)
         };
         let zone = n("Exec1") as u8;
-        // War/event entry requires a running event controller.
-        if n("Type") != 1 || (61..=69).contains(&zone) {
+        if n("Type") != 1 {
             continue;
         }
         let nation = match zone {
@@ -456,8 +468,32 @@ fn movement_destination(
             2 | 12 => 2,
             _ => 0,
         };
-        if nation != 0 && nation != s.character.nation() {
-            continue;
+        {
+            // War zones open only with their war; enemy homelands only on invasion.
+            let hub = lobby.social.lock().unwrap();
+            if (61..=69).contains(&zone) {
+                let present = hub
+                    .players
+                    .values()
+                    .filter(|p| {
+                        p.s.position.zone == zone && p.s.character.nation() == s.character.nation()
+                    })
+                    .count();
+                if hub
+                    .events
+                    .gates
+                    .war_entry(zone, s.character.nation(), s.progress.level, present)
+                    .is_err()
+                {
+                    continue;
+                }
+            }
+            if nation != 0
+                && nation != s.character.nation()
+                && (hub.events.gates.invasion != Some(zone) || zone > 2)
+            {
+                continue;
+            }
         }
         if matches!(zone, 11 | 12) && s.progress.level < 60 {
             continue;

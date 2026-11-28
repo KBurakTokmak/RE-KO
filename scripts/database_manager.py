@@ -295,12 +295,50 @@ def accessory_compound(db, historical, template):
     if db.execute("SELECT count(*) FROM world_reference_rules WHERE table_name='ACCESSORY_UPGRADE'").fetchone()[0] < 300:
         raise ValueError('Accessory compound recipes are incomplete.')
 
+# Owner schedule (server local time). Rows are owner-editable data; local edits are kept.
+EVENT_SCHEDULE = {
+    1: dict(event='temple', days='daily', time='22:15', level_min=60, level_max=80, chest=379156000,
+            waves=3, fee=100000, capacity=33, enabled=True),
+    2: dict(event='temple', days='daily', time='23:30', level_min=45, level_max=59, chest=379155000,
+            waves=2, fee=100000, capacity=33, enabled=True),
+    3: dict(event='lunar', days=['fri'], time='20:00', minutes=120, zones=[61, 62, 64], level_min=35,
+            level_max=83, nation_cap=150, np_kill=64, np_death=50, invasion=True,
+            victory_noah=100000, victory_exp=5000, enabled=True),
+    4: dict(event='darklunar', days=['thu'], time='20:00', minutes=120, zones=[63], level_min=35,
+            level_max=59, nation_cap=150, np_kill=64, np_death=50, invasion=False,
+            victory_noah=100000, victory_exp=5000, enabled=True),
+    5: dict(event='siege', days=['sun'], time='20:00', countdown_minutes=10, minutes=60, enabled=True),
+}
+SUMMON_FIELDS = ('sIndex', 'bLevel', 'bStage', 'bStageLevel', 'sTime', 'sSid', 'sCount', 'sPosX', 'sPosZ', 'bRange')
+
+
+def world_events(db, historical, template):
+    """Forgotten Temple waves from 1453 MONSTER_CHALLENGE_SUMMON_LIST plus the owner event schedule."""
+    reference = ROOT / 'logs/reference1453/MONSTER_CHALLENGE_SUMMON_LIST.json'
+    if reference.is_file():
+        for row in json.loads(reference.read_text(encoding='utf-8-sig')):
+            key = int(row['sIndex'])
+            value = {name: int(row[name]) for name in SUMMON_FIELDS}
+            old = db.execute("SELECT data FROM world_reference_rules WHERE table_name='MONSTER_CHALLENGE_SUMMON_LIST' AND rule_id=?", (key,)).fetchone()
+            if old and json.loads(old[0]) != value:
+                raise ValueError(f'Forgotten Temple wave customization conflicts: {key}.')
+            db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('MONSTER_CHALLENGE_SUMMON_LIST',?,?)", (key, json.dumps(value, sort_keys=True)))
+    else:
+        from_template(db, template, {'world_reference_rules': lambda r: r['table_name'] == 'MONSTER_CHALLENGE_SUMMON_LIST'}, minimum=224)
+    for level, minimum in ((2, 56), (3, 56)):
+        stages = db.execute("SELECT count(DISTINCT json_extract(data,'$.bStage')) FROM world_reference_rules WHERE table_name='MONSTER_CHALLENGE_SUMMON_LIST' AND json_extract(data,'$.bLevel')=?", (level,)).fetchone()[0]
+        if stages < minimum:
+            raise ValueError(f'Forgotten Temple waves for bracket {level} are incomplete.')
+    for key, value in EVENT_SCHEDULE.items():
+        db.execute("INSERT OR IGNORE INTO world_reference_rules VALUES('EVENT_SCHEDULE',?,?)", (key, json.dumps(value, sort_keys=True)))
+
 # Append new revisions in order; never rename/replay an already shipped revision.
 MIGRATIONS = ((REVISION, delos), ('002-mage-combat-travel', mage_travel),
               ('003-combat-zone-population', combat_zones), ('004-transformations', transformations),
               ('005-suppression-loot', suppression_loot), ('006-zone-metadata', zone_names),
               ('007-potion-balance', potion_balance), ('008-skill-type1-damage', skill_type1_damage),
-              ('009-monster-magic', monster_magic), ('010-accessory-compound', accessory_compound))
+              ('009-monster-magic', monster_magic), ('010-accessory-compound', accessory_compound),
+              ('011-world-events', world_events))
 
 
 def migrate_content(db, historical, template=None):

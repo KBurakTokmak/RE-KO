@@ -26,6 +26,7 @@ pub fn initialize(db: &Connection) -> rusqlite::Result<()> {
     crate::loot::initialize(db)?;
     db.execute_batch(include_str!("npc_ai.sql"))?;
     crate::quests::initialize(db)?;
+    crate::event_runtime::initialize(db)?;
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }

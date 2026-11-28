@@ -19,6 +19,7 @@ generated exports, account lists and deployment history do not belong here.
 | [Tables](re/tbl.md) | TBL cipher and binary layout |
 | [Skills and combat](re/skills-combat.md) | Supported effects, formulas, costs and known gaps |
 | [World and services](re/world-services.md) | Spawns, AI, loot, equipment, merchants and travel |
+| [Scheduled events](re/events.md) | Forgotten Temple, Lunar/Dark Lunar War, Castle Siege, schedules and event rewards |
 | [Quests and progression](re/quests-progression.md) | Concurrent objectives, exchange safety, XP and promotion |
 | [Upgrade rates](re/upgrade-rates.md) | Table rates versus effective normal-upgrade probabilities |
 | [Client startup](re/client-startup.md) | Timed-exit diagnosis and supported local launcher |

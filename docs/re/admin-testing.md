@@ -185,6 +185,16 @@ Supplied1453/Open-KO `User::Warp` is the packet/coordinate reference. Use bare
 commands: the original client may intercept unknown slash commands locally.
 
 
+## Scheduled events
+
+`op event start temple 70` opens the 60-80 Forgotten Temple sign-up at once;
+talk to Iris in Moradon to enter, then `op event advance temple` closes sign-up
+and later skips to the next wave. `op event start lunar 61` opens a war; admins
+bypass zone eviction and enter with `zonechange`, and admin basic attacks kill
+keepers quickly. `op event result karus` decides a war, `op event start siege`
+plus `op event advance siege` begins a siege battle, and `op event stop <event>`
+aborts without rewards. Rules and schedule data are in [events](events.md).
+
 ## Chat operations
 
 A character with the database administrator role can enter these commands in All

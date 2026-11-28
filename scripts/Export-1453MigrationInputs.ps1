@@ -48,6 +48,7 @@ Export-Queries $Database $OutputDirectory ([ordered]@{
     MAGIC_TYPE6 = 'SELECT * FROM MAGIC_TYPE6 WHERE iNum / 1000 = 472 ORDER BY iNum'
     MAGIC_TYPE6_NPC = 'SELECT * FROM MAGIC_TYPE6 WHERE iNum BETWEEN 500505 AND 500512 ORDER BY iNum'
     ZONE_INFO = 'SELECT * FROM ZONE_INFO ORDER BY ZoneNo'
+    MONSTER_CHALLENGE_SUMMON_LIST = 'SELECT sIndex, bLevel, bStage, bStageLevel, sTime, sSid, sCount, sPosX, sPosZ, bRange FROM MONSTER_CHALLENGE_SUMMON_LIST ORDER BY sIndex'
 })
 if ($SupplementaryDatabase) {
     Export-Queries $SupplementaryDatabase $SupplementaryOutputDirectory ([ordered]@{

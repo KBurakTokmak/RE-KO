@@ -64,6 +64,18 @@ pub(crate) async fn handle(
     account: &str,
     session: &mut Session,
 ) {
+    if session.position.zone == crate::events::TEMPLE_ZONE
+        && session.entered
+        && u32::from(session.skills.hp) * 2 >= u32::from(session.skills.max_hp)
+        && session.skills.hp > 0
+    {
+        // Known 1453 behavior: town from the Forgotten Temple leaves for Moradon.
+        match crate::event_runtime::leave_temple(lobby, account, session) {
+            Ok(packet) => super::send_response(sock, peer, &None, &packet, "TEMPLE_TOWN").await,
+            Err(error) => tracing::error!(%error, "temple town exit failed"),
+        }
+        return;
+    }
     let result = destination(lobby, session, false);
     let position = match result {
         Ok(p) => p,
@@ -135,6 +147,14 @@ pub(crate) async fn respawn(
     p: &[u8],
 ) {
     if !s.entered || s.skills.hp != 0 || p != [0x12, 1] {
+        return;
+    }
+    if s.position.zone == crate::events::TEMPLE_ZONE {
+        // Temple deaths revive in Moradon without experience loss.
+        match crate::event_runtime::leave_temple(lobby, account, s) {
+            Ok(packet) => super::send_response(sock, peer, &None, &packet, "TEMPLE_RESPAWN").await,
+            Err(error) => tracing::error!(%error, "temple respawn exit failed"),
+        }
         return;
     }
     let Ok(position) = destination(lobby, s, true) else {

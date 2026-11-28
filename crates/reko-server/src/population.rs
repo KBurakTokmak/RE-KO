@@ -31,11 +31,17 @@ fn nearby_packets(lobby: &crate::lobby::Lobby, position: Position) -> Vec<Vec<u8
         .monsters
         .as_ref()
         .map_or_else(Vec::new, |w| w.nearby_spawns(position));
+    // Static NPCs armed by an event are represented by their combat entity.
+    let armed = lobby
+        .monsters
+        .as_ref()
+        .map(|w| w.armed_ids())
+        .unwrap_or_default();
     packets.extend(
         lobby
             .merchants
             .iter()
-            .filter(|n| n.visible_from(position))
+            .filter(|n| !armed.contains(&n.id) && n.visible_from(position))
             .map(|n| n.spawn()),
     );
     packets.sort_unstable_by_key(|p| u16::from_le_bytes([p[2], p[3]]));

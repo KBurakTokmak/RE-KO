@@ -34,6 +34,7 @@ pub(crate) struct Hub {
     pub transfers: HashMap<u16, Position>,
     arena_transfer_predecessors: HashMap<u16, u16>,
     pub loot_rotation: HashMap<u16, usize>,
+    pub events: crate::event_runtime::Shared,
     visible: HashMap<u16, HashSet<u16>>,
     gm_public: HashSet<u16>,
     targets: HashMap<u16, u16>,

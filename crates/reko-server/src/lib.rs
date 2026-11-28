@@ -30,6 +30,8 @@ pub mod crypto;
 pub mod database;
 mod durability;
 mod environment;
+mod event_runtime;
+mod events;
 mod framing;
 mod friendly;
 mod gm_spawn;
@@ -1511,6 +1513,14 @@ async fn tick_character(
         }
         Err(error) => tracing::error!(%error,"suppression return could not be saved"),
     }
+    match event_runtime::session_tick(lobby, account, session) {
+        Ok(packets) => {
+            for p in packets {
+                send_response(sock, peer, &None, &p, "EVENT_SESSION").await;
+            }
+        }
+        Err(error) => tracing::error!(%error,"event zone or reward update failed"),
+    }
     if !session.entered {
         return;
     }
@@ -2073,7 +2083,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     targets.load_ai(&lobby.db.lock().unwrap(), lobby.skills.as_ref())?;
     tokio::spawn(targets.clone().run());
     lobby.monsters = Some(targets);
+    {
+        let db = lobby.db.lock().unwrap();
+        *lobby.events.lock().unwrap() = event_runtime::load(&db)?;
+        lobby.social.lock().unwrap().events.pending = event_runtime::pending_names(&db)?;
+    }
     let lobby = Arc::new(lobby);
+    tokio::spawn(event_runtime::run(lobby.clone()));
     let login_listener = TcpListener::bind(cfg.bind).await?;
     tracing::info!(addr = %cfg.bind, "listening for login client connections");
 

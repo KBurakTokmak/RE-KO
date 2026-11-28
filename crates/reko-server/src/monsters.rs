@@ -29,6 +29,65 @@ pub(crate) struct ExperienceCredit {
     pub total_damage: u64,
 }
 
+/// Owner of an event-managed world entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum EventTag {
+    Temple,
+    War,
+    Siege,
+}
+
+/// Who may damage an event entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Restriction {
+    /// Players of this nation cannot damage it (own war NPCs and monuments).
+    Nation(u8),
+    /// Only clan members outside the owning clan may damage it.
+    Clan { owner: u16 },
+}
+
+/// An event entity died or a monument changed hands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EventDeath {
+    pub tag: EventTag,
+    pub id: u16,
+    pub prototype: u16,
+    /// Entity nation before the death or capture.
+    pub nation: u8,
+    pub killer: Option<String>,
+    pub captured_by: Option<u8>,
+    /// Nation and clan of the last permitted attacker.
+    pub attacker: Option<(u8, u16)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EventMark {
+    tag: Option<EventTag>,
+    restriction: Option<Restriction>,
+    /// Monuments change nation instead of dying.
+    capture: bool,
+    /// Temporary ID: removed and reusable after death.
+    summoned: bool,
+    dead_since: u64,
+    /// Nation and clan of the last permitted attacker, kept for kill credit
+    /// when the killer has since gone offline.
+    last_attacker: Option<(u8, u16)>,
+}
+
+/// Dead temporary entities keep their ID this long so every client has
+/// processed the death before the ID is reused.
+const SUMMON_ID_REUSE_MS: u64 = 10_000;
+
+fn permits(restriction: Option<Restriction>, attacker: Option<(u8, u16)>) -> bool {
+    match restriction {
+        None => true,
+        Some(Restriction::Nation(nation)) => attacker.is_some_and(|(n, _)| n != nation),
+        Some(Restriction::Clan { owner }) => {
+            attacker.is_some_and(|(_, clan)| clan != 0 && clan != owner)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +614,7 @@ mod tests {
             damage_by: HashMap::new(),
             role: Role::Monster,
             guarded: false,
+            event: EventMark::default(),
         };
         let packet = mob.spawn();
         assert_eq!(packet.len(), 48);
@@ -576,6 +636,9 @@ mod tests {
             suppression: Mutex::new(crate::suppression::Rooms::default()),
             quest_kills: Mutex::new(HashMap::new()),
             experience: Mutex::new(HashMap::new()),
+            event_deaths: Mutex::new(Vec::new()),
+            armed: Mutex::new(std::collections::HashSet::new()),
+            restricted: std::sync::atomic::AtomicUsize::new(0),
         };
         let attack = || Attack {
             position: Position {
@@ -857,6 +920,7 @@ struct Mob {
     role: Role,
     /// A guard damaged this monster: its death rewards nobody until it respawns.
     guarded: bool,
+    event: EventMark,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -894,6 +958,7 @@ impl Mob {
             damage_by: HashMap::new(),
             role,
             guarded: false,
+            event: EventMark::default(),
         }
     }
     /// Players may attack, debuff, heal-target or otherwise affect this entity.
@@ -996,6 +1061,11 @@ pub(crate) struct World {
     pub loot: Option<std::sync::Arc<crate::loot::Book>>,
     inner: Mutex<Inner>,
     pub events: tokio::sync::broadcast::Sender<Event>,
+    event_deaths: Mutex<Vec<EventDeath>>,
+    /// Static NPC IDs temporarily replaced by combat entities.
+    armed: Mutex<std::collections::HashSet<u16>>,
+    /// Count of restricted or capturable entities; zero skips attacker lookups.
+    restricted: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -1106,10 +1176,14 @@ impl World {
         owner: &str,
         pay: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<(), &'static str> {
+        let attacker = self.attacker(Some(owner));
         let mut inner = self.inner.lock().unwrap();
         let mob = inner.mobs.get_mut(&id).ok_or("Unknown combat target.")?;
         if mob.position.zone != position.zone || mob.hp == 0 || !mob.player_targetable() {
             return Err("The target is unavailable.");
+        }
+        if !permits(mob.event.restriction, attacker) {
+            return Err("You cannot attack this target.");
         }
         if f32::from(mob.position.x.abs_diff(position.x))
             .hypot(f32::from(mob.position.z.abs_diff(position.z)))
@@ -1257,6 +1331,7 @@ impl World {
                     damage_by: HashMap::new(),
                     role: Role::Monster,
                     guarded: false,
+                    event: EventMark::default(),
                 },
             );
         }
@@ -1282,22 +1357,41 @@ impl World {
                 rng: skills::now_ms().max(1),
             }),
             events: tokio::sync::broadcast::channel(256).0,
+            event_deaths: Mutex::new(Vec::new()),
+            armed: Mutex::new(std::collections::HashSet::new()),
+            restricted: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     pub(crate) fn summon(
         &self,
-        mut s: crate::population::Spawn,
+        s: crate::population::Spawn,
         reserved: &std::collections::HashSet<u16>,
     ) -> anyhow::Result<u16> {
-        anyhow::ensure!(
-            self.appearances.contains(&u32::from(s.appearance)),
-            "This monster's model is absent from the original1453 client."
-        );
-        anyhow::ensure!(
-            self.radii.monsters.contains_key(&s.appearance),
-            "This monster's original character assets are missing or unsupported."
-        );
+        self.summon_with(s, reserved, None, None, true)
+    }
+
+    /// One-life temporary entity. Its ID returns to the pool shortly after death
+    /// or when its event despawns it. `model_checked` is false only for map
+    /// objects whose look comes from the zone file instead of NPC_Looks.
+    pub(crate) fn summon_with(
+        &self,
+        mut s: crate::population::Spawn,
+        reserved: &std::collections::HashSet<u16>,
+        tag: Option<EventTag>,
+        restriction: Option<Restriction>,
+        model_checked: bool,
+    ) -> anyhow::Result<u16> {
+        if model_checked {
+            anyhow::ensure!(
+                self.appearances.contains(&u32::from(s.appearance)),
+                "This monster's model is absent from the original1453 client."
+            );
+            anyhow::ensure!(
+                self.radii.monsters.contains_key(&s.appearance),
+                "This monster's original character assets are missing or unsupported."
+            );
+        }
         anyhow::ensure!(
             s.hp > 0
                 && s.size > 0
@@ -1308,23 +1402,184 @@ impl World {
         let mut inner = self.inner.lock().unwrap();
         let id = (30000..=32767)
             .find(|id| !reserved.contains(id) && !inner.mobs.contains_key(id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Temporary monster IDs exhausted; restart the server to clear summons."
-                )
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("Temporary monster IDs are all in use."))?;
         s.id = id;
         s.regen_type = 1;
-        let mob = Mob::from_spawn(s, Role::Monster);
+        let mut mob = Mob::from_spawn(s, Role::Monster);
+        mob.event = EventMark {
+            tag,
+            restriction,
+            summoned: true,
+            ..EventMark::default()
+        };
         let event = Event {
             personal_hp: Vec::new(),
             zone: mob.position.zone,
             packet: mob.spawn(),
         };
         inner.mobs.insert(id, mob);
+        self.recount(&inner);
         drop(inner);
         let _ = self.events.send(event);
         Ok(id)
+    }
+
+    fn recount(&self, inner: &Inner) {
+        let count = inner
+            .mobs
+            .values()
+            .filter(|m| m.event.restriction.is_some() || m.event.capture)
+            .count();
+        self.restricted
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Nation and clan of a named attacker, only while restricted entities exist.
+    fn attacker(&self, owner: Option<&str>) -> Option<(u8, u16)> {
+        if self.restricted.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let hub = self.social.as_ref()?.lock().unwrap();
+        let id = hub.named(owner?)?;
+        let s = &hub.players[&id].s;
+        Some((s.character.nation(), s.clan.id))
+    }
+
+    /// Turns static NPCs into one-life combat entities with their existing IDs.
+    /// Returns the armed IDs with their nation.
+    pub(crate) fn arm(
+        &self,
+        spawns: Vec<crate::population::Spawn>,
+        tag: EventTag,
+        capture: bool,
+    ) -> Vec<(u16, u8)> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut armed = self.armed.lock().unwrap();
+        let mut result = Vec::new();
+        for mut s in spawns {
+            if inner.mobs.contains_key(&s.id) {
+                continue;
+            }
+            s.regen_type = 1;
+            let nation = s.nation;
+            let mut mob = Mob::from_spawn(s, Role::Monster);
+            mob.event = EventMark {
+                tag: Some(tag),
+                restriction: matches!(nation, 1 | 2).then_some(Restriction::Nation(nation)),
+                capture,
+                ..EventMark::default()
+            };
+            armed.insert(mob.id);
+            result.push((mob.id, nation));
+            inner.mobs.insert(mob.id, mob);
+        }
+        drop(armed);
+        self.recount(&inner);
+        result
+    }
+
+    /// Removes every entity of an event. Temporary entities leave client view;
+    /// armed static NPCs revert to their static entries.
+    pub(crate) fn despawn_event(&self, tag: EventTag) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let ids: Vec<u16> = inner
+            .mobs
+            .values()
+            .filter(|m| m.event.tag == Some(tag))
+            .map(|m| m.id)
+            .collect();
+        let mut events = Vec::new();
+        let mut armed = self.armed.lock().unwrap();
+        let mut ai = self.ai.lock().unwrap();
+        for id in &ids {
+            let mob = inner.mobs.remove(id).unwrap();
+            armed.remove(id);
+            ai.forget_mob(*id);
+            if mob.event.summoned {
+                let mut out = vec![0x0a, 2];
+                out.extend(id.to_le_bytes());
+                events.push(Event {
+                    personal_hp: Vec::new(),
+                    zone: mob.position.zone,
+                    packet: out,
+                });
+            }
+        }
+        drop(ai);
+        drop(armed);
+        self.recount(&inner);
+        drop(inner);
+        for event in events {
+            let _ = self.events.send(event);
+        }
+        ids.len()
+    }
+
+    pub(crate) fn event_alive(&self, tag: EventTag) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .mobs
+            .values()
+            .filter(|m| m.event.tag == Some(tag) && m.hp > 0)
+            .count()
+    }
+
+    pub(crate) fn take_event_deaths(&self) -> Vec<EventDeath> {
+        std::mem::take(&mut *self.event_deaths.lock().unwrap())
+    }
+
+    /// Static NPC IDs currently replaced by combat entities.
+    pub(crate) fn armed_ids(&self) -> std::collections::HashSet<u16> {
+        self.armed.lock().unwrap().clone()
+    }
+
+    /// A monument changes nation and look instead of dying. Without a known
+    /// capturing nation it is restored unchanged; it never stays dead.
+    fn capture(&self, mob: &mut Mob, killer: Option<&String>) -> Vec<Event> {
+        let online = killer.and_then(|name| {
+            let hub = self.social.as_ref()?.lock().unwrap();
+            let id = hub.named(name)?;
+            Some(hub.players[&id].s.character.nation())
+        });
+        let nation = online
+            .or(mob.event.last_attacker.map(|(nation, _)| nation))
+            .filter(|n| matches!(n, 1 | 2));
+        mob.hp = mob.max_hp;
+        mob.respawn = 0;
+        mob.damage_by.clear();
+        mob.dots.clear();
+        if let (Some(nation), Some(tag), Some(definition)) =
+            (nation, mob.event.tag, mob.definition.as_mut())
+        {
+            let before = definition.nation;
+            definition.nation = nation;
+            mob.resource = if nation == 1 { 14003 } else { 14004 };
+            mob.event.restriction = Some(Restriction::Nation(nation));
+            self.event_deaths.lock().unwrap().push(EventDeath {
+                tag,
+                id: mob.id,
+                prototype: definition.prototype,
+                nation: before,
+                killer: killer.cloned(),
+                captured_by: Some(nation),
+                attacker: mob.event.last_attacker,
+            });
+        }
+        let mut out = vec![0x0a, 2];
+        out.extend(mob.id.to_le_bytes());
+        vec![
+            Event {
+                personal_hp: Vec::new(),
+                zone: mob.position.zone,
+                packet: out,
+            },
+            Event {
+                personal_hp: Vec::new(),
+                zone: mob.position.zone,
+                packet: mob.spawn(),
+            },
+        ]
     }
 
     pub fn load_population(&self, db: &rusqlite::Connection, game: &Path) -> anyhow::Result<()> {
@@ -1559,6 +1814,7 @@ impl World {
             penetrate,
             magic,
         } = attack;
+        let attacker = self.attacker(owner);
         let mut inner = self.inner.lock().unwrap();
         inner.rng ^= inner.rng << 13;
         inner.rng ^= inner.rng >> 7;
@@ -1567,6 +1823,12 @@ impl World {
         let mob = inner.mobs.get_mut(&id).ok_or("Unknown combat target.")?;
         if mob.position.zone != position.zone || mob.hp == 0 || !mob.player_targetable() {
             return Err("The target is unavailable.");
+        }
+        if !permits(mob.event.restriction, attacker) {
+            return Err("You cannot attack this target.");
+        }
+        if mob.event.tag.is_some() && attacker.is_some() {
+            mob.event.last_attacker = attacker;
         }
         let position = motion.map_or(position, |m| {
             m.combat_position(position, mob.position, std::time::Instant::now())
@@ -1700,6 +1962,27 @@ impl World {
     /// strikes. The caller has already scheduled any natural-boss timer and set
     /// `hp` to zero. Returns the death, gate-out and loot packets in order.
     fn finish_death(&self, mob: &mut Mob, now: u64, natural_boss: bool) -> Vec<Event> {
+        mob.event.dead_since = now;
+        if let Some(tag) = mob.event.tag {
+            let killer = mob
+                .damage_by
+                .iter()
+                .max_by_key(|(_, damage)| **damage)
+                .map(|(name, _)| name.clone());
+            if mob.event.capture {
+                let events = self.capture(mob, killer.as_ref());
+                return events;
+            }
+            self.event_deaths.lock().unwrap().push(EventDeath {
+                tag,
+                id: mob.id,
+                prototype: mob.definition.as_ref().map_or(0, |s| s.prototype),
+                nation: mob.definition.as_ref().map_or(0, |s| s.nation),
+                killer,
+                captured_by: None,
+                attacker: mob.event.last_attacker,
+            });
+        }
         mob.respawn = if natural_boss {
             u64::MAX
         } else {
@@ -2040,6 +2323,32 @@ impl World {
             ai.take_guard_strikes()
         };
         events.extend(self.apply_guard_strikes(&mut inner, strikes, now));
+        let expired: Vec<u16> = inner
+            .mobs
+            .values()
+            .filter(|m| {
+                m.event.summoned
+                    && m.hp == 0
+                    && now >= m.event.dead_since.saturating_add(SUMMON_ID_REUSE_MS)
+            })
+            .map(|m| m.id)
+            .collect();
+        if !expired.is_empty() {
+            let mut ai = self.ai.lock().unwrap();
+            for id in expired {
+                let mob = inner.mobs.remove(&id).unwrap();
+                ai.forget_mob(id);
+                let mut out = vec![0x0a, 2];
+                out.extend(id.to_le_bytes());
+                events.push(Event {
+                    personal_hp: Vec::new(),
+                    zone: mob.position.zone,
+                    packet: out,
+                });
+            }
+            drop(ai);
+            self.recount(&inner);
+        }
         events
     }
 
